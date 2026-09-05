@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "machines": {
+      "command": "node",
+      "args": ["./dist/mcp/server.js"],
+      "cwd": ".",
+      "enabled": true,
+      "default_tools_approval_mode": "approve",
+      "startup_timeout_sec": 20
+    }
+  }
+}

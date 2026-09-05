@@ -1,0 +1,16 @@
+import type { MachinePrimitives } from "machines";
+
+export const description = "Runs the global shared discovery fixture.";
+
+export default function globalShared({ final, machine, operation }: MachinePrimitives) {
+  return machine({
+    initial: "run",
+    states: {
+      run: operation(() => {
+        console.log("scope: global");
+        return { type: "completed" };
+      }, { completed: "done" }),
+      done: final(),
+    },
+  });
+}

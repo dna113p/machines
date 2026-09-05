@@ -1,0 +1,28 @@
+{
+  "name": "machines",
+  "version": "0.1.0",
+  "description": "Discover, start, inspect, and respond to local Machines from Codex.",
+  "author": {
+    "name": "Machines contributors"
+  },
+  "interface": {
+    "displayName": "Machines",
+    "shortDescription": "Run reusable local workflows.",
+    "longDescription": "Discover and start asynchronous Machines, follow their live state, and answer Human states directly from Codex.",
+    "developerName": "Machines contributors",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Workflow discovery",
+      "Asynchronous runs",
+      "Interactive status"
+    ],
+    "defaultPrompt": [
+      "Show me the Machines available here.",
+      "Use the best Machine for this task."
+    ],
+    "brandColor": "#3D9B88"
+  },
+  "license": "MIT",
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json"
+}
