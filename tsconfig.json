@@ -10,10 +10,10 @@
     "noUncheckedIndexedAccess": true,
     "target": "ES2024",
     "paths": {
-      "machines": ["./src/index.ts"],
-      "machines/acp": ["./src/acp.ts"],
-      "machines/launcher": ["./src/launcher.ts"],
-      "machines/mcp": ["./mcp/server.ts"]
+      "@dna113p/machines": ["./src/index.ts"],
+      "@dna113p/machines/acp": ["./src/acp.ts"],
+      "@dna113p/machines/launcher": ["./src/launcher.ts"],
+      "@dna113p/machines/mcp": ["./mcp/server.ts"]
     },
     "types": ["node"]
   },

@@ -18,18 +18,20 @@ try {
     cwd: root, encoding: "utf8",
   }));
   assert.ok(packed[0].files.some(({ path }) => path === "dist/src/index.d.ts"));
+  assert.equal(packed[0].name, "@dna113p/machines");
   assert.ok(packed[0].files.every(({ path }) => !path.startsWith("src/") && !path.startsWith("tests/")));
+  assert.ok(packed[0].files.every(({ path }) => !path.startsWith("docs/history/") && path !== "AGENTS.md"));
   await writeFile(join(temporary, "package.json"), '{"private":true,"type":"module"}\n');
   execFileSync(npm, ["install", "--ignore-scripts", "--no-audit", "--no-fund", join(temporary, packed[0].filename)], {
     cwd: temporary, stdio: "inherit",
   });
   const code = `
     import assert from "node:assert/strict";
-    import { machine, operation, final, run } from "machines";
-    import { acpAgent } from "machines/acp";
-    import { listMachines } from "machines/launcher";
-    import { createMachinesMcpServer } from "machines/mcp";
-    import extension from "machines/pi-extension";
+    import { machine, operation, final, run } from "@dna113p/machines";
+    import { acpAgent } from "@dna113p/machines/acp";
+    import { listMachines } from "@dna113p/machines/launcher";
+    import { createMachinesMcpServer } from "@dna113p/machines/mcp";
+    import extension from "@dna113p/machines/pi-extension";
     assert.equal(typeof acpAgent, "function");
     assert.equal(typeof listMachines, "function");
     assert.equal(typeof createMachinesMcpServer, "function");
@@ -41,20 +43,23 @@ try {
   `;
   await writeFile(join(temporary, "consumer.mjs"), code);
   execFileSync(process.execPath, ["consumer.mjs"], { cwd: temporary, stdio: "inherit", env: childEnvironment });
-  const installed = join(temporary, "node_modules/machines");
+  const installed = join(temporary, "node_modules/@dna113p/machines");
   const metadata = JSON.parse(await readFile(join(installed, "package.json"), "utf8"));
-  const cli = execFileSync(process.execPath, [join(installed, metadata.bin.machine), "list"], {
-    cwd: temporary, encoding: "utf8", env: childEnvironment,
-  });
-  assert.equal(typeof cli, "string");
+  assert.equal(metadata.bin.machine, "./dist/src/cli.js");
+  for (const command of ["machine", "@dna113p/machines"]) {
+    const cli = execFileSync(npm, ["exec", "--offline", "--", command, "list"], {
+      cwd: temporary, encoding: "utf8", env: childEnvironment,
+    });
+    assert.equal(typeof cli, "string");
+  }
   await writeFile(join(temporary, "consumer.mts"), `
-    import { machine, operation, final, type MachinePrimitives } from "machines";
+    import { machine, operation, final, type MachinePrimitives } from "@dna113p/machines";
     const make = ({ machine, operation, final }: MachinePrimitives) => machine({
       initial: "work", states: {
         work: operation(() => ({ type: "completed" }), { completed: "done" }), done: final(),
       },
     });
-    make(await import("machines"));
+    make(await import("@dna113p/machines"));
   `);
   execFileSync(process.execPath, [
     join(root, "node_modules/typescript/bin/tsc"), "--noEmit", "--strict",
@@ -68,7 +73,7 @@ try {
     import assert from "node:assert/strict";
     import { setTimeout } from "node:timers/promises";
     import { resolve } from "node:path";
-    import extension from "machines/pi-extension";
+    import extension from "@dna113p/machines/pi-extension";
     const tools = new Map();
     let shutdown;
     extension({ registerTool: (tool) => tools.set(tool.name, tool), on: (_event, handler) => { shutdown = handler; } });

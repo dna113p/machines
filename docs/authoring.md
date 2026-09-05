@@ -7,7 +7,7 @@ The [README quickstart](../README.md#run-your-own-workflows) is a complete minim
 definition. Export a non-empty, one-line `description` and a default factory:
 
 ```ts
-import type { MachinePrimitives } from "machines";
+import type { MachinePrimitives } from "@dna113p/machines";
 
 export const description = "Prints a supplied message after a Human confirms it.";
 
@@ -64,7 +64,7 @@ keys; piped input stays plain text.
 Here is a complete Agent/Human feedback loop. Save as `.machines/review-task.ts`:
 
 ```ts
-import type { Event, MachinePrimitives } from "machines";
+import type { Event, MachinePrimitives } from "@dna113p/machines";
 
 export const description = "Implements a task and revises it until the Human approves.";
 export const agentRoles = { implementer: "Implements the task and review feedback" };
@@ -125,7 +125,7 @@ Supply feedback once, then `approve`, to exercise both transitions.
 To use a real ACP harness, replace the preset with:
 
 ```ts
-export default ({ acpAgent }: { acpAgent: typeof import("machines/acp").acpAgent }) => ({
+export default ({ acpAgent }: { acpAgent: typeof import("@dna113p/machines/acp").acpAgent }) => ({
   implementer: {
     description: "Uses the locally configured Pi Agent to implement changes",
     harness: "pi-acp",
@@ -171,7 +171,7 @@ A `HumanRunner` receives the prompt, suggestions, or choices and returns a strin
 For example, exercise the feedback loop in an installed project:
 
 ```ts
-import { prepareMachineRun } from "machines/launcher";
+import { prepareMachineRun } from "@dna113p/machines/launcher";
 
 const answers = ["Please revise", "approve"];
 const prepared = await prepareMachineRun({

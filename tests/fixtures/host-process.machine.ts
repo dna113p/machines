@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { writeFile } from "node:fs/promises";
-import type { MachinePrimitives } from "machines";
+import type { MachinePrimitives } from "@dna113p/machines";
 
 export const description = "Spawns an owned subprocess for host lifecycle tests.";
 

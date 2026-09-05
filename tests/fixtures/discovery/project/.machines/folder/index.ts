@@ -1,4 +1,4 @@
-import type { MachinePrimitives } from "machines";
+import type { MachinePrimitives } from "@dna113p/machines";
 
 import { message } from "./message.ts";
 

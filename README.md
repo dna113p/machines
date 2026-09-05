@@ -69,7 +69,7 @@ Run it with `node demo.ts`. No build is needed to develop against the source.
 Save this as `.machines/hello.ts` in your project:
 
 ```ts
-import type { MachinePrimitives } from "machines";
+import type { MachinePrimitives } from "@dna113p/machines";
 
 export const description = "Prints the supplied message without an Agent.";
 
@@ -99,7 +99,7 @@ From the checkout, run:
 ```
 
 The command reports the Machine path and state progress, then prints `--> done`.
-In another project, use the checkout's absolute `machine` path or install the local
+In another project, use the checkout's absolute `machine` path or install the npm
 package below. The `MachinePrimitives` import is type-only; executing this definition
 uses the primitives supplied by the launcher.
 
@@ -112,25 +112,40 @@ diagnostics; other valid Machines remain usable.
 Read [Authoring Machines](docs/authoring.md) for Human input, Agent roles and
 presets, feedback loops, and the programmatic launcher.
 
-## Install locally
+## Install from npm
 
-This repository is prepared for distribution but has not been published to npm.
-Build a local package from any checkout location:
+Install the package in your project:
+
+```bash
+npm install @dna113p/machines
+npx machine list
+```
+
+Or run the CLI without adding a project dependency:
+
+```bash
+npx @dna113p/machines list
+```
+
+The command is still named `machine`. For a global installation, run
+`npm install --global @dna113p/machines`, then use `machine list` or `machine run`.
+
+To install a build from a checkout instead:
 
 ```bash
 npm ci
 npm pack
 ```
 
-Then install the generated `machines-0.1.0.tgz` into a project:
+Then install the generated `dna113p-machines-0.1.0.tgz` into a project:
 
 ```bash
-npm install /absolute/path/to/machines/machines-0.1.0.tgz
+npm install /absolute/path/to/machines/dna113p-machines-0.1.0.tgz
 npx machine list
 ```
 
 The package contains JavaScript and TypeScript declarations. Application code can
-import `{ machine, agent, human, operation, final, run }` from `"machines"`.
+import `{ machine, agent, human, operation, final, run }` from `"@dna113p/machines"`.
 Workflow definitions remain ordinary TypeScript outside `node_modules`.
 
 For **Codex MCP**, **the portable Codex plugin**, or **the Pi extension**, follow

@@ -1,4 +1,4 @@
-import type { AgentRunner } from "machines";
+import type { AgentRunner } from "@dna113p/machines";
 
 const runner: AgentRunner = (_request, report) => {
   report?.({

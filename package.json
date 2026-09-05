@@ -1,9 +1,16 @@
 {
-  "name": "machines",
+  "name": "@dna113p/machines",
   "version": "0.1.0",
   "description": "Reusable workflows coordinating agents, local operations, and human decisions.",
   "license": "MIT",
-  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dna113p/machines.git"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "type": "module",
   "engines": {
     "node": ">=24"
@@ -19,7 +26,7 @@
     "./mcp": { "types": "./dist/mcp/server.d.ts", "import": "./dist/mcp/server.js" },
     "./pi-extension": { "types": "./dist/pi-extension/index.d.ts", "import": "./dist/pi-extension/index.js" }
   },
-  "files": ["dist", "docs", "skills", "AGENTS.md", "LICENSE", "README.md"],
+  "files": ["dist", "docs/architecture.md", "docs/authoring.md", "docs/integrations.md", "skills", "LICENSE", "README.md"],
   "scripts": {
     "build": "node scripts/build.mjs",
     "build:plugin": "npm run build && node scripts/build-plugin.mjs",

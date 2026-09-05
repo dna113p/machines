@@ -106,5 +106,6 @@ has no dependency on the source checkout after copying. Packaging smoke tests
 exercise a real installed tarball and a relocated plugin, including discovery,
 the MCP widget resource, and a hosted Human response.
 
-The earlier implementation plans are retained in [history](history/) for rationale.
+The earlier implementation plans are retained in the repository's
+[history directory](https://github.com/dna113p/machines/tree/main/docs/history) for rationale.
 Their phase ordering and manual proof gates describe past work.

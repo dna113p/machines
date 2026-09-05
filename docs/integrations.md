@@ -110,7 +110,7 @@ Run this from the Machines checkout after `npm ci`. Choose an unused destination
 the command does not replace an existing extension. Pi discovers it on startup;
 use `/reload` after a source update. Keep the checkout available while using the
 symlink. A locally installed npm package also includes the built extension at
-`node_modules/machines/dist/pi-extension/index.js`.
+`node_modules/@dna113p/machines/dist/pi-extension/index.js`.
 
 Pi exposes the same five tools using the conversation's current directory, with
 a status widget and native Human dialogs. Canceling a dialog leaves its Machine
