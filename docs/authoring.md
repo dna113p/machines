@@ -140,7 +140,7 @@ export default ({ acpAgent }: { acpAgent: typeof import("@dna113p/machines/acp")
 Install/configure the selected harness and its model credentials first. `acpAgent`
 accepts any compatible ACP command and argument array; the Pi adapter uses ACP as
 its supported execution path. The former `machines/pi` export has been retired;
-use `acpAgent` from `machines/acp` for Pi execution.
+use `acpAgent` from `@dna113p/machines/acp` for Pi execution.
 
 Global presets live in `~/.machines/agents.ts`; project presets replace matching
 global names. Each preset requires a description and runner. Optional `harness`,
@@ -160,6 +160,45 @@ before starting the actor. `machine list` refreshes metadata on each call and
 reports missing bindings or invalid definitions.
 `ready` describes valid metadata and resolved roles; it does not verify that a
 real harness is installed, authenticated, or able to run the requested model.
+
+### Antigravity (AGY)
+
+The built-in `agy` preset runs the installed Antigravity CLI. Select it for the
+default Agent or a declared named role:
+
+```bash
+machine run my-workflow --agent default=agy -- "Do the task"
+machine run review-task --agent implementer=agy -- "Implement the task"
+```
+
+The runner keeps AGY's permission checks enabled. It does not forward interactive
+permission prompts through Machines. For an unattended workflow that requires
+automatic approval, configure an explicit preset in `.machines/agents.ts`:
+
+```ts
+export default ({ agyAgent }: { agyAgent: typeof import("@dna113p/machines/agy").agyAgent }) => ({
+  "agy-unattended": {
+    description: "Runs AGY with automatic tool approval for trusted workflows",
+    harness: "agy",
+    runner: agyAgent("agy", [], {
+      dangerouslySkipPermissions: true,
+      output: "capture",
+    }),
+  },
+});
+```
+
+Select that preset with `--agent default=agy-unattended`. The option
+`dangerouslySkipPermissions: true` auto-approves all AGY tool permission requests;
+omitting it or setting it to `false` keeps the runner from adding that flag.
+The `example:agy` demonstration explicitly opts in and asks AGY to work in a
+temporary directory.
+
+Runner `model` and `effort` options take precedence over environment settings.
+Otherwise it uses `AGY_MODEL` / `AGY_EFFORT`, falling back to
+`MACHINES_AGENT_MODEL` / `MACHINES_AGENT_EFFORT`. Per-runner `env` values override
+the same variables inherited from the parent process. Effort values are `low`,
+`medium`, or `high`.
 
 ## Programmatic execution and verification
 

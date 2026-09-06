@@ -41,6 +41,8 @@ MCP server ────┘       ↑
 | `src/machine-module.ts` | Shared module contract and metadata validation |
 | `src/catalog.ts` | Definition and preset catalog reads |
 | `src/acp.ts` | ACP process/session protocol, bounded Agent result, normalized activity |
+| `src/agy.ts` | Antigravity CLI (agy) process protocol, bounded Agent result, normalized activity |
+| `src/agent-protocol.ts` | Shared Agent prompt instructions and Machines event decoding |
 | `src/discovery.ts` | Project/global definition locations and precedence |
 | `src/launcher.ts` | Definition metadata, Agent bindings, preflight, single-use launch preparation |
 | `src/discovery-worker.ts` | Fresh metadata imports in disposable workers |

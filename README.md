@@ -63,6 +63,7 @@ Run it with `node demo.ts`. No build is needed to develop against the source.
 | Agent escalation | `npm run example:agents` | Built-in fake runners |
 | Child host and Human response | `npm run example:host` | Node only |
 | Real Agent writes and verifies a file | `npm run example:pi` | Configured Pi through `pi-acp`; may use network and model credits |
+| Real AGY writes and verifies a file | `npm run example:agy` | Configured Antigravity CLI (`agy`); may use network and model credits |
 
 ## Run your own workflows
 
@@ -172,6 +173,11 @@ a harness configuration that can carry out the intended bounded task and put
 workflow decisions in Human states. The launcher defaults unnamed Agents to
 `npx -y pi-acp`; [Agent presets](docs/authoring.md#agent-presets) let you select
 another ACP command or runner explicitly.
+
+The built-in `agy` preset selects the Antigravity CLI with AGY permission checks
+enabled. [AGY configuration](docs/authoring.md#antigravity-agy) explains runner
+settings and explicit opt-in to automatic tool approval. `npm run example:agy`
+opts in for its temporary-directory demonstration.
 
 ## Checks
 

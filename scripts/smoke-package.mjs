@@ -29,10 +29,12 @@ try {
     import assert from "node:assert/strict";
     import { machine, operation, final, run } from "@dna113p/machines";
     import { acpAgent } from "@dna113p/machines/acp";
+    import { agyAgent } from "@dna113p/machines/agy";
     import { listMachines } from "@dna113p/machines/launcher";
     import { createMachinesMcpServer } from "@dna113p/machines/mcp";
     import extension from "@dna113p/machines/pi-extension";
     assert.equal(typeof acpAgent, "function");
+    assert.equal(typeof agyAgent, "function");
     assert.equal(typeof listMachines, "function");
     assert.equal(typeof createMachinesMcpServer, "function");
     assert.equal(typeof extension, "function");

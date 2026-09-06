@@ -1,5 +1,6 @@
 import { loadAgentBindings, type AgentPreset } from "./agent-bindings.ts";
 import { acpAgent } from "./acp.ts";
+import { agyAgent } from "./agy.ts";
 import { discoverMachines, machinesUserHome } from "./discovery.ts";
 import type { AgentRunner } from "./index.ts";
 import { loadMachineModule, readAgentRoles, requireMachineDescription } from "./machine-module.ts";
@@ -87,22 +88,31 @@ export async function configuredAgentPresets(
   cwd: string,
   home: string,
 ): Promise<ResolvedAgentPresets> {
-  const configured = await loadAgentBindings(cwd, home, { acpAgent });
+  const configured = await loadAgentBindings(cwd, home, { acpAgent, agyAgent });
   const defaultRunner = acpAgent("npx", ["-y", "pi-acp"], {
     harness: "pi-acp",
     output: "capture",
   });
+  const agyRunner = agyAgent("agy", [], {
+    harness: "agy",
+    output: "capture",
+  });
   return {
-    agents: { default: defaultRunner, ...configured.agents },
+    agents: { default: defaultRunner, agy: agyRunner, ...configured.agents },
     presets: {
       default: {
         description: "Runs the current Pi Agent through ACP",
         harness: "pi-acp",
         runner: defaultRunner,
       },
+      agy: {
+        description: "Runs the Antigravity CLI (agy)",
+        harness: "agy",
+        runner: agyRunner,
+      },
       ...configured.presets,
     },
-    sources: { default: "built in", ...configured.sources },
+    sources: { default: "built in", agy: "built in", ...configured.sources },
   };
 }
 

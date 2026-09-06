@@ -2,6 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { Readable, Writable } from "node:stream";
 
 import * as acp from "@agentclientprotocol/sdk";
+import { agentPrompt, readAgentEvent } from "./agent-protocol.ts";
 
 import type {
   AgentReporter,
@@ -157,7 +158,7 @@ async function runSession(
         throw new Error(`ACP Agent stopped with "${result.stopReason}"`);
       }
 
-      return returnedEvent(output, outputMode === "capture");
+      return readAgentEvent(output, { adapter: "ACP", includeMessage: outputMode === "capture" });
     });
 }
 
@@ -185,52 +186,6 @@ function identityUpdate(
       ...(model === undefined ? {} : { model }),
       ...(thinking === undefined ? {} : { thinking }),
     };
-}
-
-function agentPrompt(request: AgentRequest): string {
-  return [
-    request.prompt,
-    "",
-    "Complete the work using the available tools.",
-    `Allowed outcome types: ${request.outcomes.join(", ")}.`,
-    "When finished, end your final response with exactly one line in this form:",
-    'MACHINES_EVENT {"type":"completed"}',
-    "Replace completed with exactly one allowed outcome type.",
-    "Include additional JSON fields only when the task asks for them.",
-  ].join("\n");
-}
-
-function returnedEvent(output: string, includeMessage: boolean): Event {
-  const matches = [...output.matchAll(/^MACHINES_EVENT (.+)$/gmu)];
-  const encoded = matches.at(-1)?.[1];
-  if (encoded === undefined) {
-    throw new Error("ACP Agent finished without returning a Machines event");
-  }
-
-  let event: unknown;
-  try {
-    event = JSON.parse(encoded);
-  } catch (cause) {
-    throw new Error("ACP Agent returned invalid event JSON", { cause });
-  }
-
-  if (
-    event === null
-    || typeof event !== "object"
-    || !("type" in event)
-    || typeof event.type !== "string"
-  ) {
-    throw new Error("ACP Agent returned an invalid Machines event");
-  }
-
-  const result = event as Event;
-  const message = output
-    .replace(/^MACHINES_EVENT .+$(?:\r?\n)?/gmu, "")
-    .trim();
-
-  return includeMessage && message !== ""
-    ? { ...result, message }
-    : result;
 }
 
 function waitForSpawn(child: ChildProcessWithoutNullStreams): Promise<void> {
