@@ -45,7 +45,7 @@ jobs:
       - run: npm run build:plugin
       - run: npm run smoke:plugin
       - name: Check publication contents
-        run: npm publish --dry-run
+        run: npm publish --dry-run --offline
       - name: Publish release
         if: github.event_name == 'push' && github.ref_type == 'tag'
         run: npm publish
