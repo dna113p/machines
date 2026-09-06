@@ -189,4 +189,21 @@ npm run build:plugin
 npm run smoke:plugin   # exercise a relocated standalone plugin
 ```
 
+## Releasing
+
+The [publishing workflow](.github/workflows/publish.yml) uses a standard GitHub
+runner and npm trusted publishing, without an npm token stored in GitHub.
+Pushing a `vX.Y.Z` tag runs the checks above and publishes to npm if they pass.
+The tag must match the stable version in `package.json`.
+
+For example, to release the next minor version from an up-to-date, clean `main`:
+
+```bash
+npm version minor
+git push origin main --follow-tags
+```
+
+Running **Publish to npm** manually in GitHub Actions performs the checks and a
+publishing dry run; it does not publish a package.
+
 Licensed under the [MIT License](LICENSE).
