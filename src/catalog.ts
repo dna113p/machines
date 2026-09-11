@@ -1,6 +1,7 @@
 import { loadAgentBindings, type AgentPreset } from "./agent-bindings.ts";
 import { acpAgent } from "./acp.ts";
 import { agyAgent } from "./agy.ts";
+import { codexAgent } from "./codex.ts";
 import { discoverMachines, machinesUserHome } from "./discovery.ts";
 import type { AgentRunner } from "./index.ts";
 import { loadMachineModule, readAgentRoles, requireMachineDescription } from "./machine-module.ts";
@@ -88,7 +89,7 @@ export async function configuredAgentPresets(
   cwd: string,
   home: string,
 ): Promise<ResolvedAgentPresets> {
-  const configured = await loadAgentBindings(cwd, home, { acpAgent, agyAgent });
+  const configured = await loadAgentBindings(cwd, home, { acpAgent, agyAgent, codexAgent });
   const defaultRunner = acpAgent("npx", ["-y", "pi-acp"], {
     harness: "pi-acp",
     output: "capture",
@@ -97,8 +98,9 @@ export async function configuredAgentPresets(
     harness: "agy",
     output: "capture",
   });
+  const codexRunner = codexAgent("codex", [], { output: "capture" });
   return {
-    agents: { default: defaultRunner, agy: agyRunner, ...configured.agents },
+    agents: { default: defaultRunner, agy: agyRunner, codex: codexRunner, ...configured.agents },
     presets: {
       default: {
         description: "Runs the current Pi Agent through ACP",
@@ -110,9 +112,14 @@ export async function configuredAgentPresets(
         harness: "agy",
         runner: agyRunner,
       },
+      codex: {
+        description: "Runs the Codex CLI in a read-only sandbox",
+        harness: "codex",
+        runner: codexRunner,
+      },
       ...configured.presets,
     },
-    sources: { default: "built in", agy: "built in", ...configured.sources },
+    sources: { default: "built in", agy: "built in", codex: "built in", ...configured.sources },
   };
 }
 

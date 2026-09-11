@@ -23,6 +23,7 @@
     ".": { "types": "./dist/src/index.d.ts", "import": "./dist/src/index.js" },
     "./acp": { "types": "./dist/src/acp.d.ts", "import": "./dist/src/acp.js" },
     "./agy": { "types": "./dist/src/agy.d.ts", "import": "./dist/src/agy.js" },
+    "./codex": { "types": "./dist/src/codex.d.ts", "import": "./dist/src/codex.js" },
     "./launcher": { "types": "./dist/src/launcher.d.ts", "import": "./dist/src/launcher.js" },
     "./mcp": { "types": "./dist/mcp/server.d.ts", "import": "./dist/mcp/server.js" },
     "./pi-extension": { "types": "./dist/pi-extension/index.d.ts", "import": "./dist/pi-extension/index.js" }
@@ -35,6 +36,7 @@
     "example": "node examples/operation.ts",
     "example:agents": "node examples/named-agents.ts",
     "example:agy": "node examples/agy.ts",
+    "example:codex": "node examples/codex.ts",
     "example:host": "node examples/host.ts",
     "example:pi": "node examples/pi.ts",
     "mcp": "node mcp/server.ts",

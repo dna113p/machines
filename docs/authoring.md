@@ -200,6 +200,64 @@ Otherwise it uses `AGY_MODEL` / `AGY_EFFORT`, falling back to
 the same variables inherited from the parent process. Effort values are `low`,
 `medium`, or `high`.
 
+### Codex
+
+The built-in `codex` preset runs the installed Codex CLI using its existing login
+and configuration. Install Codex and run `codex login` first. Select the preset:
+
+```bash
+machine run my-workflow --agent default=codex -- "Review the code"
+machine run review-task --agent implementer=codex-write -- "Implement the task"
+```
+
+The built-in preset explicitly uses a read-only sandbox. For a workflow that
+changes files, define `codex-write` in `.machines/agents.ts`:
+
+```ts
+export default ({ codexAgent }: { codexAgent: typeof import("@dna113p/machines/codex").codexAgent }) => ({
+  "codex-write": {
+    description: "Runs Codex with permission to edit the workflow workspace",
+    harness: "codex",
+    runner: codexAgent("codex", [], {
+      sandbox: "workspace-write",
+      output: "capture",
+    }),
+  },
+});
+```
+
+Direct callers can import `codexAgent` from `@dna113p/machines/codex`. The runner
+uses `codex exec --json` with a fresh turn for each Agent invocation. It sends the
+prompt through stdin and reads the Machines event from Codex's final-response
+file; earlier progress messages do not determine the outcome. It reports agent
+messages and tool activity without forwarding raw protocol JSON or reasoning.
+Temporary response files are removed after success or failure.
+
+Options:
+
+- `sandbox`: `read-only` (default), `workspace-write`, or `danger-full-access`.
+  The last choice disables the sandbox. The runner uses approval policy `never`;
+  it cannot forward permission prompts through Machines.
+- `skipGitRepoCheck: true`: explicitly permits a workspace outside a Git repository.
+- `ephemeral`: defaults to `true`, avoiding saved session rollout files. Set it to
+  `false` to let Codex persist the session; this runner does not resume sessions.
+- `model` and `effort`: override `CODEX_MODEL` / `CODEX_EFFORT`, then
+  `MACHINES_AGENT_MODEL` / `MACHINES_AGENT_EFFORT`. The `env` option overrides
+  matching parent variables. With no setting, Codex selects its configured values;
+  effort must be supported by the selected model.
+- `output`: `stream` (default) writes agent messages and stderr to the terminal;
+  `capture` keeps them off the terminal and includes final prose in the event's
+  `message`. Both modes report activity to observers.
+
+Additional command arguments precede `exec`, allowing a custom executable wrapper
+or Codex global options. The runner supplies its own execution, output, sandbox,
+and approval settings. `npm run example:codex` demonstrates file creation with
+`workspace-write` and `skipGitRepoCheck` in a temporary directory.
+
+See the [Codex non-interactive documentation](https://learn.chatgpt.com/docs/non-interactive-mode)
+for installation-independent execution details. Live runner validation used
+Codex CLI `0.153.2`; deterministic tests do not require a Codex installation or login.
+
 ## Programmatic execution and verification
 
 Direct runtime users supply runners through `run(definition, { agents, human })`.
