@@ -1,6 +1,7 @@
 import { loadAgentBindings, type AgentPreset } from "./agent-bindings.ts";
 import { acpAgent } from "./acp.ts";
 import { agyAgent } from "./agy.ts";
+import { deepseekAgent } from "./deepseek.ts";
 import { discoverMachines, machinesUserHome } from "./discovery.ts";
 import type { AgentRunner } from "./index.ts";
 import { loadMachineModule, readAgentRoles, requireMachineDescription } from "./machine-module.ts";
@@ -88,7 +89,7 @@ export async function configuredAgentPresets(
   cwd: string,
   home: string,
 ): Promise<ResolvedAgentPresets> {
-  const configured = await loadAgentBindings(cwd, home, { acpAgent, agyAgent });
+  const configured = await loadAgentBindings(cwd, home, { acpAgent, agyAgent, deepseekAgent });
   const defaultRunner = acpAgent("npx", ["-y", "pi-acp"], {
     harness: "pi-acp",
     output: "capture",
@@ -97,8 +98,9 @@ export async function configuredAgentPresets(
     harness: "agy",
     output: "capture",
   });
+  const deepseekRunner = deepseekAgent("dsh", [], { output: "capture" });
   return {
-    agents: { default: defaultRunner, agy: agyRunner, ...configured.agents },
+    agents: { default: defaultRunner, agy: agyRunner, deepseek: deepseekRunner, ...configured.agents },
     presets: {
       default: {
         description: "Runs the current Pi Agent through ACP",
@@ -110,9 +112,14 @@ export async function configuredAgentPresets(
         harness: "agy",
         runner: agyRunner,
       },
+      deepseek: {
+        description: "Runs DeepSeek Harness (dsh) through ACP",
+        harness: "dsh",
+        runner: deepseekRunner,
+      },
       ...configured.presets,
     },
-    sources: { default: "built in", agy: "built in", ...configured.sources },
+    sources: { default: "built in", agy: "built in", deepseek: "built in", ...configured.sources },
   };
 }
 

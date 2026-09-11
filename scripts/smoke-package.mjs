@@ -22,6 +22,7 @@ try {
   assert.ok(packed[0].files.every(({ path }) => !path.startsWith("src/") && !path.startsWith("tests/")));
   assert.ok(packed[0].files.every(({ path }) => !path.startsWith("docs/history/") && path !== "AGENTS.md"));
   await writeFile(join(temporary, "package.json"), '{"private":true,"type":"module"}\n');
+  await writeFile(join(temporary, "fake-deepseek-agent.mjs"), await readFile(join(root, "tests/fixtures/fake-deepseek-agent.mjs")));
   execFileSync(npm, ["install", "--ignore-scripts", "--no-audit", "--no-fund", join(temporary, packed[0].filename)], {
     cwd: temporary, stdio: "inherit",
   });
@@ -30,11 +31,18 @@ try {
     import { machine, operation, final, run } from "@dna113p/machines";
     import { acpAgent } from "@dna113p/machines/acp";
     import { agyAgent } from "@dna113p/machines/agy";
-    import { listMachines } from "@dna113p/machines/launcher";
+    import { deepseekAgent } from "@dna113p/machines/deepseek";
+    import { listAgentPresets, listMachines } from "@dna113p/machines/launcher";
     import { createMachinesMcpServer } from "@dna113p/machines/mcp";
     import extension from "@dna113p/machines/pi-extension";
     assert.equal(typeof acpAgent, "function");
     assert.equal(typeof agyAgent, "function");
+    assert.equal(typeof deepseekAgent, "function");
+    assert.ok((await listAgentPresets()).some(preset => preset.name === "deepseek" && preset.harness === "dsh"));
+    const deepseekEvent = await deepseekAgent(process.execPath, ["fake-deepseek-agent.mjs", "normal"], { output: "capture" })({
+      prompt: "Do the task", outcomes: ["completed"], cwd: process.cwd(),
+    });
+    assert.equal(deepseekEvent.type, "completed");
     assert.equal(typeof listMachines, "function");
     assert.equal(typeof createMachinesMcpServer, "function");
     assert.equal(typeof extension, "function");
@@ -56,6 +64,9 @@ try {
   }
   await writeFile(join(temporary, "consumer.mts"), `
     import { machine, operation, final, type MachinePrimitives } from "@dna113p/machines";
+    import { deepseekAgent, type DeepSeekAgentOptions } from "@dna113p/machines/deepseek";
+    const deepseekOptions: DeepSeekAgentOptions = { profile: "acp", output: "capture" };
+    deepseekAgent("dsh", [], deepseekOptions);
     const make = ({ machine, operation, final }: MachinePrimitives) => machine({
       initial: "work", states: {
         work: operation(() => ({ type: "completed" }), { completed: "done" }), done: final(),

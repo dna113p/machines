@@ -64,6 +64,7 @@ Run it with `node demo.ts`. No build is needed to develop against the source.
 | Child host and Human response | `npm run example:host` | Node only |
 | Real Agent writes and verifies a file | `npm run example:pi` | Configured Pi through `pi-acp`; may use network and model credits |
 | Real AGY writes and verifies a file | `npm run example:agy` | Configured Antigravity CLI (`agy`); may use network and model credits |
+| Real DeepSeek Harness writes and verifies a file | `npm run example:deepseek` | Installed `dsh` with a configured ACP profile; may use network and model credits |
 
 ## Run your own workflows
 
@@ -178,6 +179,12 @@ The built-in `agy` preset selects the Antigravity CLI with AGY permission checks
 enabled. [AGY configuration](docs/authoring.md#antigravity-agy) explains runner
 settings and explicit opt-in to automatic tool approval. `npm run example:agy`
 opts in for its temporary-directory demonstration.
+
+The built-in `deepseek` preset runs DeepSeek Harness through `dsh --profile acp`,
+reusing the ACP runner and preserving DSH's configured permissions. Select it with
+`machine run my-workflow --agent default=deepseek -- "Do the task"`. See
+[DeepSeek Harness configuration](docs/authoring.md#deepseek-harness-dsh) for setup,
+custom profiles, and configuration overlays.
 
 ## Checks
 
