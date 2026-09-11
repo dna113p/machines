@@ -64,6 +64,7 @@ Run it with `node demo.ts`. No build is needed to develop against the source.
 | Child host and Human response | `npm run example:host` | Node only |
 | Real Agent writes and verifies a file | `npm run example:pi` | Configured Pi through `pi-acp`; may use network and model credits |
 | Real AGY writes and verifies a file | `npm run example:agy` | Configured Antigravity CLI (`agy`); may use network and model credits |
+| Real Codex writes and verifies a file | `npm run example:codex` | Configured Codex CLI; may use network and model credits |
 
 ## Run your own workflows
 
@@ -178,6 +179,10 @@ The built-in `agy` preset selects the Antigravity CLI with AGY permission checks
 enabled. [AGY configuration](docs/authoring.md#antigravity-agy) explains runner
 settings and explicit opt-in to automatic tool approval. `npm run example:agy`
 opts in for its temporary-directory demonstration.
+
+The built-in `codex` preset runs the Codex CLI in a read-only sandbox. See
+[Codex configuration](docs/authoring.md#codex) for a preset that permits workspace
+edits and options for running outside a Git repository.
 
 ## Checks
 
