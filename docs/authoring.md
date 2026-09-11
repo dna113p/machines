@@ -200,6 +200,81 @@ Otherwise it uses `AGY_MODEL` / `AGY_EFFORT`, falling back to
 the same variables inherited from the parent process. Effort values are `low`,
 `medium`, or `high`.
 
+### DeepSeek Harness (DSH)
+
+The built-in `deepseek` preset runs an installed `dsh` command through its shipped
+ACP profile (`dsh --profile acp`). It does not start the Web UI, download the CLI,
+or change Machines' default Agent. Install and configure DeepSeek Harness first:
+
+```bash
+npm install --global @deepseek-ai/dsh
+# Configure the DSH provider, credentials, and ACP profile before running a task.
+machine run my-workflow --agent default=deepseek -- "Do the task"
+machine run review-task --agent implementer=deepseek -- "Implement the task"
+```
+
+Direct callers can import `deepseekAgent` from `@dna113p/machines/deepseek`.
+It is a small configuration wrapper over `acpAgent`, not a second protocol client.
+Each Agent invocation starts a fresh process/session in the requested working
+directory, sends the bounded prompt over ACP stdin, and returns a Machines event.
+Committed text, tool activity, and advertised model/reasoning identity use the
+existing observer API; thought chunks and raw protocol JSON are not forwarded.
+DSH's model identity is an opaque ACP selector, not necessarily a plain model name.
+
+Configure providers, models, reasoning defaults, plugins, and permissions in DSH.
+The wrapper does not invent `--model` or `--effort` flags. DSH's own configuration
+and credentials are inherited, including `DSH_HOME`; a per-runner `env` overrides
+matching parent variables. Additional command arguments precede `--profile` and
+must be launcher arguments, such as `--patch`, or arguments for an executable
+wrapper. For example, override the preset in `.machines/agents.ts`:
+
+```ts
+export default ({ deepseekAgent }: { deepseekAgent: typeof import("@dna113p/machines/deepseek").deepseekAgent }) => ({
+  deepseek: {
+    description: "Runs DeepSeek Harness with the project's ACP configuration",
+    harness: "dsh",
+    runner: deepseekAgent("dsh", ["--patch", "/absolute/path/machines-acp.patch.yml"], {
+      output: "capture",
+    }),
+  },
+});
+```
+
+An ACP model-selection overlay can use configured provider/model identifiers:
+
+```yaml
+- id: acp
+  config:
+    provider: your-configured-provider-id
+    model: your-configured-model-id
+```
+
+`profile` optionally selects a preconfigured **ACP-compatible** custom profile;
+`web`, `headless`, and SDK profiles do not speak the expected protocol.
+`harness` changes the reported label only. `output: "stream"` (default) writes
+agent text and diagnostics to the terminal; `capture` keeps both quiet and adds
+final prose to the returned event's `message`. Both modes report observer activity.
+The built-in preset uses capture mode.
+
+The runner does not auto-approve permissions or disable sandbox controls.
+Permission requests are rejected and fail the Agent state, even when the harness
+subsequently emits a success event. A working directory is not a sandbox: DSH's
+active profile controls access, may permit workspace writes, and persists its own
+session records. Keep workflow approvals in Human states and use an appropriately
+restricted environment. Review the upstream [safety notice](https://github.com/deepseek-ai/deepseek-harness/blob/master/SAFETY.md).
+
+`npm run example:deepseek` asks the configured harness to create one file in a
+temporary directory and verifies its exact contents with an Operation. It may use
+network access and model credits; the deterministic tests use a local fake ACP
+process and require neither an installed `dsh` nor credentials.
+
+The CLI and wire contract were inspected at upstream commit
+`c291e7961a515f6d7af9304e7fd1d257929aef26`. This is source-contract verification,
+not a live-model certification. DeepSeek Harness is a fast-changing developer
+preview; pin and validate the CLI version you deploy. See the upstream
+[CLI guide](https://github.com/deepseek-ai/deepseek-harness/blob/c291e7961a515f6d7af9304e7fd1d257929aef26/apps/cli/README.md)
+and [ACP contract](https://github.com/deepseek-ai/deepseek-harness/blob/c291e7961a515f6d7af9304e7fd1d257929aef26/packages/acp/acp/README.md).
+
 ## Programmatic execution and verification
 
 Direct runtime users supply runners through `run(definition, { agents, human })`.
