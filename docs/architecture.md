@@ -43,6 +43,8 @@ MCP server ────┘       ↑
 | `src/acp.ts` | ACP process/session protocol, bounded Agent result, normalized activity |
 | `src/agy.ts` | Antigravity CLI (agy) process protocol, bounded Agent result, normalized activity |
 | `src/codex.ts` | Codex CLI execution, final-response decoding, sandbox options, normalized activity |
+| `src/decision.ts` | Provider-neutral classification contract, validated outcome events, normalized observations |
+| `src/jev.ts` | TypeSafe Choice HTTP transport, authentication, model selection, and bounded requests |
 | `src/agent-protocol.ts` | Shared Agent prompt instructions and Machines event decoding |
 | `src/discovery.ts` | Project/global definition locations and precedence |
 | `src/launcher.ts` | Definition metadata, Agent bindings, preflight, single-use launch preparation |

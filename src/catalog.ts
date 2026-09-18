@@ -2,6 +2,8 @@ import { loadAgentBindings, type AgentPreset } from "./agent-bindings.ts";
 import { acpAgent } from "./acp.ts";
 import { agyAgent } from "./agy.ts";
 import { codexAgent } from "./codex.ts";
+import { decisionAgent } from "./decision.ts";
+import { jevAgent, jevProvider } from "./jev.ts";
 import { discoverMachines, machinesUserHome } from "./discovery.ts";
 import type { AgentRunner } from "./index.ts";
 import { loadMachineModule, readAgentRoles, requireMachineDescription } from "./machine-module.ts";
@@ -89,7 +91,7 @@ export async function configuredAgentPresets(
   cwd: string,
   home: string,
 ): Promise<ResolvedAgentPresets> {
-  const configured = await loadAgentBindings(cwd, home, { acpAgent, agyAgent, codexAgent });
+  const configured = await loadAgentBindings(cwd, home, { acpAgent, agyAgent, codexAgent, decisionAgent, jevAgent, jevProvider });
   const defaultRunner = acpAgent("npx", ["-y", "pi-acp"], {
     harness: "pi-acp",
     output: "capture",
@@ -99,8 +101,9 @@ export async function configuredAgentPresets(
     output: "capture",
   });
   const codexRunner = codexAgent("codex", [], { output: "capture" });
+  const jevRunner = jevAgent();
   return {
-    agents: { default: defaultRunner, agy: agyRunner, codex: codexRunner, ...configured.agents },
+    agents: { default: defaultRunner, agy: agyRunner, codex: codexRunner, jev: jevRunner, ...configured.agents },
     presets: {
       default: {
         description: "Runs the current Pi Agent through ACP",
@@ -117,9 +120,14 @@ export async function configuredAgentPresets(
         harness: "codex",
         runner: codexRunner,
       },
+      jev: {
+        description: "Classifies supplied evidence with Jev; does not execute tools",
+        harness: "jev",
+        runner: jevRunner,
+      },
       ...configured.presets,
     },
-    sources: { default: "built in", agy: "built in", codex: "built in", ...configured.sources },
+    sources: { default: "built in", agy: "built in", codex: "built in", jev: "built in", ...configured.sources },
   };
 }
 
