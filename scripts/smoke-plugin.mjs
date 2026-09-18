@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { cp, mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, cp, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -12,6 +12,16 @@ try {
   const config = JSON.parse(await readFile(join(plugin, ".mcp.json"), "utf8")).mcpServers.machines;
   const manifest = JSON.parse(await readFile(join(plugin, ".codex-plugin/plugin.json"), "utf8"));
   assert.equal(manifest.name, "machines");
+  assert.equal(manifest.skills, "./skills/");
+  for (const required of [
+    "skills/machine-delegation/SKILL.md",
+    "skills/machine-delegation/references/delegation-machine.md",
+    "skills/machine-builder/SKILL.md",
+    "docs/authoring.md",
+    "docs/integrations.md",
+  ]) {
+    await access(join(plugin, required));
+  }
   assert.equal(config.cwd, ".");
   assert.ok(config.args.every((argument) => !argument.includes("/home/") && !argument.includes("${")));
   await smokeMcp({ ...config, cwd: resolve(plugin, config.cwd), project: join(temporary, "project") });

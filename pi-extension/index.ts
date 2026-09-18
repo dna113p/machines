@@ -194,7 +194,7 @@ export default function machinesExtension(pi: PiLike): void {
     promptSnippet: "Discover reusable asynchronous Machines with machine_list before starting one.",
     promptGuidelines: [
       "Use machine_list when the user asks to run a Machine or a reusable multi-step workflow may fit; choose an existing Machine by its description rather than guessing its name.",
-      "If no Machine fits, handle a one-off task normally. For a reusable workflow, propose a short state sequence and ask before creating persistent Machine policy.",
+      "When Machine delegation or creation is requested, create a task-scoped Machine if none fits. Otherwise handle one-off tasks normally.",
     ],
     parameters: Type.Object({}, { additionalProperties: false }),
     executionMode: "parallel",

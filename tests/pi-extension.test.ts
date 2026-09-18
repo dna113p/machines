@@ -110,10 +110,6 @@ test("registers the five small Machine tools with discovery guidance", () => {
   ]);
   assert.match(extension.tools.get("machine_list")?.promptSnippet ?? "", /Discover/u);
   assert.match(
-    extension.tools.get("machine_list")?.promptGuidelines?.join(" ") ?? "",
-    /one-off task normally.*ask before creating persistent Machine policy/u,
-  );
-  assert.match(
     extension.tools.get("machine_start")?.promptGuidelines?.join(" ") ?? "",
     /asynchronous.*without adding requirements/u,
   );

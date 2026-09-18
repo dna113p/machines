@@ -7,6 +7,8 @@ policy; adapters translate external input and output.
 For workflow definitions or the authoring skill, read
 [Authoring Machines](docs/authoring.md). Keep reusable authoring instructions in
 `skills/machine-builder/SKILL.md` and implementation guidance here.
+Keep coordinating-agent guidance for delegating work through Machines in
+`skills/machine-delegation/SKILL.md`.
 
 Develop against source TypeScript with explicit `.ts` relative imports. Build
 output is generated under `dist/`; portable plugin output is under `build/`.

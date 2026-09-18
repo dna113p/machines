@@ -18,6 +18,15 @@ try {
     cwd: root, encoding: "utf8",
   }));
   assert.ok(packed[0].files.some(({ path }) => path === "dist/src/index.d.ts"));
+  for (const required of [
+    "skills/machine-delegation/SKILL.md",
+    "skills/machine-delegation/references/delegation-machine.md",
+    "skills/machine-builder/SKILL.md",
+    "docs/authoring.md",
+    "docs/integrations.md",
+  ]) {
+    assert.ok(packed[0].files.some(({ path }) => path === required), `Missing ${required}`);
+  }
   assert.equal(packed[0].name, "@dna113p/machines");
   assert.ok(packed[0].files.every(({ path }) => !path.startsWith("src/") && !path.startsWith("tests/")));
   assert.ok(packed[0].files.every(({ path }) => !path.startsWith("docs/history/") && path !== "AGENTS.md"));

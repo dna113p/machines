@@ -44,8 +44,9 @@ npm run smoke:plugin
 ```
 
 The result is `build/codex/machines/`, containing the manifest, compiled server,
-production dependencies, widget assets, and machine-builder skill. Copy the entire
-directory when distributing it. Node 24 or later must be on the receiving system's
+production dependencies, widget assets, and the machine-builder and
+machine-delegation skills. Copy the entire directory when distributing it.
+Node 24 or later must be on the receiving system's
 PATH; the original checkout is unnecessary after copying. Build does not modify
 your Codex installation or global configuration.
 
@@ -96,6 +97,12 @@ trusted code, and start/respond can continue work that modifies files or contact
 external services. Tool annotations describe those capabilities. Configure your
 preferred tool-approval policy in Codex if you need different behavior; workflow
 Human states remain defined by each Machine.
+
+Use [machine-delegation](../skills/machine-delegation/SKILL.md) when the coordinating
+agent should delegate work through Machines, including creating a task-specific
+workflow when none fits. It uses [machine-builder](../skills/machine-builder/SKILL.md)
+for authoring. Direct MCP registration exposes the tools only; load these skill
+instructions separately or use the portable plugin to include both.
 
 ## Pi extension
 

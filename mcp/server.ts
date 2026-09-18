@@ -226,7 +226,7 @@ export function createMachinesMcpServer(
         "Choose by description rather than guessing a Machine name.",
         "machine_start is asynchronous; continue the conversation while it runs.",
         "Use machine_status for authoritative progress and machine_respond only after the Human's answer is clear.",
-        "If no Machine fits a one-off task, handle it normally. Ask before creating persistent Machine policy.",
+        "When Machine delegation or creation is requested, create a task-scoped Machine if none fits. Otherwise handle one-off tasks normally.",
       ].join(" "),
     },
   );

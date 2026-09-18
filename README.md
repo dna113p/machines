@@ -114,6 +114,21 @@ diagnostics; other valid Machines remain usable.
 Read [Authoring Machines](docs/authoring.md) for Human input, Agent roles and
 presets, feedback loops, and the programmatic launcher.
 
+## Delegate agent work through Machines
+
+The [machine-delegation skill](skills/machine-delegation/SKILL.md) teaches an agent
+to use Machine runs in place of native sub-agents: discover a suitable workflow,
+or create a task-specific one with [machine-builder](skills/machine-builder/SKILL.md),
+launch it, supervise it, and collect its result. For example:
+
+> Use machine-delegation to review the parser and its tests. Reuse an existing
+> Machine if one fits, or create one for this task, then bring back the findings.
+
+Delegated workers receive explicit task context and produce result artifacts the
+coordinating agent can read. Runs remain session-scoped; the skill does not add
+durable sessions or arbitrary messaging between agents. Both skills ship in the
+npm package and portable plugin.
+
 ## Install from npm
 
 Install the package in your project:
