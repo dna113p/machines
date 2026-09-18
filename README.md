@@ -60,7 +60,7 @@ Run it with `node demo.ts`. No build is needed to develop against the source.
 | Human input | `node examples/human.ts` | Terminal input |
 | Suggestions and choices | `node examples/choices.ts` | Terminal input |
 | Agent contract | `node examples/agent.ts` | Built-in fake runner |
-| Decision-based failure triage | `npm run example:decision` | Offline fixture; add `-- --live` for one Jev request with `TYPESAFE_API_KEY` |
+| Decision-based failure triage | `npm run example:decision` | Offline fixture; `-- --live` uses TypeSafe, `-- --live --provider openrouter` uses OpenRouter |
 | Agent escalation | `npm run example:agents` | Built-in fake runners |
 | Child host and Human response | `npm run example:host` | Node only |
 | Real Agent writes and verifies a file | `npm run example:pi` | Configured Pi through `pi-acp`; may use network and model credits |
@@ -186,9 +186,10 @@ The built-in `codex` preset runs the Codex CLI in a read-only sandbox. See
 edits and options for running outside a Git repository.
 
 The provider-neutral `decisionAgent(provider)` turns a classification into an
-Agent event without changing the runtime. The first provider is Jev, available as
-`jevProvider()` and the convenience preset `jev`. It evaluates only explicitly
-supplied evidence; it is not a coding agent. See
+Agent event without changing the runtime. Use `jevProvider()` / preset `jev`
+for direct TypeSafe access, or `openRouterDecisionProvider()` / preset
+`openrouter-decision` with `OPENROUTER_API_KEY`. Both evaluate only explicitly
+supplied evidence; neither is a coding agent. See
 [Decision runners](docs/authoring.md#decision-runners) for provider swapping,
 confidence-aware workflow routing, and the opt-in live example.
 

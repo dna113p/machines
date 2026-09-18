@@ -26,6 +26,7 @@
     "./codex": { "types": "./dist/src/codex.d.ts", "import": "./dist/src/codex.js" },
     "./decision": { "types": "./dist/src/decision.d.ts", "import": "./dist/src/decision.js" },
     "./jev": { "types": "./dist/src/jev.d.ts", "import": "./dist/src/jev.js" },
+    "./openrouter": { "types": "./dist/src/openrouter.d.ts", "import": "./dist/src/openrouter.js" },
     "./launcher": { "types": "./dist/src/launcher.d.ts", "import": "./dist/src/launcher.js" },
     "./mcp": { "types": "./dist/mcp/server.d.ts", "import": "./dist/mcp/server.js" },
     "./pi-extension": { "types": "./dist/pi-extension/index.d.ts", "import": "./dist/pi-extension/index.js" }

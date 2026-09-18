@@ -4,6 +4,7 @@ import { agyAgent } from "./agy.ts";
 import { codexAgent } from "./codex.ts";
 import { decisionAgent } from "./decision.ts";
 import { jevAgent, jevProvider } from "./jev.ts";
+import { openRouterDecisionAgent, openRouterDecisionProvider } from "./openrouter.ts";
 import { discoverMachines, machinesUserHome } from "./discovery.ts";
 import type { AgentRunner } from "./index.ts";
 import { loadMachineModule, readAgentRoles, requireMachineDescription } from "./machine-module.ts";
@@ -91,7 +92,10 @@ export async function configuredAgentPresets(
   cwd: string,
   home: string,
 ): Promise<ResolvedAgentPresets> {
-  const configured = await loadAgentBindings(cwd, home, { acpAgent, agyAgent, codexAgent, decisionAgent, jevAgent, jevProvider });
+  const configured = await loadAgentBindings(cwd, home, {
+    acpAgent, agyAgent, codexAgent, decisionAgent, jevAgent, jevProvider,
+    openRouterDecisionAgent, openRouterDecisionProvider,
+  });
   const defaultRunner = acpAgent("npx", ["-y", "pi-acp"], {
     harness: "pi-acp",
     output: "capture",
@@ -102,8 +106,12 @@ export async function configuredAgentPresets(
   });
   const codexRunner = codexAgent("codex", [], { output: "capture" });
   const jevRunner = jevAgent();
+  const openRouterRunner = openRouterDecisionAgent();
   return {
-    agents: { default: defaultRunner, agy: agyRunner, codex: codexRunner, jev: jevRunner, ...configured.agents },
+    agents: {
+      default: defaultRunner, agy: agyRunner, codex: codexRunner, jev: jevRunner,
+      "openrouter-decision": openRouterRunner, ...configured.agents,
+    },
     presets: {
       default: {
         description: "Runs the current Pi Agent through ACP",
@@ -125,9 +133,17 @@ export async function configuredAgentPresets(
         harness: "jev",
         runner: jevRunner,
       },
+      "openrouter-decision": {
+        description: "Classifies supplied evidence through OpenRouter Decisions; does not execute tools",
+        harness: "openrouter-decision",
+        runner: openRouterRunner,
+      },
       ...configured.presets,
     },
-    sources: { default: "built in", agy: "built in", codex: "built in", jev: "built in", ...configured.sources },
+    sources: {
+      default: "built in", agy: "built in", codex: "built in", jev: "built in",
+      "openrouter-decision": "built in", ...configured.sources,
+    },
   };
 }
 
