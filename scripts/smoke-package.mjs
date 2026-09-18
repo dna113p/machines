@@ -40,12 +40,34 @@ try {
     import { acpAgent } from "@dna113p/machines/acp";
     import { agyAgent } from "@dna113p/machines/agy";
     import { codexAgent } from "@dna113p/machines/codex";
-    import { listMachines } from "@dna113p/machines/launcher";
+    import { decisionAgent } from "@dna113p/machines/decision";
+    import { jevAgent, jevProvider } from "@dna113p/machines/jev";
+    import { openRouterDecisionAgent, openRouterDecisionProvider } from "@dna113p/machines/openrouter";
+    import { listAgentPresets, listMachines } from "@dna113p/machines/launcher";
     import { createMachinesMcpServer } from "@dna113p/machines/mcp";
     import extension from "@dna113p/machines/pi-extension";
     assert.equal(typeof acpAgent, "function");
     assert.equal(typeof agyAgent, "function");
     assert.equal(typeof codexAgent, "function");
+    assert.equal(typeof jevAgent, "function");
+    assert.ok((await listAgentPresets()).some(preset => preset.name === "jev"));
+    const classify = decisionAgent(jevProvider({ apiKey: "offline-fixture", fetch: async () => Response.json({
+      model: "fixture", answers: { decision: {
+        type: "choice", choice: "completed", probabilities: { completed: 1 }, confidence: 1,
+      } },
+    }) }));
+    const classified = await classify({ prompt: "Synthetic evidence", outcomes: ["completed"] });
+    assert.equal(classified.type, "completed");
+    assert.equal(classified.decision.provider, "jev");
+    assert.equal(typeof openRouterDecisionAgent, "function");
+    assert.ok((await listAgentPresets()).some(preset => preset.name === "openrouter-decision"));
+    const routed = await decisionAgent(openRouterDecisionProvider({ apiKey: "offline-fixture", fetch: async (url, init) => {
+      assert.equal(url, "https://openrouter.ai/api/alpha/decisions");
+      assert.equal(JSON.parse(init.body).questions.decision.criteria.completed, "completed");
+      return Response.json({ model: "fixture", usage: { input_tokens: 1, output_tokens: 0 },
+        answers: { decision: { type: "choice", choice: "completed" } } });
+    } }))({ prompt: "Synthetic evidence", outcomes: ["completed"] });
+    assert.deepEqual(routed.decision, { choice: "completed", model: "fixture", provider: "openrouter-decision" });
     assert.equal(typeof listMachines, "function");
     assert.equal(typeof createMachinesMcpServer, "function");
     assert.equal(typeof extension, "function");
@@ -68,6 +90,18 @@ try {
   await writeFile(join(temporary, "consumer.mts"), `
     import { machine, operation, final, type MachinePrimitives } from "@dna113p/machines";
     import { codexAgent, type CodexAgentOptions } from "@dna113p/machines/codex";
+    import { decisionAgent, type DecisionProvider, type DecisionEvent } from "@dna113p/machines/decision";
+    import { jevProvider, type JevProviderOptions } from "@dna113p/machines/jev";
+    import { openRouterDecisionAgent, openRouterDecisionProvider, type OpenRouterDecisionAgentOptions, type OpenRouterDecisionProviderOptions } from "@dna113p/machines/openrouter";
+    const routerOptions: OpenRouterDecisionProviderOptions = { model: "typesafe/jev-1.13", timeoutMs: 5000 };
+    const routerProvider: DecisionProvider = openRouterDecisionProvider(routerOptions);
+    const routerAgentOptions: OpenRouterDecisionAgentOptions = { ...routerOptions, question: "Which outcome?" };
+    const routerAgent = openRouterDecisionAgent(routerAgentOptions);
+    const classifyViaRouter = (): Promise<DecisionEvent> => routerAgent({ prompt: "Evidence", outcomes: ["completed"] });
+    const jevOptions: JevProviderOptions = { model: "jev-1.13.0", timeoutMs: 5000 };
+    const provider: DecisionProvider = jevProvider(jevOptions);
+    const classify = decisionAgent(provider, { question: "Which outcome?" });
+    const evaluate = (): Promise<DecisionEvent> => classify({ prompt: "Evidence", outcomes: ["completed"] });
     const codexOptions: CodexAgentOptions = { sandbox: "workspace-write", output: "capture" };
     codexAgent("codex", [], codexOptions);
     const make = ({ machine, operation, final }: MachinePrimitives) => machine({

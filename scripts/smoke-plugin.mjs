@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { access, cp, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { smokeMcp } from "./mcp-smoke.mjs";
 
@@ -24,8 +25,17 @@ try {
   }
   assert.equal(config.cwd, ".");
   assert.ok(config.args.every((argument) => !argument.includes("/home/") && !argument.includes("${")));
+  const { openRouterDecisionAgent } = await import(pathToFileURL(join(plugin, "dist/src/openrouter.js")).href);
+  const classified = await openRouterDecisionAgent({ apiKey: "offline-fixture", fetch: async (url) => {
+    assert.equal(url, "https://openrouter.ai/api/alpha/decisions");
+    return Response.json({ model: "fixture", usage: { input_tokens: 1, output_tokens: 0 },
+      answers: { decision: { type: "choice", choice: "review" } } });
+  } })({ prompt: "Synthetic evidence", outcomes: ["review"] });
+  assert.deepEqual(classified, { type: "review", decision: {
+    choice: "review", model: "fixture", provider: "openrouter-decision",
+  } });
   await smokeMcp({ ...config, cwd: resolve(plugin, config.cwd), project: join(temporary, "project") });
-  console.log("Relocated plugin: independent dependencies, widget, discovery, and hosted Human round trip passed.");
+  console.log("Relocated plugin: independent dependencies, OpenRouter decision fixture, widget, discovery, and hosted Human round trip passed.");
 } finally {
   await rm(temporary, { recursive: true, force: true });
 }
