@@ -43,6 +43,7 @@ MCP server ────┘       ↑
 | `src/acp.ts` | ACP process/session protocol, bounded Agent result, normalized activity |
 | `src/agy.ts` | Antigravity CLI (agy) process protocol, bounded Agent result, normalized activity |
 | `src/codex.ts` | Codex CLI execution, final-response decoding, sandbox options, normalized activity |
+| `src/deepseek.ts` | DeepSeek Harness command/profile configuration over the shared ACP runner |
 | `src/decision.ts` | Provider-neutral classification contract, validated outcome events, normalized observations |
 | `src/jev.ts` | TypeSafe Choice HTTP transport, authentication, model selection, and bounded requests |
 | `src/openrouter.ts` | OpenRouter Decisions Choice transport, independent credentials, optional result metadata |

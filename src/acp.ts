@@ -45,7 +45,7 @@ export function acpAgent(
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk: string) => {
       stderr += chunk;
-      process.stderr.write(chunk);
+      if (options.output !== "capture") process.stderr.write(chunk);
     });
 
     try {

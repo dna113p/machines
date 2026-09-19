@@ -2,6 +2,7 @@ import { loadAgentBindings, type AgentPreset } from "./agent-bindings.ts";
 import { acpAgent } from "./acp.ts";
 import { agyAgent } from "./agy.ts";
 import { codexAgent } from "./codex.ts";
+import { deepseekAgent } from "./deepseek.ts";
 import { decisionAgent } from "./decision.ts";
 import { jevAgent, jevProvider } from "./jev.ts";
 import { openRouterDecisionAgent, openRouterDecisionProvider } from "./openrouter.ts";
@@ -93,7 +94,7 @@ export async function configuredAgentPresets(
   home: string,
 ): Promise<ResolvedAgentPresets> {
   const configured = await loadAgentBindings(cwd, home, {
-    acpAgent, agyAgent, codexAgent, decisionAgent, jevAgent, jevProvider,
+    acpAgent, agyAgent, codexAgent, deepseekAgent, decisionAgent, jevAgent, jevProvider,
     openRouterDecisionAgent, openRouterDecisionProvider,
   });
   const defaultRunner = acpAgent("npx", ["-y", "pi-acp"], {
@@ -105,11 +106,12 @@ export async function configuredAgentPresets(
     output: "capture",
   });
   const codexRunner = codexAgent("codex", [], { output: "capture" });
+  const deepseekRunner = deepseekAgent("dsh", [], { output: "capture" });
   const jevRunner = jevAgent();
   const openRouterRunner = openRouterDecisionAgent();
   return {
     agents: {
-      default: defaultRunner, agy: agyRunner, codex: codexRunner, jev: jevRunner,
+      default: defaultRunner, agy: agyRunner, codex: codexRunner, deepseek: deepseekRunner, jev: jevRunner,
       "openrouter-decision": openRouterRunner, ...configured.agents,
     },
     presets: {
@@ -128,6 +130,11 @@ export async function configuredAgentPresets(
         harness: "codex",
         runner: codexRunner,
       },
+      deepseek: {
+        description: "Runs DeepSeek Harness (dsh) through ACP",
+        harness: "dsh",
+        runner: deepseekRunner,
+      },
       jev: {
         description: "Classifies supplied evidence with Jev; does not execute tools",
         harness: "jev",
@@ -141,7 +148,7 @@ export async function configuredAgentPresets(
       ...configured.presets,
     },
     sources: {
-      default: "built in", agy: "built in", codex: "built in", jev: "built in",
+      default: "built in", agy: "built in", codex: "built in", deepseek: "built in", jev: "built in",
       "openrouter-decision": "built in", ...configured.sources,
     },
   };

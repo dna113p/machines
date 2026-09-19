@@ -66,6 +66,7 @@ Run it with `node demo.ts`. No build is needed to develop against the source.
 | Real Agent writes and verifies a file | `npm run example:pi` | Configured Pi through `pi-acp`; may use network and model credits |
 | Real AGY writes and verifies a file | `npm run example:agy` | Configured Antigravity CLI (`agy`); may use network and model credits |
 | Real Codex writes and verifies a file | `npm run example:codex` | Configured Codex CLI; may use network and model credits |
+| Real DeepSeek Harness writes and verifies a file | `npm run example:deepseek` | Installed `dsh` with a configured ACP profile; may use network and model credits |
 
 ## Run your own workflows
 
@@ -207,6 +208,12 @@ for direct TypeSafe access, or `openRouterDecisionProvider()` / preset
 supplied evidence; neither is a coding agent. See
 [Decision runners](docs/authoring.md#decision-runners) for provider swapping,
 confidence-aware workflow routing, and the opt-in live example.
+
+The built-in `deepseek` preset runs DeepSeek Harness through `dsh --profile acp`,
+reusing the ACP runner and preserving DSH's configured permissions. Select it with
+`machine run my-workflow --agent default=deepseek -- "Do the task"`. See
+[DeepSeek Harness configuration](docs/authoring.md#deepseek-harness-dsh) for setup,
+custom profiles, and configuration overlays.
 
 ## Checks
 

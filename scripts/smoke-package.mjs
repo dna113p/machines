@@ -31,6 +31,7 @@ try {
   assert.ok(packed[0].files.every(({ path }) => !path.startsWith("src/") && !path.startsWith("tests/")));
   assert.ok(packed[0].files.every(({ path }) => !path.startsWith("docs/history/") && path !== "AGENTS.md"));
   await writeFile(join(temporary, "package.json"), '{"private":true,"type":"module"}\n');
+  await writeFile(join(temporary, "fake-deepseek-agent.mjs"), await readFile(join(root, "tests/fixtures/fake-deepseek-agent.mjs")));
   execFileSync(npm, ["install", "--ignore-scripts", "--no-audit", "--no-fund", join(temporary, packed[0].filename)], {
     cwd: temporary, stdio: "inherit",
   });
@@ -40,6 +41,7 @@ try {
     import { acpAgent } from "@dna113p/machines/acp";
     import { agyAgent } from "@dna113p/machines/agy";
     import { codexAgent } from "@dna113p/machines/codex";
+    import { deepseekAgent } from "@dna113p/machines/deepseek";
     import { decisionAgent } from "@dna113p/machines/decision";
     import { jevAgent, jevProvider } from "@dna113p/machines/jev";
     import { openRouterDecisionAgent, openRouterDecisionProvider } from "@dna113p/machines/openrouter";
@@ -50,6 +52,12 @@ try {
     assert.equal(typeof acpAgent, "function");
     assert.equal(typeof agyAgent, "function");
     assert.equal(typeof codexAgent, "function");
+    assert.equal(typeof deepseekAgent, "function");
+    assert.ok((await listAgentPresets()).some(preset => preset.name === "deepseek" && preset.harness === "dsh"));
+    const deepseekEvent = await deepseekAgent(process.execPath, ["fake-deepseek-agent.mjs", "normal"], { output: "capture" })({
+      prompt: "Do the task", outcomes: ["completed"], cwd: process.cwd(),
+    });
+    assert.equal(deepseekEvent.type, "completed");
     assert.equal(typeof jevAgent, "function");
     assert.ok((await listAgentPresets()).some(preset => preset.name === "jev"));
     const classify = decisionAgent(jevProvider({ apiKey: "offline-fixture", fetch: async () => Response.json({
@@ -94,6 +102,7 @@ try {
   await writeFile(join(temporary, "consumer.mts"), `
     import { machine, operation, final, type MachinePrimitives } from "@dna113p/machines";
     import { codexAgent, type CodexAgentOptions } from "@dna113p/machines/codex";
+    import { deepseekAgent, type DeepSeekAgentOptions } from "@dna113p/machines/deepseek";
     import { decisionAgent, type DecisionProvider, type DecisionEvent } from "@dna113p/machines/decision";
     import { jevProvider, type JevProviderOptions } from "@dna113p/machines/jev";
     import { openRouterDecisionAgent, openRouterDecisionProvider, type OpenRouterDecisionAgentOptions, type OpenRouterDecisionProviderOptions } from "@dna113p/machines/openrouter";
@@ -108,6 +117,8 @@ try {
     const evaluate = (): Promise<DecisionEvent> => classify({ prompt: "Evidence", outcomes: ["completed"] });
     const codexOptions: CodexAgentOptions = { sandbox: "workspace-write", output: "capture" };
     codexAgent("codex", [], codexOptions);
+    const deepseekOptions: DeepSeekAgentOptions = { profile: "acp", output: "capture" };
+    deepseekAgent("dsh", [], deepseekOptions);
     const make = ({ machine, operation, final }: MachinePrimitives) => machine({
       initial: "work", states: {
         work: operation(() => ({ type: "completed" }), { completed: "done" }), done: final(),
