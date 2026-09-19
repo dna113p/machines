@@ -3,6 +3,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { Type } from "typebox";
+import { assertJsonValue } from "../src/json.ts";
 import type { StateValue } from "xstate";
 
 import type { HostedHumanRequest } from "../src/host.ts";
@@ -264,7 +265,7 @@ export default function machinesExtension(pi: PiLike): void {
     ],
     parameters: Type.Object({
       machine: Type.String({ description: "Exact Machine name from machine_list" }),
-      input: Type.Optional(Type.String({ description: "The task or input for the Machine" })),
+      input: Type.Optional(Type.Unknown({ description: "JSON-serializable task or structured input for the Machine" })),
       agents: Type.Optional(Type.Record(
         Type.String(),
         Type.String(),
@@ -274,7 +275,8 @@ export default function machinesExtension(pi: PiLike): void {
     async execute(_id, rawParams, _signal, _onUpdate, context) {
       useContext(context);
       const machine = requiredString(rawParams.machine, "machine");
-      const input = optionalString(rawParams.input, "input");
+      const input = rawParams.input;
+      if (input !== undefined) assertJsonValue(input, "Machine input");
       const agents = optionalStringRecord(rawParams.agents, "agents");
       const runs = await getSession();
       const run = await runs.start({

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { StateValue } from "xstate";
 
+import type { JsonValue } from "./json.ts";
 import { startMachineHost, type HostedHumanRequest, type MachineHostRun } from "./host.ts";
 import type { AgentUpdate } from "./index.ts";
 import type { PrepareMachineRunOptions } from "./launcher.ts";
@@ -15,6 +16,7 @@ export interface RunSnapshot {
   readonly cwd: string;
   readonly status: RunStatus;
   readonly state?: StateValue;
+  readonly output?: JsonValue;
   readonly startedAt: string;
   readonly updatedAt: string;
   readonly elapsedSeconds: number;
@@ -31,6 +33,7 @@ interface RunRecord {
   updatedAt: number;
   status: RunStatus;
   state?: StateValue;
+  output?: JsonValue;
   human?: HostedHumanRequest;
   agent?: Extract<AgentUpdate, { type: "identity" }>;
   error?: string;
@@ -100,7 +103,7 @@ export class MachineSession {
     };
     this.#runs.set(id, run);
     void host.result.then(
-      ({ state }) => this.#finish(run, { state }),
+      (result) => this.#finish(run, result),
       (cause: unknown) => this.#finish(run, { error: errorMessage(cause) }),
     );
     this.#emit("updated", run);
@@ -156,11 +159,13 @@ export class MachineSession {
     return run;
   }
 
-  #finish(run: RunRecord, outcome: { state: StateValue } | { error: string }): void {
+  #finish(run: RunRecord, outcome: { state: StateValue; output?: JsonValue } | { error: string }): void {
     if (this.#closed || !isActive(run.status)) return;
     run.status = "state" in outcome ? "completed" : "failed";
-    if ("state" in outcome) run.state = outcome.state;
-    else run.error = outcome.error;
+    if ("state" in outcome) {
+      run.state = outcome.state;
+      run.output = outcome.output;
+    } else run.error = outcome.error;
     run.human = undefined;
     run.agent = undefined;
     run.updatedAt = Date.now();
@@ -196,6 +201,7 @@ function snapshot(run: RunRecord): RunSnapshot {
     cwd: run.cwd,
     status: run.status,
     ...(run.state === undefined ? {} : { state: structuredClone(run.state) }),
+    ...(run.output === undefined ? {} : { output: structuredClone(run.output) }),
     startedAt: new Date(run.startedAt).toISOString(),
     updatedAt: new Date(run.updatedAt).toISOString(),
     elapsedSeconds: Math.floor(((isActive(run.status) ? Date.now() : run.updatedAt) - run.startedAt) / 1_000),

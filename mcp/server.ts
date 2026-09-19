@@ -14,6 +14,7 @@ import {
   type CallToolResult,
 } from "@modelcontextprotocol/sdk/types.js";
 import * as v from "valibot";
+import { isJsonValue, type JsonValue } from "../src/json.ts";
 import type { StateValue } from "xstate";
 
 import { MachineSession as RunSession, type RunSnapshot } from "../src/session.ts";
@@ -30,7 +31,7 @@ const listInput = v.strictObject({ cwd });
 const startInput = v.strictObject({
   cwd,
   machine: v.pipe(v.string(), v.nonEmpty("machine must not be empty")),
-  input: v.optional(v.string()),
+  input: v.optional(v.custom<JsonValue>(isJsonValue)),
   agents: v.optional(v.record(
     v.pipe(v.string(), v.nonEmpty("Agent role names must not be empty")),
     v.pipe(v.string(), v.nonEmpty("Agent preset names must not be empty")),
@@ -88,8 +89,7 @@ const tools = [
           description: "Exact Machine name returned by machine_list",
         },
         input: {
-          type: "string",
-          description: "Clear task or input for the Machine",
+          description: "JSON-serializable task or structured input for the Machine",
         },
         agents: {
           type: "object",

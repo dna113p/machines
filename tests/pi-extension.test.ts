@@ -280,3 +280,15 @@ test("Pi shutdown while its first start is loading cannot create a late run", as
   assert.equal(extension.ui.widget, undefined);
   assert.equal(extension.ui.notifications.length, 0);
 });
+
+test("Pi preserves structured input and exposes completed output", async context => {
+  const extension = setup(); context.after(() => extension.shutdown());
+  const input = { task: "Pi JSON", enabled: false, value: null };
+  const started = await extension.execute("machine_start", { machine: resolve("tests/fixtures/structured.machine.ts"), input });
+  const id = runId(started);
+  await eventually(async () => {
+    const run = statusRuns(await extension.execute("machine_status", { runId: id }))[0]!;
+    assert.equal(run.status, "completed");
+    assert.deepEqual(run.output, input);
+  });
+});

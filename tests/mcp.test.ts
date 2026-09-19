@@ -168,3 +168,12 @@ test("disconnecting an MCP transport closes its owned session", async (context) 
   assert.deepEqual(session.status({}).structuredContent?.runs, []);
   await assert.rejects(session.start({ cwd, machine: "review" }), /closed/u);
 });
+
+test("MCP preserves structured input and returns hosted output", async context => {
+  const { client, close } = await connectedClient(); context.after(close);
+  const input = { task: "MCP JSON", enabled: false, attachments: [null] };
+  const started = await client.callTool({ name: "machine_start", arguments: { cwd, machine: resolve("tests/fixtures/structured.machine.ts"), input } });
+  assert.equal(started.isError, undefined);
+  const completed = await waitForStatus(client, readRun(toolStructuredContent(started)).id, "completed");
+  assert.deepEqual(completed.output, input);
+});

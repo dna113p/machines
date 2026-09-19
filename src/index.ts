@@ -74,6 +74,8 @@ export type AgentUpdate =
 
 export type AgentReporter = (update: AgentUpdate) => void;
 
+export type { JsonValue } from "./json.ts";
+
 export type AgentRunner = (
   request: AgentRequest,
   report?: AgentReporter,

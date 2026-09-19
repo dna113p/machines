@@ -2,6 +2,7 @@ import { execFileSync, fork, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import * as v from "valibot";
+import { assertJsonValue, isJsonValue, type JsonValue } from "./json.ts";
 import type { StateValue } from "xstate";
 
 import type { AgentUpdate, HumanRequest } from "./index.ts";
@@ -23,6 +24,7 @@ export interface MachineHostOptions extends PrepareMachineRunOptions {
 
 export interface MachineHostResult {
   readonly state: StateValue;
+  readonly output?: JsonValue;
 }
 
 export interface MachineHostRun {
@@ -71,7 +73,7 @@ const parentMessageSchema = v.variant("type", [
   v.strictObject({
     type: v.literal("launch"),
     machine: v.string(),
-    input: v.optional(v.string()),
+    input: v.optional(v.custom<JsonValue>(isJsonValue)),
     agents: v.optional(v.record(v.string(), v.string())),
     cwd: v.string(),
     home: v.optional(v.string()),
@@ -98,7 +100,11 @@ const childMessageSchema = v.variant("type", [
     requestId: v.string(),
     request: humanRequestSchema,
   }),
-  v.strictObject({ type: v.literal("completed"), state: stateValueSchema }),
+  v.strictObject({
+    type: v.literal("completed"),
+    state: stateValueSchema,
+    output: v.optional(v.custom<JsonValue>(isJsonValue)),
+  }),
   v.strictObject({ type: v.literal("failed"), message: v.string() }),
 ]);
 
@@ -109,6 +115,13 @@ export function startMachineHost(
   options: MachineHostOptions,
 ): Promise<MachineHostRun> {
   if (options.signal?.aborted) return Promise.reject(new Error("Machine host was terminated"));
+  if (options.input !== undefined) {
+    try {
+      assertJsonValue(options.input, "Machine input");
+    } catch (cause) {
+      return Promise.reject(cause);
+    }
+  }
   const cwd = options.cwd ?? process.cwd();
   const child = fork(fileURLToPath(import.meta.url), [childArgument], {
     cwd,
@@ -234,14 +247,22 @@ export function startMachineHost(
         phase = "completed";
         pendingHuman = undefined;
         dispose();
-        resolveResult({ state: message.state as StateValue });
+        resolveResult({
+          state: message.state as StateValue,
+          ...(message.output === undefined ? {} : { output: message.output }),
+        });
       } else {
         fail(new Error(message.message));
       }
     });
 
     child.once("error", (cause) => fail(asError(cause)));
-    child.once("exit", (code, signal) => {
+    child.once("exit", () => {
+      // Exit can precede delivery of buffered completion IPC. Stop descendants
+      // now so inherited stdout/stderr cannot keep the close event open forever.
+      if (phase !== "completed" && phase !== "failed") terminateProcessTree(child);
+    });
+    child.once("close", (code, signal) => {
       if (phase === "completed" || phase === "failed") return;
       fail(new Error(
         `Machine host exited before completion (${signal ?? `code ${String(code)}`})`,
@@ -360,7 +381,12 @@ function runChildHost(): void {
           });
         }),
       });
-      send({ type: "completed", state: result.value });
+      if (result.output !== undefined) assertJsonValue(result.output, "Machine output");
+      send({
+        type: "completed",
+        state: result.value,
+        ...(result.output === undefined ? {} : { output: result.output }),
+      });
     } catch (cause) {
       send({ type: "failed", message: asError(cause).message });
     } finally {

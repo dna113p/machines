@@ -236,3 +236,9 @@ Running **Publish to npm** manually in GitHub Actions performs the checks and a
 publishing dry run; it does not publish a package.
 
 Licensed under the [MIT License](LICENSE).
+
+Structured launch input is supported with `machine run <name> --input-file file.json`
+(or `--input-file -` for stdin), and directly through MCP/Pi tools. Existing
+positional string inputs still work. See [authoring](docs/authoring.md#structured-input-and-workflow-output).
+Applications that need their own execution lifecycle can use the supported
+`@dna113p/machines/host` export; hosted results include optional JSON workflow output.

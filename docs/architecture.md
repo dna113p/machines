@@ -115,3 +115,15 @@ the MCP widget resource, and a hosted Human response.
 The earlier implementation plans are retained in the repository's
 [history directory](https://github.com/dna113p/machines/tree/main/docs/history) for rationale.
 Their phase ordering and manual proof gates describe past work.
+
+## External execution owners
+
+The supported `@dna113p/machines/host` export exposes `startMachineHost`, its
+observations, correlated Human responses, termination, and final state/output.
+External applications can own hosted runs without importing private modules or
+parsing terminal output. Hosted input and optional output are JSON values.
+
+Ticket discovery, persistence, scheduling, and tracker updates belong to the
+separate `auto-machines` application. Machines has no dependency on ticketing.
+External owners decide how to interpret output; a final state alone does not
+prove that a ticket should close.

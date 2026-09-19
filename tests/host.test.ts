@@ -239,3 +239,15 @@ test("startup cancellation owns processes before preflight returns", async (cont
   await rejected;
   await eventually(async () => assert.equal(await processRunning(pid), false));
 });
+
+test("parallel filesystem Operations deliver completion before exit is reported", async context => {
+  const directory = await mkdtemp(join(tmpdir(), "machine-host-io-"));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const hosts = await Promise.all(Array.from({length: 32}, (_, index) =>
+    startMachineHost({ machine: resolve("tests/fixtures/host-io.machine.ts"), input: join(directory, String(index)) })
+  ));
+  // A busy owner can receive exit notification while completion IPC is buffered.
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
+  const runs = await Promise.all(hosts.map(host => host.result));
+  for (const result of runs) assert.deepEqual(result, {state: "done", output: {written: true}});
+});

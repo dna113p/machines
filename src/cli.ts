@@ -3,11 +3,12 @@
 import { readFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { emitKeypressEvents, type Key } from "node:readline";
-import { stripVTControlCharacters } from "node:util";
+import { inspect, stripVTControlCharacters } from "node:util";
 
 import yoctoSpinner from "yocto-spinner";
 import { bold, cyan, dim, green, magenta, red, yellow } from "yoctocolors";
 
+import { assertJsonValue, isJsonValue, type JsonValue } from "./json.ts";
 import { discoverMachines, machinesUserHome } from "./discovery.ts";
 import {
   type AgentPresetSummary,
@@ -48,7 +49,7 @@ try {
       "  machine list",
       "  machine agents",
       "  machine show <name-or-file>",
-      "  machine run <name-or-file> [--agent role=preset]... [--] [input]",
+      "  machine run <name-or-file> [--agent role=preset]... [--input-file <file|->] [--] [input]",
     ].join("\n"));
   }
 } catch (cause) {
@@ -70,7 +71,7 @@ async function resolveMachine(selector: string) {
 }
 
 async function runMachine(machinePath: string, args: string[]) {
-  const invocation = parseRunArguments(args);
+  const invocation = await parseRunArguments(args);
   printMachineHeader(machinePath);
   const prepared = await prepareMachineRun({
     cwd: process.cwd(),
@@ -89,6 +90,9 @@ async function runMachine(machinePath: string, args: string[]) {
 
     status.succeed();
     console.log(`--> ${String(result.value)}`);
+    if (result.output !== undefined) {
+      console.log(isJsonValue(result.output) ? JSON.stringify(result.output, null, 2) : inspect(result.output));
+    }
   } catch (cause) {
     status.fail();
     throw cause;
@@ -97,7 +101,8 @@ async function runMachine(machinePath: string, args: string[]) {
   }
 }
 
-function parseRunArguments(args: string[]) {
+async function parseRunArguments(args: string[]) {
+  let inputFile: string | undefined;
   const agentOverrides = new Map<string, string>();
   let index = 0;
 
@@ -106,6 +111,12 @@ function parseRunArguments(args: string[]) {
     if (argument === "--") {
       index += 1;
       break;
+    }
+    if (argument === "--input-file") {
+      if (inputFile !== undefined || args[index + 1] === undefined) throw new Error("Expected one --input-file <file|->");
+      inputFile = args[index + 1];
+      index += 2;
+      continue;
     }
     if (argument !== "--agent") break;
 
@@ -131,10 +142,20 @@ function parseRunArguments(args: string[]) {
     index += 2;
   }
 
-  return {
-    agentOverrides,
-    input: args.slice(index).join(" "),
-  };
+  let input: JsonValue = args.slice(index).join(" ");
+  if (inputFile !== undefined) {
+    if (args.length > index) throw new Error("Use positional input or --input-file, not both");
+    let text: string;
+    if (inputFile === "-") {
+      const chunks: Buffer[] = [];
+      for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
+      text = Buffer.concat(chunks).toString("utf8");
+    } else text = await readFile(inputFile, "utf8");
+    const parsed: unknown = JSON.parse(text);
+    assertJsonValue(parsed, "Machine input");
+    input = parsed;
+  }
+  return { agentOverrides, input };
 }
 
 function printMachineListing(found: MachineSummary, separate: boolean) {

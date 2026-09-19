@@ -44,6 +44,7 @@ try {
     import { jevAgent, jevProvider } from "@dna113p/machines/jev";
     import { openRouterDecisionAgent, openRouterDecisionProvider } from "@dna113p/machines/openrouter";
     import { listAgentPresets, listMachines } from "@dna113p/machines/launcher";
+    import { startMachineHost } from "@dna113p/machines/host";
     import { createMachinesMcpServer } from "@dna113p/machines/mcp";
     import extension from "@dna113p/machines/pi-extension";
     assert.equal(typeof acpAgent, "function");
@@ -75,7 +76,10 @@ try {
       work: operation(() => ({ type: "completed" }), { completed: "done" }), done: final(),
     }});
     assert.equal((await run(definition)).value, "done");
+    const host = await startMachineHost({ machine: "./structured.mjs", cwd: process.cwd(), input: { task: "packed", enabled: false } });
+    assert.deepEqual((await host.result).output, { task: "packed", enabled: false });
   `;
+  await writeFile(join(temporary, "structured.mjs"), `export const description = "Returns packaged input"; export default ({machine,final},input) => machine({ initial:"done", output:()=>input, states:{done:final()} });`);
   await writeFile(join(temporary, "consumer.mjs"), code);
   execFileSync(process.execPath, ["consumer.mjs"], { cwd: temporary, stdio: "inherit", env: childEnvironment });
   const installed = join(temporary, "node_modules/@dna113p/machines");

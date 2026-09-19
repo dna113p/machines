@@ -483,3 +483,30 @@ see the built package's `dist/examples/operation.js`, `human.js`, and
 Verify the final state and the expected effect, including a feedback/error branch
 when it changes behavior. Real Agent execution is a separate check that requires
 the configured harness and any external authorization for the task.
+
+## Structured input and workflow output
+
+Launch input can be any JSON value. Existing string factories continue to work;
+when input is omitted the factory still receives `""`. A structured-input Machine
+should accept `JsonValue` (or `unknown`) and validate its own shape before work.
+JSON `null`, `false`, and `0` remain distinct from omitted input.
+
+Pass structured input with `machine run <name> --input-file input.json`, or use
+`--input-file -` for JSON on stdin. Positional input remains a string. MCP and Pi
+`machine_start` accept JSON directly. Files and images should be represented by
+references that the Machine knows how to resolve; a reference does not itself
+make an Agent runner multimodal.
+
+Use XState's top-level `output` to return a workflow result:
+
+```ts
+return machine({
+  initial: "work",
+  output: () => ({ outcome: "complete", summary: "Verified the change" }),
+  states: { /* workflow states */ },
+});
+```
+
+Direct runs retain XState's output behavior. Hosted output must be JSON-compatible;
+unsupported values fail explicitly instead of being silently converted. The CLI
+prints declared output, and completed MCP/Pi snapshots include it.

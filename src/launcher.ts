@@ -2,6 +2,7 @@ import { basename, dirname, isAbsolute, resolve } from "node:path";
 
 import type { AnyStateMachine, SnapshotFrom } from "xstate";
 
+import { assertJsonValue, type JsonValue } from "./json.ts";
 import type { AgentPreset } from "./agent-bindings.ts";
 import { configuredAgentPresets, type LauncherLocation, type MachineSummary, type AgentPresetSummary } from "./catalog.ts";
 import { queryCatalog } from "./discovery-worker.ts";
@@ -22,7 +23,7 @@ import {
 
 export interface PrepareMachineRunOptions extends LauncherLocation {
   readonly machine: string;
-  readonly input?: string;
+  readonly input?: JsonValue;
   readonly agents?: Readonly<Record<string, string>>;
 }
 
@@ -45,6 +46,7 @@ export async function listAgentPresets(location: LauncherLocation = {}): Promise
 export async function prepareMachineRun(
   options: PrepareMachineRunOptions,
 ): Promise<PreparedMachineRun> {
+  if (options.input !== undefined) assertJsonValue(options.input, "Machine input");
   const cwd = options.cwd ?? process.cwd();
   const home = options.home ?? machinesUserHome();
   const path = await resolveMachine(options.machine, cwd, home);
@@ -58,7 +60,7 @@ export async function prepareMachineRun(
 
   const definition = await loaded.default(
     { agent, final, human, machine, operation },
-    options.input ?? "",
+    options.input === undefined ? "" : options.input,
   ) as AnyStateMachine;
   const configured = await configuredAgentPresets(cwd, home);
   const usedAgentRoles = requiredAgentNames(definition);
