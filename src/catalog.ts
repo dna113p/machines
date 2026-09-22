@@ -5,6 +5,8 @@ import { codexAgent } from "./codex.ts";
 import { deepseekAgent } from "./deepseek.ts";
 import { decisionAgent } from "./decision.ts";
 import { jevAgent, jevProvider } from "./jev.ts";
+import { layaAgent, layaProvider } from "./laya.ts";
+import { vonAgent, vonProvider } from "./von.ts";
 import { openRouterDecisionAgent, openRouterDecisionProvider } from "./openrouter.ts";
 import { discoverMachines, machinesUserHome } from "./discovery.ts";
 import type { AgentRunner } from "./index.ts";
@@ -95,7 +97,7 @@ export async function configuredAgentPresets(
 ): Promise<ResolvedAgentPresets> {
   const configured = await loadAgentBindings(cwd, home, {
     acpAgent, agyAgent, codexAgent, deepseekAgent, decisionAgent, jevAgent, jevProvider,
-    openRouterDecisionAgent, openRouterDecisionProvider,
+    openRouterDecisionAgent, openRouterDecisionProvider, layaAgent, layaProvider, vonAgent, vonProvider,
   });
   const defaultRunner = acpAgent("npx", ["-y", "pi-acp"], {
     harness: "pi-acp",
@@ -109,10 +111,12 @@ export async function configuredAgentPresets(
   const deepseekRunner = deepseekAgent("dsh", [], { output: "capture" });
   const jevRunner = jevAgent();
   const openRouterRunner = openRouterDecisionAgent();
+  const layaRunner = layaAgent();
+  const vonRunner = vonAgent();
   return {
     agents: {
       default: defaultRunner, agy: agyRunner, codex: codexRunner, deepseek: deepseekRunner, jev: jevRunner,
-      "openrouter-decision": openRouterRunner, ...configured.agents,
+      "openrouter-decision": openRouterRunner, laya: layaRunner, von: vonRunner, ...configured.agents,
     },
     presets: {
       default: {
@@ -145,11 +149,21 @@ export async function configuredAgentPresets(
         harness: "openrouter-decision",
         runner: openRouterRunner,
       },
+      laya: {
+        description: "Classifies supplied evidence through a self-hosted Laya bridge; does not execute tools",
+        harness: "laya",
+        runner: layaRunner,
+      },
+      von: {
+        description: "Classifies supplied evidence through a self-hosted Von server; does not execute tools",
+        harness: "von",
+        runner: vonRunner,
+      },
       ...configured.presets,
     },
     sources: {
       default: "built in", agy: "built in", codex: "built in", deepseek: "built in", jev: "built in",
-      "openrouter-decision": "built in", ...configured.sources,
+      "openrouter-decision": "built in", laya: "built in", von: "built in", ...configured.sources,
     },
   };
 }

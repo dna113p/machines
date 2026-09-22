@@ -3,10 +3,12 @@ import { parseArgs } from "node:util";
 import { decisionAgent, type DecisionEvent, type DecisionProvider } from "../src/decision.ts";
 import { agent, final, machine, run, type Event } from "../src/index.ts";
 import { jevProvider } from "../src/jev.ts";
+import { layaProvider } from "../src/laya.ts";
+import { vonProvider } from "../src/von.ts";
 import { openRouterDecisionProvider } from "../src/openrouter.ts";
 
-// The default run is a fixed fixture, not model inference. --live makes one paid
-// API request, sending only the supplied text (or this synthetic log).
+// The default run is a fixed fixture, not model inference. --live makes one
+// request to the selected service (potentially paid), sending only this evidence.
 const { values, positionals } = parseArgs({
   options: {
     live: { type: "boolean", default: false },
@@ -14,13 +16,16 @@ const { values, positionals } = parseArgs({
   }, allowPositionals: true,
 });
 const live = values.live;
-if (values.provider !== "jev" && values.provider !== "openrouter") {
-  throw new Error("Example provider must be jev or openrouter");
+const providers: Readonly<Record<string, () => DecisionProvider>> = {
+  jev: jevProvider, openrouter: openRouterDecisionProvider, laya: layaProvider, von: vonProvider,
+};
+if (!Object.hasOwn(providers, values.provider)) {
+  throw new Error("Example provider must be jev, openrouter, laya, or von");
 }
 const evidence = positionals.join(" ")
   || "Test setup failed: ECONNREFUSED connecting to the local test database. No assertions ran.";
 const provider: DecisionProvider = live
-  ? (values.provider === "openrouter" ? openRouterDecisionProvider() : jevProvider())
+  ? providers[values.provider]!()
   : {
     name: "offline-fixture",
     decide: () => ({

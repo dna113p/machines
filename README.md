@@ -60,7 +60,7 @@ Run it with `node demo.ts`. No build is needed to develop against the source.
 | Human input | `node examples/human.ts` | Terminal input |
 | Suggestions and choices | `node examples/choices.ts` | Terminal input |
 | Agent contract | `node examples/agent.ts` | Built-in fake runner |
-| Decision-based failure triage | `npm run example:decision` | Offline fixture; `-- --live` uses TypeSafe, `-- --live --provider openrouter` uses OpenRouter |
+| Decision-based failure triage | `npm run example:decision` | Offline fixture; opt-in `-- --live --provider NAME`: `jev`, `openrouter`, `laya`, or `von` (self-hosted for Laya/Von) |
 | Agent escalation | `npm run example:agents` | Built-in fake runners |
 | Child host and Human response | `npm run example:host` | Node only |
 | Real Agent writes and verifies a file | `npm run example:pi` | Configured Pi through `pi-acp`; may use network and model credits |
@@ -204,8 +204,11 @@ edits and options for running outside a Git repository.
 The provider-neutral `decisionAgent(provider)` turns a classification into an
 Agent event without changing the runtime. Use `jevProvider()` / preset `jev`
 for direct TypeSafe access, or `openRouterDecisionProvider()` / preset
-`openrouter-decision` with `OPENROUTER_API_KEY`. Both evaluate only explicitly
-supplied evidence; neither is a coding agent. See
+`openrouter-decision` with `OPENROUTER_API_KEY`. Self-hosted `layaProvider()` /
+preset `laya` and `vonProvider()` / preset `von` use the same interface. All evaluate
+only explicitly supplied evidence; none is a coding agent. See
+[Self-hosted Laya/Von setup](docs/local-decisions.md) for the opt-in Python service
+and deployment limitations, and
 [Decision runners](docs/authoring.md#decision-runners) for provider swapping,
 confidence-aware workflow routing, and the opt-in live example.
 
@@ -219,6 +222,7 @@ custom profiles, and configuration overlays.
 
 ```bash
 npm run check          # typecheck and behavior tests
+npm run test:laya-service # optional Python bridge tests via uv; no model weights
 npm run build          # JavaScript, declarations, examples, and UI assets
 npm run smoke:package  # install a tarball in a temporary project and exercise it
 npm run build:plugin

@@ -28,12 +28,14 @@
     "./decision": { "types": "./dist/src/decision.d.ts", "import": "./dist/src/decision.js" },
     "./jev": { "types": "./dist/src/jev.d.ts", "import": "./dist/src/jev.js" },
     "./openrouter": { "types": "./dist/src/openrouter.d.ts", "import": "./dist/src/openrouter.js" },
+    "./laya": { "types": "./dist/src/laya.d.ts", "import": "./dist/src/laya.js" },
+    "./von": { "types": "./dist/src/von.d.ts", "import": "./dist/src/von.js" },
     "./host": { "types": "./dist/src/host.d.ts", "import": "./dist/src/host.js" },
     "./launcher": { "types": "./dist/src/launcher.d.ts", "import": "./dist/src/launcher.js" },
     "./mcp": { "types": "./dist/mcp/server.d.ts", "import": "./dist/mcp/server.js" },
     "./pi-extension": { "types": "./dist/pi-extension/index.d.ts", "import": "./dist/pi-extension/index.js" }
   },
-  "files": ["dist", "docs/architecture.md", "docs/authoring.md", "docs/integrations.md", "skills", "LICENSE", "README.md"],
+  "files": ["dist", "docs/architecture.md", "docs/authoring.md", "docs/integrations.md", "docs/local-decisions.md", "services/laya/server.py", "skills", "LICENSE", "README.md"],
   "scripts": {
     "build": "node scripts/build.mjs",
     "build:plugin": "npm run build && node scripts/build-plugin.mjs",
@@ -51,7 +53,8 @@
     "smoke:package": "node scripts/smoke-package.mjs",
     "smoke:plugin": "node scripts/smoke-plugin.mjs",
     "test": "node --test tests/*.test.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:laya-service": "uv run --script services/laya/test_server.py"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^1.4.0",

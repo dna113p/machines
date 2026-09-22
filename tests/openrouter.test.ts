@@ -302,7 +302,7 @@ test("failure-triage example stays offline by default and supports explicit Open
     resolve("examples/decision.ts"), "--live", "--provider", "typo",
   ], { encoding: "utf8", timeout: 5000 });
   assert.notEqual(invalid.status, 0);
-  assert.match(invalid.stderr, /provider must be jev or openrouter/);
+  assert.match(invalid.stderr, /provider must be jev, openrouter, laya, or von/);
 });
 
 async function withEnvironment(values: Record<string, string | undefined>, action: () => Promise<void>): Promise<void> {

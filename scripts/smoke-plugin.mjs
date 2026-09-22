@@ -20,6 +20,8 @@ try {
     "skills/machine-builder/SKILL.md",
     "docs/authoring.md",
     "docs/integrations.md",
+    "docs/local-decisions.md",
+    "services/laya/server.py",
   ]) {
     await access(join(plugin, required));
   }
@@ -34,8 +36,23 @@ try {
   assert.deepEqual(classified, { type: "review", decision: {
     choice: "review", model: "fixture", provider: "openrouter-decision",
   } });
+  for (const [name, port] of [["laya", 8001], ["von", 8000]]) {
+    const adapter = await import(pathToFileURL(join(plugin, "dist/src/" + name + ".js")).href);
+    const event = await adapter[name + "Agent"]({
+      baseUrl: "http://127.0.0.1:" + port, apiKey: "fixture-only", model: "fixture-request",
+      fetch: async (url) => {
+        assert.equal(url, "http://127.0.0.1:" + port + "/v1/systemone");
+        return Response.json({ model:"fixture-response", answers:{ decision:{
+          type:"choice", choice:"review", probabilities:{ review:1, done:0 }, confidence:1,
+        } } });
+      },
+    })({ prompt:"Synthetic evidence", outcomes:["review","done"] });
+    assert.equal(event.type, "review");
+    assert.equal(event.decision.provider, name);
+    assert.equal(event.decision.model, "fixture-response");
+  }
   await smokeMcp({ ...config, cwd: resolve(plugin, config.cwd), project: join(temporary, "project") });
-  console.log("Relocated plugin: independent dependencies, OpenRouter decision fixture, widget, discovery, and hosted Human round trip passed.");
+  console.log("Relocated plugin: independent dependencies, OpenRouter/Laya/Von decision fixtures, widget, discovery, and hosted Human round trip passed.");
 } finally {
   await rm(temporary, { recursive: true, force: true });
 }

@@ -24,6 +24,8 @@ try {
     "skills/machine-builder/SKILL.md",
     "docs/authoring.md",
     "docs/integrations.md",
+    "docs/local-decisions.md",
+    "services/laya/server.py",
   ]) {
     assert.ok(packed[0].files.some(({ path }) => path === required), `Missing ${required}`);
   }
@@ -45,6 +47,8 @@ try {
     import { decisionAgent } from "@dna113p/machines/decision";
     import { jevAgent, jevProvider } from "@dna113p/machines/jev";
     import { openRouterDecisionAgent, openRouterDecisionProvider } from "@dna113p/machines/openrouter";
+    import { layaAgent, layaProvider } from "@dna113p/machines/laya";
+    import { vonAgent, vonProvider } from "@dna113p/machines/von";
     import { listAgentPresets, listMachines } from "@dna113p/machines/launcher";
     import { startMachineHost } from "@dna113p/machines/host";
     import { createMachinesMcpServer } from "@dna113p/machines/mcp";
@@ -77,6 +81,23 @@ try {
         answers: { decision: { type: "choice", choice: "completed" } } });
     } }))({ prompt: "Synthetic evidence", outcomes: ["completed"] });
     assert.deepEqual(routed.decision, { choice: "completed", model: "fixture", provider: "openrouter-decision" });
+    for (const [name, factory, makeAgent, port] of [
+      ["laya", layaProvider, layaAgent, 8001], ["von", vonProvider, vonAgent, 8000],
+    ]) {
+      assert.equal(typeof makeAgent, "function");
+      assert.ok((await listAgentPresets()).some(preset => preset.name === name));
+      const event = await decisionAgent(factory({ baseUrl: "http://127.0.0.1:" + port,
+        apiKey: "fixture-only", model: "fixture-request", fetch: async (url) => {
+          assert.equal(url, "http://127.0.0.1:" + port + "/v1/systemone");
+          return Response.json({ model: "fixture-response", answers: { decision: {
+            type: "choice", choice: "completed", probabilities: { completed: 1, review: 0 }, confidence: 1,
+          } } });
+        },
+      }))({ prompt: "Synthetic evidence", outcomes: ["completed", "review"] });
+      assert.equal(event.type, "completed");
+      assert.equal(event.decision.provider, name);
+      assert.equal(event.decision.model, "fixture-response");
+    }
     assert.equal(typeof listMachines, "function");
     assert.equal(typeof createMachinesMcpServer, "function");
     assert.equal(typeof extension, "function");
@@ -106,6 +127,16 @@ try {
     import { decisionAgent, type DecisionProvider, type DecisionEvent } from "@dna113p/machines/decision";
     import { jevProvider, type JevProviderOptions } from "@dna113p/machines/jev";
     import { openRouterDecisionAgent, openRouterDecisionProvider, type OpenRouterDecisionAgentOptions, type OpenRouterDecisionProviderOptions } from "@dna113p/machines/openrouter";
+    import { layaAgent, layaProvider, type LayaAgentOptions, type LayaProviderOptions } from "@dna113p/machines/laya";
+    import { vonAgent, vonProvider, type VonAgentOptions, type VonProviderOptions } from "@dna113p/machines/von";
+    const layaOptions: LayaProviderOptions = { baseUrl: "http://127.0.0.1:8001", timeoutMs: 5000 };
+    const vonOptions: VonProviderOptions = { baseUrl: "http://127.0.0.1:8000", timeoutMs: 5000 };
+    const laya: DecisionProvider = layaProvider(layaOptions);
+    const von: DecisionProvider = vonProvider(vonOptions);
+    const layaAgentOptions: LayaAgentOptions = { ...layaOptions, question: "Which outcome?" };
+    const vonAgentOptions: VonAgentOptions = { ...vonOptions, question: "Which outcome?" };
+    const localEvaluate = (): Promise<DecisionEvent> => layaAgent(layaAgentOptions)({ prompt:"Evidence", outcomes:["yes","no"] });
+    const vonEvaluate = (): Promise<DecisionEvent> => vonAgent(vonAgentOptions)({ prompt:"Evidence", outcomes:["yes","no"] });
     const routerOptions: OpenRouterDecisionProviderOptions = { model: "typesafe/jev-1.13", timeoutMs: 5000 };
     const routerProvider: DecisionProvider = openRouterDecisionProvider(routerOptions);
     const routerAgentOptions: OpenRouterDecisionAgentOptions = { ...routerOptions, question: "Which outcome?" };

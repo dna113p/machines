@@ -2,3 +2,5 @@ node_modules/
 dist/
 build/
 *.tgz
+__pycache__/
+*.py[cod]

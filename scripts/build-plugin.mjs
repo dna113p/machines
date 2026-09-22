@@ -10,6 +10,8 @@ await mkdir(destination, { recursive: true });
 for (const entry of ["dist", "docs", "skills", "README.md", "AGENTS.md", "LICENSE", "package.json", "package-lock.json"]) {
   await cp(join(root, entry), join(destination, entry), { recursive: true });
 }
+await mkdir(join(destination, "services/laya"), { recursive: true });
+await cp(join(root, "services/laya/server.py"), join(destination, "services/laya/server.py"));
 for (const entry of [".codex-plugin", ".mcp.json"]) {
   await cp(join(root, "codex/machines", entry), join(destination, entry), { recursive: true });
 }
