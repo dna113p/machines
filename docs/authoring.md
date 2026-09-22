@@ -504,6 +504,20 @@ The [OpenRouter OpenAPI contract](https://openrouter.ai/openapi.json) and
 September 18, 2026. This endpoint is alpha; mocked contract tests do not establish
 account access, live response compatibility, or classification quality.
 
+### Self-hosted Laya and Von adapters
+
+`layaProvider()` / `layaAgent()` and `vonProvider()` / `vonAgent()` implement the
+same Choice-only contract, exported from `@dna113p/machines/laya` and
+`@dna113p/machines/von`. All four factories are injected into preset factories;
+the built-in presets are `laya` and `von`. They do not require cloud credentials
+and perform no setup or network access during discovery.
+
+Run a separate model service before invoking either adapter. Laya uses the
+included persistent Python bridge; Von uses its upstream server. See
+[Self-hosted decisions](local-decisions.md) for setup, configuration, minimum
+choices/context limits, security boundaries, and the important Von checkpoint
+loading caveat. No runtime primitives or workflow transitions change.
+
 ### Try the failure-triage example
 
 From this checkout:
@@ -514,6 +528,9 @@ npm run example:decision
 npm run example:decision -- --live --provider openrouter
 # Direct TypeSafe: reads TYPESAFE_API_KEY (existing behavior).
 npm run example:decision -- --live
+# Self-hosted: start the corresponding service first (see setup above).
+npm run example:decision -- --live --provider laya
+npm run example:decision -- --live --provider von
 # Or provide your own already-redacted evidence:
 npm run example:decision -- --live --provider openrouter "Assertion failed: expected status 200, got 500"
 ```

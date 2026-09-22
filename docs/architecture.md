@@ -47,6 +47,9 @@ MCP server ────┘       ↑
 | `src/decision.ts` | Provider-neutral classification contract, validated outcome events, normalized observations |
 | `src/jev.ts` | TypeSafe Choice HTTP transport, authentication, model selection, and bounded requests |
 | `src/openrouter.ts` | OpenRouter Decisions Choice transport, independent credentials, optional result metadata |
+| `src/laya.ts`, `src/von.ts` | Self-hosted Choice providers with independent configuration |
+| `src/system-one-http.ts` | Shared bounded HTTP transport for the self-hosted providers |
+| `services/laya/server.py` | Opt-in, externally managed single-checkpoint Python Choice bridge |
 | `src/agent-protocol.ts` | Shared Agent prompt instructions and Machines event decoding |
 | `src/discovery.ts` | Project/global definition locations and precedence |
 | `src/launcher.ts` | Definition metadata, Agent bindings, preflight, single-use launch preparation |
