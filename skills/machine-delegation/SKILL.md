@@ -17,17 +17,18 @@ an absolute `cwd`; Pi uses the conversation's working directory. With only a she
 run `machine list` and `machine agents` there (`./machine` in a source checkout).
 See [Integrations](../../docs/integrations.md) if the tools are unavailable.
 
-Choose an existing Machine by its description, then read its returned source path
-or use `machine show <name>`. Check its input format, Agent roles, actual workspace,
+Evaluate candidate Machines by their descriptions, then read their returned source
+paths or use `machine show <name>`. Check input format, Agent roles, actual workspace,
 output artifacts, final states, and effects such as commits or publishing. A matching
 name alone does not establish that the workflow fits the delegated task.
 
-If none fits, use [machine-builder](../machine-builder/SKILL.md) to create the
-smallest suitable definition in the project's `.machines/`. Creating a task-scoped
-Machine is part of a request to delegate this way; keep global installation and
-unrelated workflow changes outside that scope. A single Agent followed by an
-Operation that saves or verifies its result is enough for many assignments. Use
-the [delegation starter](references/delegation-machine.md) when there is no existing
+Decide whether to reuse, adapt, or create a Machine using
+[machine-builder](../machine-builder/SKILL.md). A generic Machine's ability to
+accept the task as a prompt is only one consideration; choose a workflow whose
+states express the decisions and verification the task needs. Authoring a
+task-specific Machine is part of the delegated work and needs no separate
+permission. Keep global installation and unrelated workflow changes outside that
+scope. Use the [delegation starter](references/delegation-machine.md) when there is no existing
 result contract to follow. Add review or bounded revision states when the work
 needs them, and Human states for decisions that belong to the user.
 
