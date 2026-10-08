@@ -1,6 +1,7 @@
 import { loadAgentBindings, type AgentPreset } from "./agent-bindings.ts";
 import { acpAgent } from "./acp.ts";
 import { agyAgent } from "./agy.ts";
+import { chatGptWebAgent } from "./chatgpt-web.ts";
 import { codexAgent } from "./codex.ts";
 import { deepseekAgent } from "./deepseek.ts";
 import { decisionAgent } from "./decision.ts";
@@ -96,7 +97,7 @@ export async function configuredAgentPresets(
   home: string,
 ): Promise<ResolvedAgentPresets> {
   const configured = await loadAgentBindings(cwd, home, {
-    acpAgent, agyAgent, codexAgent, deepseekAgent, decisionAgent, jevAgent, jevProvider,
+    acpAgent, agyAgent, chatGptWebAgent, codexAgent, deepseekAgent, decisionAgent, jevAgent, jevProvider,
     openRouterDecisionAgent, openRouterDecisionProvider, layaAgent, layaProvider, vonAgent, vonProvider,
   });
   const defaultRunner = acpAgent("npx", ["-y", "pi-acp"], {
@@ -108,6 +109,7 @@ export async function configuredAgentPresets(
     output: "capture",
   });
   const codexRunner = codexAgent("codex", [], { output: "capture" });
+  const chatGptWebRunner = chatGptWebAgent({ output: "capture" });
   const deepseekRunner = deepseekAgent("dsh", [], { output: "capture" });
   const jevRunner = jevAgent();
   const openRouterRunner = openRouterDecisionAgent();
@@ -115,7 +117,7 @@ export async function configuredAgentPresets(
   const vonRunner = vonAgent();
   return {
     agents: {
-      default: defaultRunner, agy: agyRunner, codex: codexRunner, deepseek: deepseekRunner, jev: jevRunner,
+      default: defaultRunner, agy: agyRunner, codex: codexRunner, "chatgpt-web": chatGptWebRunner, deepseek: deepseekRunner, jev: jevRunner,
       "openrouter-decision": openRouterRunner, laya: layaRunner, von: vonRunner, ...configured.agents,
     },
     presets: {
@@ -133,6 +135,11 @@ export async function configuredAgentPresets(
         description: "Runs the Codex CLI in a read-only sandbox",
         harness: "codex",
         runner: codexRunner,
+      },
+      "chatgpt-web": {
+        description: "Runs a new ChatGPT web conversation that works locally through rig-bridge",
+        harness: "chatgpt-web",
+        runner: chatGptWebRunner,
       },
       deepseek: {
         description: "Runs DeepSeek Harness (dsh) through ACP",
@@ -162,7 +169,7 @@ export async function configuredAgentPresets(
       ...configured.presets,
     },
     sources: {
-      default: "built in", agy: "built in", codex: "built in", deepseek: "built in", jev: "built in",
+      default: "built in", agy: "built in", codex: "built in", "chatgpt-web": "built in", deepseek: "built in", jev: "built in",
       "openrouter-decision": "built in", laya: "built in", von: "built in", ...configured.sources,
     },
   };

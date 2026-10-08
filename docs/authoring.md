@@ -258,6 +258,128 @@ See the [Codex non-interactive documentation](https://learn.chatgpt.com/docs/non
 for installation-independent execution details. Live runner validation used
 Codex CLI `0.153.2`; deterministic tests do not require a Codex installation or login.
 
+### ChatGPT Web
+
+The built-in `chatgpt-web` preset starts a new conversation in ChatGPT on the web
+and points it at the Agent's working directory through
+[rig-bridge](https://github.com/dna113p/rig-bridge). ChatGPT plans and reasons in
+the browser; rig-bridge executes its file and shell tools on this computer. Each
+Agent invocation is a fresh conversation.
+
+One-time setup:
+
+1. Run rig-bridge and expose it to ChatGPT (its README covers the service and the
+   Secure MCP Tunnel). In ChatGPT, enable Developer mode and add the server as an
+   app named `rig-bridge`, or set `connector` to the name you chose.
+2. Run any `chatgpt-web` Agent once. With no DevTools endpoint at
+   `http://127.0.0.1:9222`, the runner launches a Chromium-family browser with a
+   dedicated profile at `~/.local/state/machines/chatgpt-web-profile`. Sign in to
+   ChatGPT in that window. The first run fails if the composer never appears;
+   later runs reuse the login.
+
+```bash
+machine run my-workflow --agent default=chatgpt-web -- "Fix the failing test"
+```
+
+The runner opens a tab, tries to enable the connector from the composer's `+`
+menu, and pastes a prompt telling ChatGPT to call `workspace_open` with the
+absolute working directory, work only through that workspace, and finish with a
+`MACHINES_EVENT` line. It waits until generation stops and the reply has been
+quiet, then reads the event from the last assistant message. Commands that the
+matching rig-bridge workspace runs during the turn are reported as tool activity
+through rig-bridge's local `/api/status`, along with the conversation URL.
+Successful runs close their tab; failed runs leave it open for inspection.
+
+The launched browser is detached and persists between runs so the login survives
+and runs can share it. Machines does not stop it, and terminating a run does not
+stop a reply already in progress in the tab. You can instead start a browser
+yourself with `--remote-debugging-port` and a non-default `--user-data-dir`
+(Chrome refuses remote debugging on the default profile) and point `cdpUrl` at it.
+Headless Chrome is usually blocked by ChatGPT's bot checks, so it is not the default.
+
+Write tools usually ask for confirmation in ChatGPT. By default the runner leaves
+them for you and reports that it is waiting. For trusted, unattended workflows,
+opt in with a preset:
+
+```ts
+export default ({ chatGptWebAgent }: { chatGptWebAgent: typeof import("@dna113p/machines/chatgpt-web").chatGptWebAgent }) => ({
+  "chatgpt-unattended": {
+    description: "ChatGPT web through rig-bridge with automatic tool confirmation",
+    harness: "chatgpt-web",
+    runner: chatGptWebAgent({ approveToolCalls: true, output: "capture" }),
+  },
+});
+```
+
+Options (environment fallbacks in parentheses):
+
+- `url` (`CHATGPT_WEB_URL`): start page, such as a ChatGPT Project or GPT whose
+  instructions or connectors you want. Defaults to `https://chatgpt.com/`.
+- `model` (`CHATGPT_WEB_MODEL`): model slug appended as `?model=`.
+- `connector` (`CHATGPT_WEB_CONNECTOR`): app name, default `rig-bridge`.
+  `selectConnector: false` skips the `+` menu and relies on the prompt.
+- `cdpUrl` (`CHATGPT_WEB_CDP_URL`): DevTools endpoint, default `http://127.0.0.1:9222`.
+- `launch`: `true` (default), `false`, or `{ executable, userDataDir, headless, args }`.
+  The executable falls back to `CHATGPT_WEB_BROWSER`, then a PATH search for
+  Chrome, Chromium, Brave, Edge, or Vivaldi; the profile to `CHATGPT_WEB_PROFILE`.
+- `approveToolCalls` and `approveLabels`: click visible confirmation buttons with
+  these labels (`Confirm`, `Allow`, `Approve`, `Allow once`). Off by default.
+- `bridgeStatusUrl` (`RIG_BRIDGE_STATUS_URL`): rig-bridge status endpoint, default
+  `http://127.0.0.1:8767/api/status`, or `false` to disable activity reporting.
+  Another conversation using the same directory at the same time also appears.
+- `acknowledgeHandoff`: mark handoff notifications read on rig-bridge when completed.
+  Defaults to `true`.
+- `timeoutMs` (60 minutes), `settleMs` (5 seconds of quiet after generation),
+  `pollMs` (1 second), and `keepTab`.
+- `selectors`: override the CSS selectors for the composer, send and stop buttons,
+  assistant messages, `+` button, and menu items when the ChatGPT page changes.
+- `output`: `stream` (default) or `capture`, as for the Codex runner.
+
+#### rig-bridge handoff notifications
+
+When rig-bridge is updated with persistent thread and handoff support, assistants
+are instructed to call `work_handoff` before returning control to the user.
+The runner leverages this notification in several ways:
+
+1. **Immediate completion signal**: Once rig-bridge records the handoff, the runner
+   knows tool execution is finished and generation is concluding, exiting without
+   extended idle-polling delays.
+2. **Outcome fallback**: If ChatGPT completes work and calls `work_handoff` but omits
+   the explicit `MACHINES_EVENT` line in its markdown reply, the runner maps the handoff's
+   reason (`completed`, `needs_input`, `blocked`, `failed`, `cancelled`) to the Machine event.
+3. **Rich metadata**: The returned event includes `summary` and `handoff` metadata
+   (`id`, `projectId`, `threadId`, `runId`, `reason`, `summary`, `createdAt`),
+   making outcome details accessible to subsequent Machine states or human prompts.
+4. **Direct Machine operations**: Machines can also query or wait for rig-bridge handoff
+   notifications directly using `rigBridgeHandoffOperation` from `@dna113p/machines/chatgpt-web`:
+
+```ts
+import { operation } from "@dna113p/machines";
+import { rigBridgeHandoffOperation } from "@dna113p/machines/chatgpt-web";
+
+export default ({ machine, final }: MachinePrimitives) => machine({
+  initial: "checkHandoff",
+  states: {
+    checkHandoff: operation(
+      rigBridgeHandoffOperation({ cwd: process.cwd() }),
+      {
+        completed: "verify",
+        needs_input: "askUser",
+        blocked: "escalate",
+      },
+    ),
+    // ...
+  },
+});
+```
+
+This runner automates a consumer web page, not an API. It depends on ChatGPT's
+current page structure and on your account's plan supporting custom connectors,
+and it is subject to OpenAI's terms for your account. Deterministic tests drive a
+fake ChatGPT page in a temporary headless Chrome and skip when no Chromium-family
+browser is installed. `npm run example:chatgpt-web` writes and verifies a file in
+a temporary directory and opts in to automatic tool confirmation.
+
 ### DeepSeek Harness (DSH)
 
 The built-in `deepseek` preset runs an installed `dsh` command through its shipped

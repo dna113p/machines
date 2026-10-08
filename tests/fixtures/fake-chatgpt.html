@@ -1,0 +1,92 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Fake ChatGPT</title></head>
+<body>
+<main id="thread"></main>
+<form id="composer-form">
+  <button type="button" data-testid="composer-plus-btn">+</button>
+  <div id="menu" hidden>
+    <div role="menuitem" id="developer">Developer mode</div>
+    <div role="menuitemcheckbox" id="connector" hidden>rig-bridge</div>
+  </div>
+  <div id="prompt-textarea" contenteditable="true"></div>
+  <button type="button" data-testid="send-button" disabled>Send</button>
+</form>
+<script>
+  // Mimics the parts of chatgpt.com that the runner depends on.
+  const scenario = new URLSearchParams(location.search).get("scenario") ?? "normal";
+  const composer = document.getElementById("prompt-textarea");
+  const send = document.querySelector('[data-testid="send-button"]');
+  const thread = document.getElementById("thread");
+  const menu = document.getElementById("menu");
+  let connector = false;
+
+  const refresh = () => { send.disabled = composer.innerText.trim() === ""; };
+  composer.addEventListener("input", refresh);
+  if (scenario !== "no-paste") {
+    // ProseMirror turns pasted plain text into paragraphs.
+    composer.addEventListener("paste", event => {
+      event.preventDefault();
+      composer.replaceChildren(...event.clipboardData.getData("text/plain").split("\n").map(line => {
+        const paragraph = document.createElement("p");
+        paragraph.textContent = line;
+        return paragraph;
+      }));
+      refresh();
+    });
+  }
+  // Radix menus open on pointerdown, so synthetic element.click() is not enough.
+  document.querySelector('[data-testid="composer-plus-btn"]').addEventListener("pointerdown", () => { menu.hidden = false; });
+  document.getElementById("developer").addEventListener("click", () => { document.getElementById("connector").hidden = false; });
+  document.getElementById("connector").addEventListener("click", () => { connector = true; });
+  document.addEventListener("keydown", event => { if (event.key === "Escape") menu.hidden = true; });
+
+  const stop = () => {
+    const button = document.createElement("button");
+    button.dataset.testid = "stop-button";
+    button.textContent = "Stop";
+    document.getElementById("composer-form").append(button);
+    return button;
+  };
+  const reply = lines => {
+    const message = document.createElement("div");
+    message.dataset.messageAuthorRole = "assistant";
+    const markdown = document.createElement("div");
+    markdown.className = "markdown";
+    markdown.replaceChildren(...lines.map(line => {
+      const paragraph = document.createElement("p");
+      paragraph.textContent = line;
+      return paragraph;
+    }));
+    message.append(markdown);
+    thread.append(message);
+  };
+  const later = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+  send.addEventListener("click", async () => {
+    const prompt = composer.innerText;
+    composer.replaceChildren();
+    refresh();
+    history.pushState({}, "", "/c/fake-conversation");
+    const event = JSON.stringify({ type: "completed", connector, prompt });
+    let generating = stop();
+    await later(300);
+    if (scenario === "approve") {
+      generating.remove();
+      const confirm = document.createElement("button");
+      confirm.textContent = "Confirm";
+      thread.append(confirm);
+      await new Promise(resolve => confirm.addEventListener("click", resolve, { once: true }));
+      confirm.remove();
+      generating = stop();
+      await later(200);
+    }
+    reply(["Working…"]);
+    await later(300);
+    thread.lastElementChild.remove();
+    generating.remove();
+    reply(scenario === "no-event" || scenario === "handoff-no-event" ? ["Finished without event line."] : ["Finished the task.", `MACHINES_EVENT ${event}`]);
+  });
+</script>
+</body>
+</html>
