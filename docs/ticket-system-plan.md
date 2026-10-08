@@ -1,7 +1,7 @@
 # Ticket automation implementation
 
 Updated 2026-09-18. The implementation lives in the separate sibling
-`auto-machines` repository, package `@dna113p/auto-machines`.
+`machines-dispatch` repository, package `@dna113p/machines-dispatch`.
 
 Machines supplies a public hosted-run interface, structured JSON input, and optional
 JSON workflow output. It has no ticket-store, scheduling, or daemon dependency.

@@ -129,6 +129,6 @@ External applications can own hosted runs without importing private modules or
 parsing terminal output. Hosted input and optional output are JSON values.
 
 Ticket discovery, persistence, scheduling, and tracker updates belong to the
-separate `auto-machines` application. Machines has no dependency on ticketing.
+separate `machines-dispatch` application. Machines has no dependency on ticketing.
 External owners decide how to interpret output; a final state alone does not
 prove that a ticket should close.
