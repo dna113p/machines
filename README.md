@@ -66,6 +66,7 @@ Run it with `node demo.ts`. No build is needed to develop against the source.
 | Real Agent writes and verifies a file | `npm run example:pi` | Configured Pi through `pi-acp`; may use network and model credits |
 | Real AGY writes and verifies a file | `npm run example:agy` | Configured Antigravity CLI (`agy`); may use network and model credits |
 | Real Codex writes and verifies a file | `npm run example:codex` | Configured Codex CLI; may use network and model credits |
+| Real ChatGPT web writes through rig-bridge | `npm run example:chatgpt-web` | rig-bridge connected to ChatGPT, a signed-in automation browser profile; uses your ChatGPT plan |
 | Real DeepSeek Harness writes and verifies a file | `npm run example:deepseek` | Installed `dsh` with a configured ACP profile; may use network and model credits |
 
 ## Run your own workflows
@@ -200,6 +201,11 @@ opts in for its temporary-directory demonstration.
 The built-in `codex` preset runs the Codex CLI in a read-only sandbox. See
 [Codex configuration](docs/authoring.md#codex) for a preset that permits workspace
 edits and options for running outside a Git repository.
+
+The built-in `chatgpt-web` preset opens a new ChatGPT web conversation in a
+dedicated Chromium profile and directs it to work in the Agent's directory
+through rig-bridge. See [ChatGPT Web configuration](docs/authoring.md#chatgpt-web)
+for the one-time connector and browser login setup.
 
 The provider-neutral `decisionAgent(provider)` turns a classification into an
 Agent event without changing the runtime. Use `jevProvider()` / preset `jev`

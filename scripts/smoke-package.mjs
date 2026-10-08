@@ -43,6 +43,7 @@ try {
     import { acpAgent } from "@dna113p/machines/acp";
     import { agyAgent } from "@dna113p/machines/agy";
     import { codexAgent } from "@dna113p/machines/codex";
+    import { chatGptWebAgent, chatGptWebPrompt, rigBridgeHandoffOperation } from "@dna113p/machines/chatgpt-web";
     import { deepseekAgent } from "@dna113p/machines/deepseek";
     import { decisionAgent } from "@dna113p/machines/decision";
     import { jevAgent, jevProvider } from "@dna113p/machines/jev";
@@ -56,6 +57,13 @@ try {
     assert.equal(typeof acpAgent, "function");
     assert.equal(typeof agyAgent, "function");
     assert.equal(typeof codexAgent, "function");
+    assert.equal(typeof rigBridgeHandoffOperation, "function");
+    assert.ok((await listAgentPresets()).some(preset => preset.name === "chatgpt-web" && preset.harness === "chatgpt-web"));
+    assert.ok(chatGptWebPrompt({ prompt: "Task", outcomes: ["completed"], cwd: "/work" }, "rig-bridge").includes('workspace_open with cwd "/work"'));
+    await assert.rejects(
+      async () => chatGptWebAgent({ cdpUrl: "http://127.0.0.1:9", launch: false })({ prompt: "Task", outcomes: ["completed"], cwd: process.cwd() }),
+      /No browser DevTools endpoint/,
+    );
     assert.equal(typeof deepseekAgent, "function");
     assert.ok((await listAgentPresets()).some(preset => preset.name === "deepseek" && preset.harness === "dsh"));
     const deepseekEvent = await deepseekAgent(process.execPath, ["fake-deepseek-agent.mjs", "normal"], { output: "capture" })({
@@ -123,6 +131,7 @@ try {
   await writeFile(join(temporary, "consumer.mts"), `
     import { machine, operation, final, type MachinePrimitives } from "@dna113p/machines";
     import { codexAgent, type CodexAgentOptions } from "@dna113p/machines/codex";
+    import { chatGptWebAgent, rigBridgeHandoffOperation, type ChatGptWebAgentOptions, type RigBridgeHandoff } from "@dna113p/machines/chatgpt-web";
     import { deepseekAgent, type DeepSeekAgentOptions } from "@dna113p/machines/deepseek";
     import { decisionAgent, type DecisionProvider, type DecisionEvent } from "@dna113p/machines/decision";
     import { jevProvider, type JevProviderOptions } from "@dna113p/machines/jev";
@@ -148,6 +157,8 @@ try {
     const evaluate = (): Promise<DecisionEvent> => classify({ prompt: "Evidence", outcomes: ["completed"] });
     const codexOptions: CodexAgentOptions = { sandbox: "workspace-write", output: "capture" };
     codexAgent("codex", [], codexOptions);
+    const chatGptOptions: ChatGptWebAgentOptions = { connector: "rig-bridge", launch: { headless: false }, output: "capture" };
+    chatGptWebAgent(chatGptOptions);
     const deepseekOptions: DeepSeekAgentOptions = { profile: "acp", output: "capture" };
     deepseekAgent("dsh", [], deepseekOptions);
     const make = ({ machine, operation, final }: MachinePrimitives) => machine({
