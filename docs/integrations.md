@@ -166,6 +166,83 @@ a status widget and native Human dialogs. Canceling a dialog leaves its Machine
 waiting; answer later through `machine_respond` with the current request ID.
 Pi exit, session replacement, and reload terminate its session-owned runs.
 
+## Run status for host status lines
+
+Pi and MCP Apps clients render run snapshots in-process. A host that can only run
+a command, such as Claude Code's status line, reads published run status instead.
+Publication is opt-in: set `MACHINES_RUN_STATUS_DIR` to an absolute directory.
+When it is unset nothing is written.
+
+`machine run` and the MCP server then keep one file per run,
+`<dir>/<runId>.json`, replaced atomically on each change (directory `0700`, file
+`0600`):
+
+```json
+{
+  "schemaVersion": 1, "id": "1a2b3c4d-…", "pid": 4242, "owner": "<session id>",
+  "machine": "ticket", "path": "/work/.machines/ticket.ts", "cwd": "/work",
+  "status": "running", "state": "review",
+  "agent": { "harness": "claude", "model": "opus", "thinking": "high" },
+  "startedAt": "2026-03-04T05:06:07.000Z", "updatedAt": "2026-03-04T05:08:12.000Z"
+}
+```
+
+`status` is `running`, `waiting`, `completed`, or `failed`. `state` is the current
+state as a string (JSON for a nested state). `agent` is present while an Agent
+state has reported its identity, and `error` after a failure. A run waiting for
+Human input is `waiting`; MCP-hosted runs also record `human.prompt`, while
+`machine run` asks on its own terminal. `owner` is `MACHINES_RUN_OWNER` when set,
+otherwise `CLAUDE_CODE_SESSION_ID`, otherwise absent. `machine run` exports its
+run id as `MACHINES_RUN_PARENT`, so a Machine started by one of its Operations or
+Agents records that id as `parent`; the status line shows only top-level runs.
+
+Machine input and output are never recorded. A Human prompt is written to the
+`0600` file while its request is waiting, so choose a directory only you can
+read. Publication cannot change a run: a missing or unwritable directory is
+ignored. Starting a run prunes records that finished, or whose process is gone,
+more than an hour ago.
+
+For Claude Code, set the variable in the `env` of its settings so the runs it
+launches publish there, and call the dependency-free renderer from `statusLine`:
+
+```json
+{
+  "env": { "MACHINES_RUN_STATUS_DIR": "/home/you/.cache/machines/run-status" },
+  "statusLine": {
+    "type": "command",
+    "command": "node /path/to/machines/claude/statusline.mjs",
+    "refreshInterval": 5
+  }
+}
+```
+
+A checkout has the script at `claude/statusline.mjs`; an installed package at
+`node_modules/@dna113p/machines/claude/statusline.mjs`. `refreshInterval`
+(seconds) is optional and keeps elapsed time advancing while the conversation is
+idle. To keep an existing status line, call the script from it with the same stdin:
+
+```bash
+input=$(cat)
+printf '%s' "$input" | your-status-line
+printf '%s' "$input" | node /path/to/machines/claude/statusline.mjs
+```
+
+It prints one or two lines per run and nothing when there is nothing to show:
+
+```text
+● 1a2b3c4d  ticket › review · 2m 5s
+  claude · opus · thinking high
+◆ 5e6f7a8b  release › input needed · 41s
+  Publish version 0.4.0?
+```
+
+A session sees the runs it owns; runs without an owner appear in sessions whose
+project directory contains the run's working directory. Finished runs stay for
+30 seconds. A run whose process disappeared without finishing is shown as `lost`
+for the same time, so the status line must run where it can see that process.
+Set `NO_COLOR` (to any value, even an empty one) for plain text and `COLUMNS`
+to change the 120-column truncation.
+
 ## Troubleshooting
 
 For an isolated global catalog, set `MACHINES_USER_HOME` to an absolute directory;

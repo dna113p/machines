@@ -190,6 +190,8 @@ Workflow definitions remain ordinary TypeScript outside `node_modules`.
 For **Codex MCP**, **the portable Codex plugin**, or **the Pi extension**, follow
 [Integrations](docs/integrations.md). No personal marketplace or developer-only
 installation script is required for the direct MCP setup.
+Hosts that only run a status-line command, such as Claude Code, can show running
+Machines through [run status publication](docs/integrations.md#run-status-for-host-status-lines).
 
 ## Execution model and limitations
 

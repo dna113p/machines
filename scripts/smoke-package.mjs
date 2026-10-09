@@ -28,6 +28,7 @@ try {
     "docs/integrations.md",
     "docs/local-decisions.md",
     "services/laya/server.py",
+    "claude/statusline.mjs",
   ]) {
     assert.ok(packed[0].files.some(({ path }) => path === required), `Missing ${required}`);
   }

@@ -20,6 +20,7 @@ import type { StateValue } from "xstate";
 import { MachineSession as RunSession, type RunSnapshot } from "../src/session.ts";
 export type { RunSnapshot } from "../src/session.ts";
 import { listAgentPresets, listMachines } from "../src/launcher.ts";
+import { createRunStatusPublisher, type RunStatusPublisher } from "../src/run-status.ts";
 import { machineCoordinatorGuidelines, machineDiscoveryDescription, machineSupervisionGuidelines } from "../src/coordinator-guidance.ts";
 
 const widgetUri = "ui://machines/run-v1.html";
@@ -158,6 +159,11 @@ const tools = [
 
 export class MachineSession {
   readonly #session = new RunSession();
+  readonly #published = new Map<string, RunStatusPublisher>();
+
+  constructor() {
+    this.#session.subscribe(({ run }) => this.#publish(run));
+  }
 
   async list(input: unknown): Promise<CallToolResult> {
     const { cwd } = parse(listInput, input);
@@ -211,6 +217,29 @@ export class MachineSession {
 
   close(): void {
     this.#session.close();
+    // Closing terminates the session's runs without a final event.
+    for (const publisher of this.#published.values()) publisher.finish({ error: "Machine session closed" });
+    this.#published.clear();
+  }
+
+  #publish(run: RunSnapshot): void {
+    let publisher = this.#published.get(run.id);
+    if (publisher === undefined) {
+      publisher = createRunStatusPublisher({
+        id: run.id,
+        machine: run.machine,
+        path: run.path,
+        cwd: run.cwd,
+        startedAt: run.startedAt,
+      });
+      this.#published.set(run.id, publisher);
+    }
+    if (run.status === "running" || run.status === "waiting") {
+      publisher.update({ status: run.status, state: run.state, agent: run.agent, human: run.human });
+      return;
+    }
+    publisher.finish(run.status === "completed" ? { state: run.state } : { error: run.error ?? "Machine run failed" });
+    this.#published.delete(run.id);
   }
 }
 

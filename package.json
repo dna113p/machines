@@ -38,7 +38,7 @@
     "./mcp": { "types": "./dist/mcp/server.d.ts", "import": "./dist/mcp/server.js" },
     "./pi-extension": { "types": "./dist/pi-extension/index.d.ts", "import": "./dist/pi-extension/index.js" }
   },
-  "files": ["dist", "docs/architecture.md", "docs/authoring.md", "docs/integrations.md", "docs/local-decisions.md", "services/laya/server.py", "skills", "LICENSE", "README.md"],
+  "files": ["dist", "claude/statusline.mjs", "docs/architecture.md", "docs/authoring.md", "docs/integrations.md", "docs/local-decisions.md", "services/laya/server.py", "skills", "LICENSE", "README.md"],
   "scripts": {
     "build": "node scripts/build.mjs",
     "build:plugin": "npm run build && node scripts/build-plugin.mjs",
@@ -57,7 +57,7 @@
     "prepack": "npm run build",
     "smoke:package": "node scripts/smoke-package.mjs",
     "smoke:plugin": "node scripts/smoke-plugin.mjs",
-    "test": "node --test tests/*.test.ts",
+    "test": "node --import ./tests/environment.ts --test tests/*.test.ts",
     "typecheck": "tsc --noEmit",
     "test:laya-service": "uv run --script services/laya/test_server.py"
   },

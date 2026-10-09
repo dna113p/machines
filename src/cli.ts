@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { emitKeypressEvents, type Key } from "node:readline";
@@ -17,6 +18,7 @@ import {
   listMachines,
   prepareMachineRun,
 } from "./launcher.ts";
+import { createRunStatusPublisher } from "./run-status.ts";
 
 import type { StateValue } from "xstate";
 import type { AgentUpdate, RunOptions } from "./index.ts";
@@ -80,20 +82,53 @@ async function runMachine(machinePath: string, args: string[]) {
     agents: Object.fromEntries(invocation.agentOverrides),
   });
   const status = createRunStatus(machinePath);
+  const runId = randomUUID();
+  const published = createRunStatusPublisher({ id: runId, machine: prepared.name, path: prepared.path, cwd: process.cwd() });
+  // Machines started by this run's Operations and Agents are its sub-runs.
+  process.env.MACHINES_RUN_PARENT = runId;
+  let publishedState: string | undefined;
+  // A runner reports its identity as it starts. For a state entered by a
+  // transition that is before the state is announced, so an identity is held
+  // for the rest of the tick and published with the state it belongs to.
+  let arriving: Extract<AgentUpdate, { type: "identity" }> | undefined;
 
   try {
     const result = await prepared.start({
-      onAgentUpdate: status.onAgentUpdate,
-      onHumanInput: status.onHumanInput,
-      onState: status.onState,
+      onAgentUpdate(update) {
+        if (update.type === "identity") {
+          arriving = update;
+          queueMicrotask(() => {
+            if (arriving !== update) return;
+            arriving = undefined;
+            published.update({ agent: update });
+          });
+        }
+        status.onAgentUpdate(update);
+      },
+      onHumanInput(active) {
+        published.update({ status: active ? "waiting" : "running" });
+        status.onHumanInput(active);
+      },
+      onState(state) {
+        const entered = formatState(state);
+        if (entered === publishedState) published.update({ state });
+        else {
+          published.update({ state, agent: arriving });
+          arriving = undefined;
+        }
+        publishedState = entered;
+        status.onState(state);
+      },
     });
 
+    published.finish({ state: result.value });
     status.succeed();
     console.log(`--> ${String(result.value)}`);
     if (result.output !== undefined) {
       console.log(isJsonValue(result.output) ? JSON.stringify(result.output, null, 2) : inspect(result.output));
     }
   } catch (cause) {
+    published.finish({ error: cause instanceof Error ? cause.message : String(cause) });
     status.fail();
     throw cause;
   } finally {
