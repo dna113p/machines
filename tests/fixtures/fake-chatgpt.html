@@ -21,18 +21,37 @@
   const menu = document.getElementById("menu");
   let connector = false;
 
-  const refresh = () => { send.disabled = composer.innerText.trim() === ""; };
+  const paragraph = line => {
+    const element = document.createElement("p");
+    element.textContent = line;
+    return element;
+  };
+  const refresh = () => {
+    const empty = composer.innerText.trim() === "";
+    if (["slow-send", "delayed-draft", "delayed-busy"].includes(scenario) && !empty && send.disabled) {
+      // The send button takes a second to enable once text is entered.
+      setTimeout(() => { send.disabled = composer.innerText.trim() === ""; }, 1000);
+      return;
+    }
+    send.disabled = empty;
+  };
   composer.addEventListener("input", refresh);
+  // ChatGPT restores unsent text saved for a conversation, at load or a moment later.
+  if (scenario === "draft") {
+    composer.append(paragraph("Unsent draft."));
+    refresh();
+  }
   if (scenario !== "no-paste") {
-    // ProseMirror turns pasted plain text into paragraphs.
+    // ProseMirror turns pasted plain text into paragraphs and keeps what the composer already holds.
     composer.addEventListener("paste", event => {
       event.preventDefault();
-      composer.replaceChildren(...event.clipboardData.getData("text/plain").split("\n").map(line => {
-        const paragraph = document.createElement("p");
-        paragraph.textContent = line;
-        return paragraph;
-      }));
+      if (scenario === "late-draft") composer.append(paragraph("Unsent draft."));
+      composer.append(...event.clipboardData.getData("text/plain").split("\n").map(paragraph));
       refresh();
+      // The draft is restored after the message was entered, before the send button is ready.
+      if (scenario === "delayed-draft") setTimeout(() => { composer.append(paragraph("Unsent draft.")); }, 400);
+      // A reply starts in the conversation after the message was entered, as when another tab sends to it.
+      if (scenario === "delayed-busy") setTimeout(stop, 400);
     });
   }
   // Radix menus open on pointerdown, so synthetic element.click() is not enough.
@@ -53,21 +72,27 @@
     message.dataset.messageAuthorRole = "assistant";
     const markdown = document.createElement("div");
     markdown.className = "markdown";
-    markdown.replaceChildren(...lines.map(line => {
-      const paragraph = document.createElement("p");
-      paragraph.textContent = line;
-      return paragraph;
-    }));
+    markdown.replaceChildren(...lines.map(paragraph));
     message.append(markdown);
     thread.append(message);
   };
   const later = ms => new Promise(resolve => setTimeout(resolve, ms));
+  // Lets the test server see what the page was asked to do.
+  const tell = (kind, text = "") => fetch("/page-events", { method: "POST", body: JSON.stringify({ kind, text }) }).catch(() => {});
+
+  // An existing conversation already shows an earlier assistant reply.
+  const existing = location.pathname.startsWith("/c/");
+  if (existing) reply(["Earlier assistant reply."]);
+  if (scenario === "busy") stop();
+  if (scenario === "moved") history.replaceState({}, "", "/");
 
   send.addEventListener("click", async () => {
     const prompt = composer.innerText;
+    tell("sent", prompt);
+    if (scenario === "stuck") return;
     composer.replaceChildren();
     refresh();
-    history.pushState({}, "", "/c/fake-conversation");
+    if (!existing) history.pushState({}, "", "/c/fake-conversation");
     const event = JSON.stringify({ type: "completed", connector, prompt });
     let generating = stop();
     await later(300);
@@ -78,6 +103,7 @@
       thread.append(confirm);
       await new Promise(resolve => confirm.addEventListener("click", resolve, { once: true }));
       confirm.remove();
+      tell("approved");
       generating = stop();
       await later(200);
     }

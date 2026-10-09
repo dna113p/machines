@@ -157,6 +157,46 @@ export type ChatGptWebAgentRunner = (
   report?: AgentReporter,
 ) => Promise<ChatGptWebEvent>;
 
+/** One message for an existing ChatGPT web conversation that works in `cwd` through rig-bridge. */
+export interface ChatGptWebContinueInput {
+  /** Conversation URL, such as the `conversation` of an earlier ChatGPT Web event. */
+  readonly conversation: string;
+  /** Message to send. It is submitted exactly as given. */
+  readonly text: string;
+  readonly cwd: string;
+  /** Only count a handoff from this rig-bridge thread. */
+  readonly bridgeThreadId?: string;
+}
+
+export type ChatGptWebContinueRunner = (
+  input: ChatGptWebContinueInput,
+  report?: AgentReporter,
+) => Promise<ChatGptWebEvent>;
+
+const defaultApproveLabels: readonly string[] = ["Confirm", "Allow", "Approve", "Allow once"];
+const conversationPath = /\/c\/([\w-]+)/u;
+
+function outputEmitter(report: AgentReporter | undefined, outputMode: "capture" | "stream"): (text: string) => void {
+  return text => {
+    const line = text.endsWith("\n") ? text : `${text}\n`;
+    report?.({ type: "output", text: line });
+    if (outputMode === "stream") process.stdout.write(line);
+  };
+}
+
+function parseConversation(value: unknown): { readonly href: string; readonly id: string } {
+  let url: URL | undefined;
+  try { url = new URL(String(value)); } catch { /* reported below */ }
+  const id = url === undefined ? undefined : conversationPath.exec(url.pathname)?.[1];
+  if (
+    url === undefined || id === undefined || url.protocol !== "https:" || url.host !== "chatgpt.com"
+    || url.username !== "" || url.password !== ""
+  ) {
+    throw new Error("ChatGPT Web continuation requires an https://chatgpt.com/c/<id> conversation URL without credentials");
+  }
+  return { href: url.href, id };
+}
+
 /** Runs one fresh ChatGPT web conversation that works in the request's directory via rig-bridge. */
 export function chatGptWebAgent(options: ChatGptWebAgentOptions = {}): ChatGptWebAgentRunner {
   return async (request, report): Promise<ChatGptWebEvent> => {
@@ -183,11 +223,7 @@ export function chatGptWebAgent(options: ChatGptWebAgentOptions = {}): ChatGptWe
       harness: options.harness ?? "chatgpt-web",
       ...(model === undefined ? {} : { model }),
     });
-    const emit = (text: string) => {
-      const line = text.endsWith("\n") ? text : `${text}\n`;
-      report?.({ type: "output", text: line });
-      if (outputMode === "stream") process.stdout.write(line);
-    };
+    const emit = outputEmitter(report, outputMode);
 
     let page: CdpPage | undefined;
     let targetId: string | undefined;
@@ -217,14 +253,14 @@ export function chatGptWebAgent(options: ChatGptWebAgentOptions = {}): ChatGptWe
 
       const bridge = statusUrl === undefined ? undefined : new BridgeActivity(statusUrl, cwd, Date.now() - 2_000, report);
       const deadline = Date.now() + timeoutMs;
-      const approveLabels = (options.approveLabels ?? ["Confirm", "Allow", "Approve", "Allow once"]).map(label => label.toLowerCase());
+      const approveLabels = (options.approveLabels ?? defaultApproveLabels).map(label => label.toLowerCase());
       let lastText = "";
       let changedAt = Date.now();
       let waitingReported = false;
       let finalText: string | undefined;
       while (Date.now() < deadline) {
         const current = await snapshot(page, selectors, approveLabels);
-        if (conversation === undefined && /\/c\/[\w-]+/u.test(current.url)) {
+        if (conversation === undefined && conversationPath.test(current.url)) {
           conversation = current.url;
           report?.({ type: "tool", id: "chatgpt-conversation", title: `ChatGPT conversation ${conversation}`, status: "in_progress" });
         }
@@ -306,6 +342,138 @@ export function chatGptWebAgent(options: ChatGptWebAgentOptions = {}): ChatGptWe
         `ChatGPT Web Agent failed for "${cwd}": ${message}${conversation === undefined ? "" : `\nConversation: ${conversation}`}`,
         { cause },
       );
+    } finally {
+      page?.close();
+      if (targetId !== undefined && succeeded && options.keepTab !== true) {
+        await fetch(`${cdpUrl}/json/close/${targetId}`).catch(() => undefined);
+      }
+    }
+  };
+}
+
+/**
+ * Sends one message to an existing ChatGPT web conversation and returns the next rig-bridge handoff.
+ * The handoff is the whole result: assistant messages are never read from the page.
+ */
+export function chatGptWebContinue(options: ChatGptWebAgentOptions = {}): ChatGptWebContinueRunner {
+  return async (input, report): Promise<ChatGptWebEvent> => {
+    const { href: conversation, id } = parseConversation(input.conversation);
+    if (typeof input.text !== "string" || input.text.trim() === "") {
+      throw new Error("ChatGPT Web continuation requires a non-empty message");
+    }
+    if (typeof input.cwd !== "string" || input.cwd === "") {
+      throw new Error("ChatGPT Web continuation requires a working directory");
+    }
+    if (input.bridgeThreadId !== undefined && (typeof input.bridgeThreadId !== "string" || input.bridgeThreadId === "")) {
+      throw new Error("ChatGPT Web continuation requires bridgeThreadId to be a non-empty string when given");
+    }
+    if (options.bridgeStatusUrl === false) {
+      throw new Error("ChatGPT Web continuation requires a rig-bridge status URL; bridgeStatusUrl cannot be false");
+    }
+
+    const env = { ...process.env, ...options.env };
+    const cwd = resolve(input.cwd);
+    const cdpUrl = (options.cdpUrl ?? env.CHATGPT_WEB_CDP_URL ?? "http://127.0.0.1:9222").replace(/\/+$/u, "");
+    const statusUrl = options.bridgeStatusUrl ?? env.RIG_BRIDGE_STATUS_URL ?? "http://127.0.0.1:8767/api/status";
+    // Without an assistant selector, no page read below can reach assistant messages.
+    const selectors: PageSelectors = { ...defaultChatGptWebSelectors, ...options.selectors, assistant: undefined };
+    const timeoutMs = options.timeoutMs ?? 60 * 60_000;
+    const pollMs = options.pollMs ?? 1_000;
+    const approveLabels = (options.approveLabels ?? defaultApproveLabels).map(label => label.toLowerCase());
+    const emit = outputEmitter(report, options.output ?? "stream");
+    const reportConversation = (status: "in_progress" | "completed") => {
+      report?.({ type: "tool", id: "chatgpt-conversation", title: `ChatGPT conversation ${conversation}`, status });
+    };
+
+    report?.({ type: "identity", harness: options.harness ?? "chatgpt-web" });
+
+    let page: CdpPage | undefined;
+    let targetId: string | undefined;
+    let succeeded = false;
+    try {
+      await ensureBrowser(cdpUrl, options.launch ?? true, env);
+      targetId = await createTarget(cdpUrl, conversation);
+      page = await CdpPage.connect(await targetSocket(cdpUrl, targetId));
+      await page.send("Runtime.enable");
+      await page.send("Page.enable");
+      await page.send("Page.bringToFront");
+
+      const ready = await waitFor(page, selectors, current => current.composer, 45_000, pollMs);
+      if (ready === undefined) {
+        const url = (await snapshot(page, selectors)).url;
+        throw new Error(`ChatGPT composer did not appear at ${url}. Sign in to ChatGPT in the automation browser profile and retry`);
+      }
+      // The stop button can render after the composer while the page loads, so look twice before sending.
+      await sleep(pollMs);
+      const loaded = await snapshot(page, selectors);
+      if (conversationPath.exec(new URL(loaded.url).pathname)?.[1] !== id) {
+        throw new Error(`ChatGPT opened ${loaded.url} instead of the conversation; the message was not sent`);
+      }
+      if (ready.generating || loaded.generating) {
+        throw new Error("the conversation is busy generating a reply; the message was not sent");
+      }
+      // Entering text adds to what the composer holds, so a saved draft would be sent along with the message.
+      if (normalize(loaded.composerText) !== "") {
+        throw new Error("the composer already holds unsent text; the message was not sent");
+      }
+      reportConversation("in_progress");
+
+      // Only a handoff recorded once the message is on its way can answer it, however long entering it took.
+      let sentAt: number | undefined;
+      try {
+        await submitPrompt(page, selectors, input.text, pollMs, {
+          exact: true,
+          idle: true,
+          onSend: () => { sentAt = Date.now(); },
+        });
+      } catch (cause) {
+        const message = cause instanceof Error ? cause.message : String(cause);
+        // Nothing is sent before onSend runs, so an earlier failure leaves the message unsent.
+        if (sentAt === undefined) throw new Error(`${message}; the message was not sent`, { cause });
+        throw new Error(
+          `delivery of the message is uncertain (${message}). It was not sent again; check the conversation before retrying`,
+          { cause },
+        );
+      }
+
+      const bridge = new BridgeActivity(statusUrl, cwd, sentAt ?? Date.now(), report, {
+        requireWorkspace: true,
+        threadId: input.bridgeThreadId,
+      });
+      const deadline = Date.now() + timeoutMs;
+      let waitingReported = false;
+      let handoff: RigBridgeHandoff | undefined;
+      while (handoff === undefined) {
+        if (Date.now() >= deadline) throw new Error(`no rig-bridge handoff arrived within ${timeoutMs} ms`);
+        const current = await snapshot(page, selectors, approveLabels);
+        if (current.approval !== undefined) {
+          if (options.approveToolCalls === true) {
+            await click(page, current.approval);
+          } else if (!waitingReported) {
+            waitingReported = true;
+            emit(`ChatGPT is waiting for tool approval in the browser tab (${conversation}).`);
+          }
+        }
+        await bridge.poll();
+        handoff = bridge.latestHandoff;
+        if (handoff === undefined) await sleep(pollMs);
+      }
+      // The handoff precedes the end of the reply; let it finish so the conversation is free for the next message.
+      while (Date.now() < deadline && (await snapshot(page, selectors)).generating) {
+        await sleep(pollMs);
+        await bridge.poll();
+      }
+      reportConversation("completed");
+
+      if (options.acknowledgeHandoff ?? true) {
+        await bridge.acknowledge(handoff.id);
+      }
+
+      succeeded = true;
+      return { type: handoff.reason, summary: handoff.summary, handoff, conversation };
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      throw new Error(`ChatGPT Web continuation failed for ${conversation}: ${message}`, { cause });
     } finally {
       page?.close();
       if (targetId !== undefined && succeeded && options.keepTab !== true) {
@@ -457,6 +625,8 @@ class CdpPage {
 // Page interaction. Functions passed to `call` run inside the page and must be self-contained.
 
 interface Point { readonly x: number; readonly y: number }
+/** Selectors for page reads. Without `assistant`, assistant messages are not queried. */
+type PageSelectors = Omit<ChatGptWebSelectors, "assistant"> & { readonly assistant?: string | undefined };
 interface PageSnapshot {
   readonly url: string;
   readonly composer: boolean;
@@ -468,11 +638,11 @@ interface PageSnapshot {
   readonly approval?: Point;
 }
 
-function pageSnapshot(arg: { selectors: ChatGptWebSelectors; approveLabels: string[] }): PageSnapshot {
+function pageSnapshot(arg: { selectors: PageSelectors; approveLabels: string[] }): PageSnapshot {
   const { selectors, approveLabels } = arg;
   const composer = document.querySelector(selectors.composer);
   const send = document.querySelector(selectors.send);
-  const assistants = document.querySelectorAll(selectors.assistant);
+  const assistants = selectors.assistant === undefined ? [] : document.querySelectorAll(selectors.assistant);
   const last = assistants[assistants.length - 1] as HTMLElement | undefined;
   let approval: { x: number; y: number } | undefined;
   if (approveLabels.length > 0) {
@@ -530,13 +700,13 @@ function pasteText(arg: { selector: string; text: string }): boolean {
   return true;
 }
 
-function snapshot(page: CdpPage, selectors: ChatGptWebSelectors, approveLabels: string[] = []): Promise<PageSnapshot> {
+function snapshot(page: CdpPage, selectors: PageSelectors, approveLabels: string[] = []): Promise<PageSnapshot> {
   return page.call(pageSnapshot, { selectors, approveLabels });
 }
 
 async function waitFor(
   page: CdpPage,
-  selectors: ChatGptWebSelectors,
+  selectors: PageSelectors,
   predicate: (snapshot: PageSnapshot) => boolean,
   timeoutMs: number,
   pollMs: number,
@@ -588,11 +758,34 @@ async function selectConnector(page: CdpPage, selectors: ChatGptWebSelectors, co
 
 const normalize = (text: string) => text.replace(/\s+/gu, " ").trim();
 
-async function submitPrompt(page: CdpPage, selectors: ChatGptWebSelectors, prompt: string, pollMs: number): Promise<void> {
-  const probe = normalize(prompt).slice(0, 60);
-  const typed = (current: PageSnapshot) => normalize(current.composerText).includes(probe);
+interface SubmitOptions {
+  /** Send only when the composer holds the prompt and nothing else, rather than text containing its start. */
+  readonly exact?: boolean;
+  /** Refuse to send while ChatGPT is generating, where a prompt would interrupt or queue behind the reply. */
+  readonly idle?: boolean;
+  /** Called immediately before the prompt is sent. */
+  readonly onSend?: () => void;
+}
+
+async function submitPrompt(
+  page: CdpPage,
+  selectors: PageSelectors,
+  prompt: string,
+  pollMs: number,
+  options: SubmitOptions = {},
+): Promise<void> {
+  const whole = normalize(prompt);
+  const probe = whole.slice(0, 60);
+  const typed = (current: PageSnapshot) => {
+    const text = normalize(current.composerText);
+    return options.exact === true ? text === whole : text.includes(probe);
+  };
   await page.call(pasteText, { selector: selectors.composer, text: prompt });
   if (await waitFor(page, selectors, typed, 1_500, pollMs) === undefined) {
+    // Typing into a composer that holds other text could never produce the prompt alone.
+    if (options.exact === true && normalize((await snapshot(page, selectors)).composerText) !== "") {
+      throw new Error("The ChatGPT composer holds text other than the prompt");
+    }
     const composer = await locateWithin(page, selectors.composer, undefined, 1_000);
     if (composer === undefined) throw new Error("ChatGPT composer is unavailable");
     await click(page, composer);
@@ -602,8 +795,18 @@ async function submitPrompt(page: CdpPage, selectors: ChatGptWebSelectors, promp
     }
   }
 
-  const ready = await waitFor(page, selectors, current => current.sendEnabled, 10_000, pollMs);
-  const send = ready === undefined ? undefined : await locateWithin(page, selectors.send, undefined, 500);
+  const busy = (current: PageSnapshot) => options.idle === true && current.generating;
+  const ready = await waitFor(page, selectors, current => current.sendEnabled || busy(current), 10_000, pollMs);
+  const send = ready?.sendEnabled === true ? await locateWithin(page, selectors.send, undefined, 500) : undefined;
+  // The page can change while the prompt is entered and the send button becomes ready, so this is the last look.
+  const last = await snapshot(page, selectors);
+  // A reply can start after the caller saw the conversation idle, as when another tab sends to it.
+  if (busy(last)) throw new Error("The ChatGPT conversation is busy generating a reply");
+  // ChatGPT can restore a saved draft late.
+  if (options.exact === true && !typed(last)) {
+    throw new Error("The ChatGPT composer holds text other than the prompt");
+  }
+  options.onSend?.();
   if (send !== undefined) await click(page, send);
   else {
     await page.send("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, text: "\r" });
@@ -654,6 +857,16 @@ const statusSchema = v.object({
   unreadCount: v.optional(v.number()),
 });
 
+interface HandoffFilter {
+  /**
+   * Count a handoff only when its thread has a workspace in the target directory.
+   * A project spans directories, such as the worktrees of one repository, so sharing a project is not enough.
+   */
+  readonly requireWorkspace?: boolean;
+  /** Count only handoffs from this thread. */
+  readonly threadId?: string | undefined;
+}
+
 /** Mirrors commands and tracks handoffs that ChatGPT runs through rig-bridge in the target directory. */
 class BridgeActivity {
   readonly #reported = new Map<string, string>();
@@ -662,17 +875,19 @@ class BridgeActivity {
   readonly #cwd: string;
   readonly #since: number;
   readonly #report: AgentReporter | undefined;
+  readonly #handoffs: HandoffFilter;
   readonly #knownWorkspaceIds = new Set<string>();
   readonly #knownThreadIds = new Set<string>();
   readonly #knownProjectIds = new Set<string>();
   #latestHandoff: RigBridgeHandoff | undefined;
 
-  constructor(url: string, cwd: string, since: number, report: AgentReporter | undefined) {
+  constructor(url: string, cwd: string, since: number, report: AgentReporter | undefined, handoffs: HandoffFilter = {}) {
     this.#url = url;
     this.#readUrl = url.replace(/\/api\/status\/?$/u, "/api/handoffs/read");
     this.#cwd = cwd;
     this.#since = since;
     this.#report = report;
+    this.#handoffs = handoffs;
   }
 
   get latestHandoff(): RigBridgeHandoff | undefined {
@@ -715,8 +930,11 @@ class BridgeActivity {
     for (const notification of status.notifications ?? []) {
       if (notification.createdAt < this.#since) continue;
       const matchesThread = this.#knownThreadIds.has(notification.threadId);
-      const matchesProject = this.#knownProjectIds.has(notification.projectId);
-      if ((this.#knownThreadIds.size > 0 || this.#knownProjectIds.size > 0) && !matchesThread && !matchesProject) continue;
+      const matchesProject = this.#handoffs.requireWorkspace !== true && this.#knownProjectIds.has(notification.projectId);
+      const anyWorkspace = this.#handoffs.requireWorkspace !== true
+        && this.#knownThreadIds.size === 0 && this.#knownProjectIds.size === 0;
+      if (!anyWorkspace && !matchesThread && !matchesProject) continue;
+      if (this.#handoffs.threadId !== undefined && notification.threadId !== this.#handoffs.threadId) continue;
 
       if (this.#latestHandoff === undefined || this.#latestHandoff.id !== notification.id) {
         this.#latestHandoff = {

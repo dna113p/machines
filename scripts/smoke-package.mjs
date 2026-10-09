@@ -47,7 +47,7 @@ try {
     import { agyAgent } from "@dna113p/machines/agy";
     import { claudeAgent } from "@dna113p/machines/claude";
     import { codexAgent } from "@dna113p/machines/codex";
-    import { chatGptWebAgent, chatGptWebPrompt, rigBridgeHandoffOperation } from "@dna113p/machines/chatgpt-web";
+    import { chatGptWebAgent, chatGptWebContinue, chatGptWebPrompt, rigBridgeHandoffOperation } from "@dna113p/machines/chatgpt-web";
     import { deepseekAgent } from "@dna113p/machines/deepseek";
     import { decisionAgent } from "@dna113p/machines/decision";
     import { jevAgent, jevProvider } from "@dna113p/machines/jev";
@@ -68,6 +68,10 @@ try {
     await assert.rejects(
       async () => chatGptWebAgent({ cdpUrl: "http://127.0.0.1:9", launch: false })({ prompt: "Task", outcomes: ["completed"], cwd: process.cwd() }),
       /No browser DevTools endpoint/,
+    );
+    await assert.rejects(
+      async () => chatGptWebContinue({ cdpUrl: "http://127.0.0.1:9", launch: false })({ conversation: "https://chatgpt.com/", text: "Reply", cwd: process.cwd() }),
+      /conversation URL without credentials/,
     );
     assert.equal(typeof deepseekAgent, "function");
     assert.ok((await listAgentPresets()).some(preset => preset.name === "deepseek" && preset.harness === "dsh"));
