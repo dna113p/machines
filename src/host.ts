@@ -5,7 +5,7 @@ import * as v from "valibot";
 import { assertJsonValue, isJsonValue, type JsonValue } from "./json.ts";
 import type { StateValue } from "xstate";
 
-import type { AgentUpdate, HumanRequest } from "./index.ts";
+import type { AgentUpdate, HumanRequest, HumanResponse } from "./index.ts";
 import {
   prepareMachineRun,
   type PrepareMachineRunOptions,
@@ -34,12 +34,14 @@ export interface MachineHostRun {
   readonly agentRoles: Readonly<Record<string, string>>;
   readonly result: Promise<MachineHostResult>;
   respond(response: string, requestId: string): Promise<void>;
+  ask(question: string, requestId: string): Promise<void>;
   terminate(): void;
 }
 
 const childArgument = "--machines-child-host";
 
 const humanRequestSchema = v.strictObject({
+  discussion: v.optional(v.boolean()),
   prompt: v.string(),
   choices: v.optional(v.array(v.string())),
   suggestions: v.optional(v.array(v.string())),
@@ -77,6 +79,11 @@ const parentMessageSchema = v.variant("type", [
     agents: v.optional(v.record(v.string(), v.string())),
     cwd: v.string(),
     home: v.optional(v.string()),
+  }),
+  v.strictObject({
+    type: v.literal("ask"),
+    requestId: v.string(),
+    question: v.pipe(v.string(), v.minLength(1), v.maxLength(8000)),
   }),
   v.strictObject({
     type: v.literal("respond"),
@@ -217,6 +224,18 @@ export function startMachineHost(
               throw cause;
             }
           },
+          async ask(question, requestId) {
+            if (phase !== "running" || !pendingHuman || pendingHuman.requestId !== requestId) {
+              throw new Error("Machine Human request is stale or no longer waiting");
+            }
+            if (!pendingHuman.request.discussion) throw new Error("This Human request does not support discussion");
+            if (typeof question !== "string" || !question.trim() || question.length > 8000) {
+              throw new Error("Question must contain 1–8000 characters");
+            }
+            pendingHuman = undefined;
+            try { await sendChild(child, { type: "ask", requestId, question }); }
+            catch (cause) { fail(asError(cause)); throw cause; }
+          },
           terminate() {
             fail(new Error("Machine host was terminated"));
           },
@@ -305,7 +324,7 @@ function runChildHost(): void {
   let launched = false;
   let closing = false;
   let pendingHuman:
-    | { readonly requestId: string; readonly resolve: (response: string) => void }
+    | { readonly requestId: string; readonly resolve: (response: HumanResponse) => void }
     | undefined;
   let outgoing = Promise.resolve();
   const send = (message: ChildMessage) => {
@@ -321,14 +340,14 @@ function runChildHost(): void {
       return;
     }
 
-    if (message.type === "respond") {
+    if (message.type === "respond" || message.type === "ask") {
       if (pendingHuman === undefined || pendingHuman.requestId !== message.requestId) {
         send({ type: "failed", message: "Machine host received an unexpected Human response" });
         return;
       }
       const { resolve } = pendingHuman;
       pendingHuman = undefined;
-      resolve(message.response);
+      resolve(message.type === "ask" ? { type: "question", text: message.question } : message.response);
       return;
     }
 
@@ -371,6 +390,7 @@ function runChildHost(): void {
             requestId,
             request: {
               prompt: request.prompt,
+              ...(request.discussion ? { discussion: true } : {}),
               ...(request.choices === undefined
                 ? {}
                 : { choices: [...request.choices] }),

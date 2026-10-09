@@ -24,6 +24,7 @@
     "./acp": { "types": "./dist/src/acp.d.ts", "import": "./dist/src/acp.js" },
     "./agy": { "types": "./dist/src/agy.d.ts", "import": "./dist/src/agy.js" },
     "./chatgpt-web": { "types": "./dist/src/chatgpt-web.d.ts", "import": "./dist/src/chatgpt-web.js" },
+    "./conversation": { "types": "./dist/src/conversation.d.ts", "import": "./dist/src/conversation.js" },
     "./codex": { "types": "./dist/src/codex.d.ts", "import": "./dist/src/codex.js" },
     "./deepseek": { "types": "./dist/src/deepseek.d.ts", "import": "./dist/src/deepseek.js" },
     "./decision": { "types": "./dist/src/decision.d.ts", "import": "./dist/src/decision.js" },

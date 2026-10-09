@@ -12,7 +12,7 @@ a Human uses a terminal, or a run is displayed in Codex.
 | State | Named position invoking one Agent, Human, or Operation, or a final state |
 | Agent | Bounded request implemented by an `AgentRunner` |
 | Operation | Trusted local function returning an event |
-| Human | Input request returning a `submitted` event with the response |
+| Human | Input request returning `submitted`, or an explicitly enabled `question` event |
 | Run | One execution of a Machine |
 | Adapter | Mechanism connecting a primitive or run to an external interface |
 
@@ -37,6 +37,7 @@ MCP server ────┘       ↑
 | Module | Owns |
 | --- | --- |
 | `src/index.ts` | Typed primitives, Machine validation, XState execution, observer contracts |
+| `src/conversation.ts` | Compound Human/clarification state; the owner supplies the original session responder |
 | `src/terminal-human.ts` | Default terminal Human input, selectors, raw-mode restoration |
 | `src/machine-module.ts` | Shared module contract and metadata validation |
 | `src/catalog.ts` | Definition and preset catalog reads |
@@ -103,6 +104,29 @@ has not been exercised in this environment.
 Human drafts and focus belong to the presentation adapter while the request ID is
 unchanged. The card polls authoritative status; it does not decide transitions or
 persist a second copy of the workflow state.
+
+## Discussion-capable Human states
+
+Existing Human runners may still return strings. An opt-in request with
+`discussion: true` additionally permits `{ type: "question", text }`; its Human
+state must explicitly handle `question`. Questions never bypass restricted
+choices or become implicit approvals. The public host's `ask(question, requestId)`
+claims the exact current request separately from `respond(answer, requestId)`.
+The child emits the Machine event; the adapter never chooses a destination state.
+
+`@dna113p/machines/conversation` exports `conversation(options, on)`, authoring
+sugar for a bounded Human -> owner-supplied clarification -> Human loop. It keeps
+one pending decision, accepts a final explicit answer, and delegates its outcome
+to the surrounding Machine. Its reply callback owns the agent/session reference;
+the helper does not create an assistant or promise that another call to the same
+Agent role resumes the original native session. For arbitrary clarification
+policies, use ordinary `human`, `agent`, and `operation` states instead.
+
+Drip uses this public host/runtime boundary to show every Machine run and route
+its Human steps through a shared web/CLI focus. Existing Pi/MCP presentation
+adapters remain answer-only unless they explicitly implement the question channel.
+The default terminal Human selector is also answer-only; Drip's `chat` command
+provides the discussion-capable terminal surface.
 
 ## Distribution
 

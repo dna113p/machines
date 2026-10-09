@@ -19,23 +19,29 @@ export type HumanOptions =
   | {
     readonly choices: readonly string[];
     readonly suggestions?: never;
+    readonly discussion?: boolean;
   }
   | {
     readonly choices?: never;
     readonly suggestions?: readonly string[];
+    readonly discussion?: boolean;
   };
 
 export type HumanPrompt = string | (() => string);
 
 export interface HumanRequest {
+  /** A separate question channel; never an approval or a restricted choice. */
+  readonly discussion?: boolean;
   readonly prompt: string;
   readonly choices?: readonly string[];
   readonly suggestions?: readonly string[];
 }
 
+export type HumanResponse = string | { readonly type: "question"; readonly text: string };
+
 export type HumanRunner = (
   request: HumanRequest,
-) => string | Promise<string>;
+) => HumanResponse | Promise<HumanResponse>;
 
 export interface AgentOptions {
   readonly cwd?: string;
@@ -135,6 +141,10 @@ export function human<const TTransitions extends Readonly<Record<string, unknown
     throw new Error("Human choices must include at least one value");
   }
 
+  if (options.discussion && !Object.hasOwn(on, "question")) {
+    throw new Error("Discussion-enabled Human states must handle a question event");
+  }
+
   return {
     entry: "humanInputStarted",
     exit: "humanInputFinished",
@@ -142,6 +152,7 @@ export function human<const TTransitions extends Readonly<Record<string, unknown
       src: "human",
       input: () => ({
         prompt: typeof prompt === "function" ? prompt() : prompt,
+        ...(options.discussion ? { discussion: true } : {}),
         ...(options.choices === undefined ? {} : { choices: options.choices }),
         ...(options.suggestions === undefined
           ? {}
@@ -214,7 +225,11 @@ async function submittedHumanEvent(
   // Let onHumanInput(true) release terminal hotkeys before the runner takes stdin.
   const answer = await Promise.resolve().then(() => runner(request));
   if (typeof answer !== "string") {
-    throw new Error("Human runner must return a string");
+    if (answer && request.discussion === true && answer.type === "question" &&
+        typeof answer.text === "string" && answer.text.trim() !== "" && answer.text.length <= 8000) {
+      return { type: "question", value: answer.text };
+    }
+    throw new Error("Human runner must return a string or an explicitly supported discussion question");
   }
   if (request.choices !== undefined && !request.choices.includes(answer)) {
     throw new Error(`Expected one of: ${request.choices.join(", ")}`);
