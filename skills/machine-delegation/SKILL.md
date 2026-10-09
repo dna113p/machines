@@ -5,6 +5,12 @@ description: Use proactively before delegating implementation, debugging, review
 
 # Machine delegation
 
+When acting as project orchestrator, consult the project's `.machines/README.md`
+or existing workflow map before choosing a route. On initial setup or meaningful
+missing/stale coverage, use [machine-project-setup](../machine-project-setup/SKILL.md)
+to build the useful project workflows before repeated delegation. Reuse established
+coverage for normal tasks; workers do not repeat project setup.
+
 Use a Machine run as the unit of delegated work. The coordinating agent owns the
 user's goal, task boundaries, and integration of results; the Machine owns its
 states, verification, retries, and escalation. Complete small local steps directly.

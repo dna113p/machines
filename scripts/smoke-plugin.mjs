@@ -18,6 +18,8 @@ try {
     "skills/machine-delegation/SKILL.md",
     "skills/machine-delegation/references/delegation-machine.md",
     "skills/machine-builder/SKILL.md",
+    "skills/machine-project-setup/SKILL.md",
+    "skills/machine-project-setup/references/project-workflows.md",
     "docs/authoring.md",
     "docs/integrations.md",
     "docs/local-decisions.md",

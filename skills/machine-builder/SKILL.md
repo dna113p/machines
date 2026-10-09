@@ -5,6 +5,11 @@ description: Use proactively for multi-step implementation, debugging, review, o
 
 # Machine builder
 
+For project-wide workflow setup owned by the project orchestrator, start with
+[machine-project-setup](../machine-project-setup/SKILL.md). It chooses coverage
+for the project's major work; use this builder to implement individual definitions.
+Do not repeat project setup for each assignment.
+
 Before starting multi-step work, discover suitable Machines instead of waiting for
 the user to ask for one. Use an existing workflow when it fits; writing a new
 Machine is not the goal. For delegated work, follow

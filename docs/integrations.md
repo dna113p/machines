@@ -16,7 +16,8 @@ running Machine state and discourage recursive delegation of the same assignment
 
 Put the same routing rule in a project's always-loaded `AGENTS.md` (and its
 Claude instruction entry point) rather than relying only on optional skill
-selection. Make both `machine-builder` and `machine-delegation` available there.
+selection. Make `machine-project-setup`, `machine-builder`, and `machine-delegation`
+available there.
 The Machines Org umbrella demonstrates repository-local skill links, a Pi
 extension entry point, and a no-model `verify` Machine without global installation.
 
@@ -24,6 +25,22 @@ Source-linked integrations pick up changes on reload. Rebuild built MCP entry
 points with `npm run build` and reconnect/start a new client session. Portable
 plugin installations need their complete bundle refreshed as described below.
 Already-running conversations are not retroactively given new instructions.
+
+## Project orchestrator setup
+
+Use [machine-project-setup](../skills/machine-project-setup/SKILL.md) when the agent
+is taking responsibility for initial project workflow setup, or meaningful gaps
+prevent useful delegation. The orchestrator inspects actual project needs, creates
+or adapts useful definitions and tests, and writes a compact `.machines/README.md`
+(or updates the project's existing workflow map). Link that map from its existing
+orchestrator instructions or a role-specific section of `AGENTS.md`.
+
+The setup skill chooses project coverage; `machine-builder` implements individual
+workflows; `machine-delegation` launches and supervises assignments. No new
+orchestrator runtime or daemon is required. Existing coverage is reused instead
+of scaffolding a generic suite or repeating setup on every task. Already-assigned
+workers complete their state directly. Missing harnesses remain visible blockers,
+and fixture validation is not evidence of live-agent performance or adoption.
 
 ## Codex through direct MCP
 
@@ -69,8 +86,8 @@ npm run smoke:plugin
 ```
 
 The result is `build/codex/machines/`, containing the manifest, compiled server,
-production dependencies, widget assets, and the machine-builder and
-machine-delegation skills. Copy the entire directory when distributing it.
+production dependencies, widget assets, and the machine-project-setup, machine-builder,
+and machine-delegation skills. Copy the entire directory when distributing it.
 Node 24 or later must be on the receiving system's
 PATH; the original checkout is unnecessary after copying. Build does not modify
 your Codex installation or global configuration.
@@ -127,7 +144,7 @@ Use [machine-delegation](../skills/machine-delegation/SKILL.md) when the coordin
 agent should delegate work through Machines, including creating a task-specific
 workflow when none fits. It uses [machine-builder](../skills/machine-builder/SKILL.md)
 for authoring. Direct MCP registration exposes the tools only; load these skill
-instructions separately or use the portable plugin to include both.
+instructions separately or use the portable plugin to include all three skills.
 
 ## Pi extension
 

@@ -193,3 +193,16 @@ test("MCP initialization makes Machine adoption proactive without expanding auth
   const tools = await client.listTools();
   assert.match(tools.tools.find(tool => tool.name === "machine_list")?.description ?? "", /Before delegating/u);
 });
+
+
+test("MCP guides project orchestrators to setup before repeated delegation", async context => {
+  const { client, close } = await connectedClient();
+  context.after(close);
+  const guidance = client.getInstructions() ?? "";
+  assert.match(guidance, /project orchestrator/u);
+  assert.match(guidance, /machine-project-setup/u);
+  assert.match(guidance, /major work/u);
+  assert.match(guidance, /not.*every task/u);
+  const tools = await client.listTools();
+  assert.match(tools.tools.find(tool => tool.name === "machine_list")?.description ?? "", /project.*setup/iu);
+});

@@ -303,3 +303,13 @@ test("coordinators discover Machines before multi-step work without requiring an
   assert.match(guidance, /does not authorize paid model calls/u);
   assert.doesNotMatch(guidance, /Otherwise handle one-off tasks normally/u);
 });
+
+
+test("Pi gives project orchestrators the same project setup entry point", () => {
+  const tool = setup().tools.get("machine_list");
+  const guidance = tool?.promptGuidelines?.join(" ") ?? "";
+  assert.match(guidance, /project orchestrator/u);
+  assert.match(guidance, /machine-project-setup/u);
+  assert.match(guidance, /major work/u);
+  assert.match(guidance, /not.*every task/u);
+});

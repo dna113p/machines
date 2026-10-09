@@ -120,6 +120,21 @@ diagnostics; other valid Machines remain usable.
 Read [Authoring Machines](docs/authoring.md) for Human input, Agent roles and
 presets, feedback loops, and the programmatic launcher.
 
+## Set up a project for Machine delegation
+
+Use [machine-project-setup](skills/machine-project-setup/SKILL.md) as the project
+orchestrator's entry point. It inspects the project's major work, reuses or builds
+useful project-specific Machines, verifies them, and records delegation routes in
+`.machines/README.md` or the existing project equivalent. It produces working
+workflows rather than only recommendations, without imposing a fixed suite.
+
+> Set up this project's Machines as its orchestrator. Build the workflows that
+> support its major work, verify the safe paths, and establish delegation routes.
+
+Use setup for onboarding or meaningful coverage gaps, not every assignment.
+The orchestrator owns the map; workers execute their assigned Machine state.
+Existing budgets, execution permissions, and Human approvals remain in force.
+
 ## Delegate agent work through Machines
 
 The [machine-delegation skill](skills/machine-delegation/SKILL.md) directs a coordinating agent
@@ -132,7 +147,7 @@ launch it, supervise it, and collect its result. For example:
 
 Delegated workers receive explicit task context and produce result artifacts the
 coordinating agent can read. Runs remain session-scoped; the skill does not add
-durable sessions or arbitrary messaging between agents. Both skills ship in the
+durable sessions or arbitrary messaging between agents. All three skills ship in the
 npm package and portable plugin.
 
 ## Install from npm
