@@ -1,9 +1,16 @@
 ---
 name: machine-builder
-description: Design, create, or adapt TypeScript workflows for the Machines runtime when a task benefits from explicit stages, decisions, or verification, or a recurring process can become a Machine. Use for task-specific or reusable Machines, not unrelated XState applications or runtime internals.
+description: Use proactively for multi-step implementation, debugging, review, or verification that benefits from explicit stages and decisions. Discover and use a suitable Machine, or design and verify a task-specific TypeScript workflow. The user need not explicitly request Machines; keep trivial work direct.
 ---
 
 # Machine builder
+
+Before starting multi-step work, discover suitable Machines instead of waiting for
+the user to ask for one. Use an existing workflow when it fits; writing a new
+Machine is not the goal. For delegated work, follow
+[machine-delegation](../machine-delegation/SKILL.md). If already executing an Agent
+state inside a Machine, do that assigned work directly rather than recursively
+wrapping it in another Machine. Preserve the authorized effects and model budget.
 
 Decide which workflow serves the user's task. Creating or adapting a project
 Machine is an implementation choice within the authorized task; proceed without

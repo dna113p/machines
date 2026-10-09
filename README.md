@@ -13,8 +13,11 @@ implement (Agent) → check (Operation) → review (Human) → done
         └──────────── feedback ────────────┘
 ```
 
-Use Machines when a sequence and its decision points are worth repeating. A
-one-off prompt or shell script remains useful for work that needs no workflow.
+Use Machines when sequencing, verification, retries, or Human decisions improve
+a task, even a one-off. Agents should discover and use a suitable Machine before
+delegating or reconstructing a multi-step workflow manually; users need not name
+Machines first. Tiny edits, simple answers, and single commands remain direct.
+See [agent defaults](docs/integrations.md#agent-defaults) for the integration policy.
 
 ## Quickstart
 
@@ -119,8 +122,8 @@ presets, feedback loops, and the programmatic launcher.
 
 ## Delegate agent work through Machines
 
-The [machine-delegation skill](skills/machine-delegation/SKILL.md) teaches an agent
-to use Machine runs in place of native sub-agents: discover a suitable workflow,
+The [machine-delegation skill](skills/machine-delegation/SKILL.md) directs a coordinating agent
+to prefer Machine runs in place of native sub-agents: discover a suitable workflow,
 or create a task-specific one with [machine-builder](skills/machine-builder/SKILL.md),
 launch it, supervise it, and collect its result. For example:
 

@@ -292,3 +292,14 @@ test("Pi preserves structured input and exposes completed output", async context
     assert.deepEqual(run.output, input);
   });
 });
+
+
+test("coordinators discover Machines before multi-step work without requiring an explicit request", () => {
+  const guidance = setup().tools.get("machine_list")?.promptGuidelines?.join(" ") ?? "";
+  assert.match(guidance, /Before delegating work or starting multi-step/u);
+  assert.match(guidance, /does not need to name Machines/u);
+  assert.match(guidance, /Keep trivial edits.*direct/u);
+  assert.match(guidance, /already executing a Machine Agent state/u);
+  assert.match(guidance, /does not authorize paid model calls/u);
+  assert.doesNotMatch(guidance, /Otherwise handle one-off tasks normally/u);
+});

@@ -177,3 +177,19 @@ test("MCP preserves structured input and returns hosted output", async context =
   const completed = await waitForStatus(client, readRun(toolStructuredContent(started)).id, "completed");
   assert.deepEqual(completed.output, input);
 });
+
+
+test("MCP initialization makes Machine adoption proactive without expanding authorization", async context => {
+  const { client, close } = await connectedClient();
+  context.after(close);
+  const guidance = client.getInstructions() ?? "";
+  assert.match(guidance, /Before delegating work or starting multi-step/u);
+  assert.match(guidance, /does not need to name Machines/u);
+  assert.match(guidance, /Keep trivial edits.*direct/u);
+  assert.match(guidance, /already executing a Machine Agent state/u);
+  assert.match(guidance, /does not authorize paid model calls/u);
+  assert.match(guidance, /final state and result evidence/u);
+  assert.doesNotMatch(guidance, /Otherwise handle one-off tasks normally/u);
+  const tools = await client.listTools();
+  assert.match(tools.tools.find(tool => tool.name === "machine_list")?.description ?? "", /Before delegating/u);
+});

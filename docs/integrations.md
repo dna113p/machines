@@ -1,5 +1,30 @@
 # Integrations
 
+## Agent defaults
+
+MCP initialization and Pi's tool guidance now direct coordinating agents to
+inspect Machines **before delegated or multi-step implementation, debugging,
+review, and verification**, without waiting for the user to name the tool. They
+should actually launch a suitable workflow, not stop at discovery. Tiny edits,
+simple answers, and single read-only commands remain direct. When no safe workflow
+or working integration fits, the agent should explain the concrete fallback.
+
+This is agent guidance, not a runtime enforcement hook or automatic model-spending
+policy. Operations are preferred for mechanical checks. Existing permissions,
+budgets, and Human decisions still apply. Worker prompts identify an already
+running Machine state and discourage recursive delegation of the same assignment.
+
+Put the same routing rule in a project's always-loaded `AGENTS.md` (and its
+Claude instruction entry point) rather than relying only on optional skill
+selection. Make both `machine-builder` and `machine-delegation` available there.
+The Machines Org umbrella demonstrates repository-local skill links, a Pi
+extension entry point, and a no-model `verify` Machine without global installation.
+
+Source-linked integrations pick up changes on reload. Rebuild built MCP entry
+points with `npm run build` and reconnect/start a new client session. Portable
+plugin installations need their complete bundle refreshed as described below.
+Already-running conversations are not retroactively given new instructions.
+
 ## Codex through direct MCP
 
 From an arbitrary checkout, build and register the server:

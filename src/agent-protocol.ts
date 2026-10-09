@@ -4,7 +4,9 @@ export function agentPrompt(request: AgentRequest): string {
   return [
     request.prompt,
     "",
-    "Complete the work using the available tools.",
+    "You are already executing one Agent state inside a Machine. Complete this assigned state using the available tools.",
+    "Do not re-delegate this assignment or start the parent workflow again unless the assignment explicitly requires bounded nested work.",
+    "Return evidence and an allowed outcome to the owning Machine; it controls verification, transitions, and Human decisions.",
     `Allowed outcome types: ${request.outcomes.join(", ")}.`,
     "When finished, end your final response with exactly one line in this form:",
     'MACHINES_EVENT {"type":"completed"}',

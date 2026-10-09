@@ -20,6 +20,7 @@ import type { StateValue } from "xstate";
 import { MachineSession as RunSession, type RunSnapshot } from "../src/session.ts";
 export type { RunSnapshot } from "../src/session.ts";
 import { listAgentPresets, listMachines } from "../src/launcher.ts";
+import { machineCoordinatorGuidelines, machineDiscoveryDescription, machineSupervisionGuidelines } from "../src/coordinator-guidance.ts";
 
 const widgetUri = "ui://machines/run-v1.html";
 const cwd = v.pipe(
@@ -62,7 +63,7 @@ const tools = [
   {
     name: "machine_list",
     title: "List Machines",
-    description: "List Machines available to the current project, why to use them, and any missing Agent bindings.",
+    description: machineDiscoveryDescription,
     inputSchema: locationInputSchema,
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
   },
@@ -222,11 +223,8 @@ export function createMachinesMcpServer(
     {
       capabilities: { tools: {}, resources: {} },
       instructions: [
-        "Use machine_list when the user names a Machine or a reusable multi-step workflow may fit.",
-        "Choose by description rather than guessing a Machine name.",
-        "machine_start is asynchronous; continue the conversation while it runs.",
-        "Use machine_status for authoritative progress and machine_respond only after the Human's answer is clear.",
-        "When Machine delegation or creation is requested, create a task-scoped Machine if none fits. Otherwise handle one-off tasks normally.",
+        ...machineCoordinatorGuidelines,
+        ...machineSupervisionGuidelines,
       ].join(" "),
     },
   );

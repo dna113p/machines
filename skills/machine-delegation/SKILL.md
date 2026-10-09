@@ -1,6 +1,6 @@
 ---
 name: machine-delegation
-description: Delegate bounded agent work through Machines, reusing a suitable workflow or creating a task-specific one. Use when Machines should replace native sub-agents or coordinate background tasks with explicit outcomes.
+description: Use proactively before delegating implementation, debugging, review, research, or other bounded multi-step work. Prefer Machine runs to native sub-agents, reusing or creating a scoped workflow with explicit outcomes. The user need not name Machines; keep trivial work direct.
 ---
 
 # Machine delegation
@@ -8,7 +8,16 @@ description: Delegate bounded agent work through Machines, reusing a suitable wo
 Use a Machine run as the unit of delegated work. The coordinating agent owns the
 user's goal, task boundaries, and integration of results; the Machine owns its
 states, verification, retries, and escalation. Complete small local steps directly.
-When delegating through this skill, launch Machines instead of native sub-agents.
+Launch a suitable Machine instead of native sub-agents without requiring the user
+to name this skill. Discovery is a decision step, not the completed work: start the
+selected workflow and inspect its result. Use deterministic Operations for checks
+rather than paying another model to run commands. Never broaden permissions or
+model spending merely to satisfy the preference. If the tools or a safe workflow
+are unavailable, state the concrete reason for proceeding directly.
+
+If already running as a Machine's Agent state, execute that bounded assignment
+and return its evidence/outcome. Do not delegate it again unless explicitly asked
+for bounded nested work by the owning assignment.
 
 ## Choose or create the Machine
 
@@ -47,16 +56,18 @@ Workers do not inherit this conversation. Supply the context needed to act:
 - Applicable constraints, permitted effects, and what should produce a blocked outcome.
 - A result location readable by the coordinator, and what evidence it must contain.
 
-Follow the selected Machine's input contract; `input` is a string, which can contain
-JSON if the definition parses it. Keep task details in input rather than hardcoding
-each assignment into a new workflow. Give each run a distinct artifact destination.
+Follow the selected Machine's input contract. MCP/Pi accept JSON-serializable
+input; CLI positional input is text, while `--input-file <file|->` accepts JSON.
+Keep task details in input rather than hardcoding each assignment into a new
+workflow. Give each run a distinct artifact destination.
 
 **Plan result retrieval before launch.** `machine_status` exposes state, Human
-requests, and errors, but no Agent answer, transcript, or arbitrary event payload.
-Have the worker write a report, or have the Machine capture its returned event and
-save it in an Operation. The latter also supports read-only Agent presets. Include
-findings or changes, verification evidence, and blockers. An Operation's writes
-must stay within the task's scope even when the Agent itself is read-only.
+requests, errors, and optional JSON Machine output, not arbitrary Agent transcripts
+or event payloads. Have the Machine return useful JSON output, have the worker
+write a report, or capture its returned event and save it in an Operation. The
+Machine-owned options also support read-only Agent presets. Include findings or
+changes, verification evidence, and blockers. An Operation's writes must stay
+within the task's scope even when the Agent itself is read-only.
 
 Delegate independent tasks concurrently only when their workspaces and writes are
 compatible. Use isolated worktrees for overlapping code changes; runs do not create

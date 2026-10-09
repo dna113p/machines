@@ -9,6 +9,7 @@ import type { StateValue } from "xstate";
 import type { HostedHumanRequest } from "../src/host.ts";
 import type { HumanRequest } from "../src/index.ts";
 import type { MachineSession, RunSnapshot } from "../src/session.ts";
+import { machineCoordinatorGuidelines, machineDiscoveryDescription } from "../src/coordinator-guidance.ts";
 
 const sourceFile = realpathSync(fileURLToPath(import.meta.url));
 const sourceRoot = resolve(dirname(sourceFile), "..");
@@ -191,12 +192,9 @@ export default function machinesExtension(pi: PiLike): void {
   pi.registerTool({
     name: "machine_list",
     label: "List Machines",
-    description: "List available Machines, their purpose, Agent roles, and missing bindings.",
-    promptSnippet: "Discover reusable asynchronous Machines with machine_list before starting one.",
-    promptGuidelines: [
-      "Use machine_list when the user asks to run a Machine or a reusable multi-step workflow may fit; choose an existing Machine by its description rather than guessing its name.",
-      "When Machine delegation or creation is requested, create a task-scoped Machine if none fits. Otherwise handle one-off tasks normally.",
-    ],
+    description: machineDiscoveryDescription,
+    promptSnippet: "Discover and use Machines before delegated or multi-step work.",
+    promptGuidelines: machineCoordinatorGuidelines,
     parameters: Type.Object({}, { additionalProperties: false }),
     executionMode: "parallel",
     async execute(_id, _params, _signal, _onUpdate, context) {
