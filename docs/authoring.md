@@ -454,6 +454,60 @@ export default ({ machine, final }: MachinePrimitives) => machine({
 });
 ```
 
+#### Continuing a conversation
+
+`chatGptWebAgent` always starts a new chat. To send a later message to a chat it
+started, such as a Human's answer to a `needs_input` handoff, use
+`chatGptWebContinue` from the same module. It sends one message to an existing
+conversation and reports the next rig-bridge handoff:
+
+```ts
+import { chatGptWebContinue } from "@dna113p/machines/chatgpt-web";
+
+const send = chatGptWebContinue({ approveToolCalls: true });
+const event = await send({
+  conversation: earlier.conversation, // https://chatgpt.com/c/<id>
+  text: "Use the second option.",
+  cwd: process.cwd(),
+  bridgeThreadId: earlier.handoff?.threadId,
+});
+// { type: handoff.reason, summary: handoff.summary, handoff, conversation }
+```
+
+It takes the same options as `chatGptWebAgent` and an optional reporter as its
+second argument. `url`, `model`, `connector`, `selectConnector`, and `settleMs`
+do not apply: the chat already has its model and connector, and `text` is
+submitted exactly as given, without the workspace opener.
+
+- The input is checked before a browser is used. `conversation` must be an
+  `https://chatgpt.com/` URL containing `/c/<id>`, with no credentials; `text`
+  must not be empty; `cwd` is required. A rig-bridge status URL is required, so
+  `bridgeStatusUrl: false` is rejected.
+- The message is sent once. If ChatGPT is still generating in that chat, the
+  page opens somewhere other than the conversation, or the composer already
+  holds an unsent draft, the call fails without sending; nothing is queued and
+  the draft is left alone. Both are checked again immediately before sending:
+  the message is sent only when the composer holds `text` and nothing else and
+  no reply has started since the chat opened. These errors say the message was
+  not sent. If the page does not confirm that it accepted the message, the
+  error says delivery is uncertain and names the conversation. The message is
+  never sent again, so check the chat before retrying.
+- The result is a handoff recorded after the message was sent whose thread has
+  a rig-bridge workspace open in `cwd`. Sharing a project is not enough: a
+  project covers every worktree of a repository. Another conversation working
+  in the same directory can still satisfy that, so pass `bridgeThreadId` (the
+  `threadId` of an earlier handoff) to count only that thread. The call then
+  waits for generation to stop, so the chat is free for the next message. With
+  no such handoff within `timeoutMs`, the error names the conversation.
+- It deliberately does not read the reply from the page. Page reads are limited
+  to the URL, the composer, whether ChatGPT is generating, and confirmation
+  buttons. The event carries the handoff's `reason` and `summary` and has no
+  `message`, and no assistant text is reported or printed, so a reply that ends
+  without `work_handoff` times out instead of being scraped.
+
+Tool confirmations, command activity, handoff acknowledgement, and tabs behave as
+for `chatGptWebAgent`: failed runs leave their tab open.
+
 This runner automates a consumer web page, not an API. It depends on ChatGPT's
 current page structure and on your account's plan supporting custom connectors,
 and it is subject to OpenAI's terms for your account. Deterministic tests drive a
