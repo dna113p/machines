@@ -44,6 +44,7 @@ try {
     import { machine, operation, final, run } from "@dna113p/machines";
     import { acpAgent } from "@dna113p/machines/acp";
     import { agyAgent } from "@dna113p/machines/agy";
+    import { claudeAgent } from "@dna113p/machines/claude";
     import { codexAgent } from "@dna113p/machines/codex";
     import { chatGptWebAgent, chatGptWebPrompt, rigBridgeHandoffOperation } from "@dna113p/machines/chatgpt-web";
     import { deepseekAgent } from "@dna113p/machines/deepseek";
@@ -58,6 +59,7 @@ try {
     import extension from "@dna113p/machines/pi-extension";
     assert.equal(typeof acpAgent, "function");
     assert.equal(typeof agyAgent, "function");
+    assert.equal(typeof claudeAgent, "function");
     assert.equal(typeof codexAgent, "function");
     assert.equal(typeof rigBridgeHandoffOperation, "function");
     assert.ok((await listAgentPresets()).some(preset => preset.name === "chatgpt-web" && preset.harness === "chatgpt-web"));
@@ -132,6 +134,7 @@ try {
   }
   await writeFile(join(temporary, "consumer.mts"), `
     import { machine, operation, final, type MachinePrimitives } from "@dna113p/machines";
+    import { claudeAgent, type ClaudeAgentOptions } from "@dna113p/machines/claude";
     import { codexAgent, type CodexAgentOptions } from "@dna113p/machines/codex";
     import { chatGptWebAgent, rigBridgeHandoffOperation, type ChatGptWebAgentOptions, type RigBridgeHandoff } from "@dna113p/machines/chatgpt-web";
     import { deepseekAgent, type DeepSeekAgentOptions } from "@dna113p/machines/deepseek";
@@ -159,6 +162,8 @@ try {
     const evaluate = (): Promise<DecisionEvent> => classify({ prompt: "Evidence", outcomes: ["completed"] });
     const codexOptions: CodexAgentOptions = { sandbox: "workspace-write", output: "capture" };
     codexAgent("codex", [], codexOptions);
+    const claudeOptions: ClaudeAgentOptions = { model: "sonnet", permissionMode: "acceptEdits", output: "capture" };
+    claudeAgent("claude", [], claudeOptions);
     const chatGptOptions: ChatGptWebAgentOptions = { connector: "rig-bridge", launch: { headless: false }, output: "capture" };
     chatGptWebAgent(chatGptOptions);
     const deepseekOptions: DeepSeekAgentOptions = { profile: "acp", output: "capture" };

@@ -2,6 +2,7 @@ import { loadAgentBindings, type AgentPreset } from "./agent-bindings.ts";
 import { acpAgent } from "./acp.ts";
 import { agyAgent } from "./agy.ts";
 import { chatGptWebAgent } from "./chatgpt-web.ts";
+import { claudeAgent } from "./claude.ts";
 import { codexAgent } from "./codex.ts";
 import { deepseekAgent } from "./deepseek.ts";
 import { decisionAgent } from "./decision.ts";
@@ -97,7 +98,7 @@ export async function configuredAgentPresets(
   home: string,
 ): Promise<ResolvedAgentPresets> {
   const configured = await loadAgentBindings(cwd, home, {
-    acpAgent, agyAgent, chatGptWebAgent, codexAgent, deepseekAgent, decisionAgent, jevAgent, jevProvider,
+    acpAgent, agyAgent, chatGptWebAgent, claudeAgent, codexAgent, deepseekAgent, decisionAgent, jevAgent, jevProvider,
     openRouterDecisionAgent, openRouterDecisionProvider, layaAgent, layaProvider, vonAgent, vonProvider,
   });
   const defaultRunner = acpAgent("npx", ["-y", "pi-acp"], {
@@ -108,6 +109,7 @@ export async function configuredAgentPresets(
     harness: "agy",
     output: "capture",
   });
+  const claudeRunner = claudeAgent("claude", [], { output: "capture" });
   const codexRunner = codexAgent("codex", [], { output: "capture" });
   const chatGptWebRunner = chatGptWebAgent({ output: "capture" });
   const deepseekRunner = deepseekAgent("dsh", [], { output: "capture" });
@@ -117,7 +119,7 @@ export async function configuredAgentPresets(
   const vonRunner = vonAgent();
   return {
     agents: {
-      default: defaultRunner, agy: agyRunner, codex: codexRunner, "chatgpt-web": chatGptWebRunner, deepseek: deepseekRunner, jev: jevRunner,
+      default: defaultRunner, agy: agyRunner, claude: claudeRunner, codex: codexRunner, "chatgpt-web": chatGptWebRunner, deepseek: deepseekRunner, jev: jevRunner,
       "openrouter-decision": openRouterRunner, laya: layaRunner, von: vonRunner, ...configured.agents,
     },
     presets: {
@@ -130,6 +132,11 @@ export async function configuredAgentPresets(
         description: "Runs the Antigravity CLI (agy)",
         harness: "agy",
         runner: agyRunner,
+      },
+      claude: {
+        description: "Runs the Claude Code CLI headlessly with its own login and permission rules",
+        harness: "claude",
+        runner: claudeRunner,
       },
       codex: {
         description: "Runs the Codex CLI in a read-only sandbox",
@@ -169,7 +176,7 @@ export async function configuredAgentPresets(
       ...configured.presets,
     },
     sources: {
-      default: "built in", agy: "built in", codex: "built in", "chatgpt-web": "built in", deepseek: "built in", jev: "built in",
+      default: "built in", agy: "built in", claude: "built in", codex: "built in", "chatgpt-web": "built in", deepseek: "built in", jev: "built in",
       "openrouter-decision": "built in", laya: "built in", von: "built in", ...configured.sources,
     },
   };

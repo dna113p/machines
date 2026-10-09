@@ -44,6 +44,7 @@ MCP server ────┘       ↑
 | `src/acp.ts` | ACP process/session protocol, bounded Agent result, normalized activity |
 | `src/agy.ts` | Antigravity CLI (agy) process protocol, bounded Agent result, normalized activity |
 | `src/chatgpt-web.ts` | ChatGPT web conversation over the DevTools protocol, rig-bridge workspace prompt, bridge activity |
+| `src/claude.ts` | Claude Code CLI headless execution, final-result decoding, permission options, normalized activity |
 | `src/codex.ts` | Codex CLI execution, final-response decoding, sandbox options, normalized activity |
 | `src/deepseek.ts` | DeepSeek Harness command/profile configuration over the shared ACP runner |
 | `src/decision.ts` | Provider-neutral classification contract, validated outcome events, normalized observations |

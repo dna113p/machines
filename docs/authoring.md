@@ -200,6 +200,87 @@ Otherwise it uses `AGY_MODEL` / `AGY_EFFORT`, falling back to
 the same variables inherited from the parent process. Effort values are `low`,
 `medium`, or `high`.
 
+### Claude Code
+
+The built-in `claude` preset runs the installed Claude Code CLI using its existing
+login and settings. Install Claude Code and sign in (`claude`, then `/login`)
+first. Select the preset:
+
+```bash
+machine run my-workflow --agent default=claude -- "Review the code"
+machine run review-task --agent reviewer=claude-opus -- "Review the change"
+```
+
+The runner starts the official CLI in its documented non-interactive mode
+(`claude --print --output-format stream-json`) with a fresh turn for each Agent
+invocation. It never reads, copies, or forwards credentials: authentication is
+whatever that CLI already uses on this computer, a Claude subscription login or
+an API key. A set `ANTHROPIC_API_KEY` makes Claude Code bill the API instead of
+a subscription; remove it from the preset's environment when that is not intended.
+Use it for your own work on your own computer and follow the terms of your plan.
+
+Permissions stay in Claude Code. The default `permissionMode` is `dontAsk`: a
+tool runs only when Claude Code's settings already allow it, and everything that
+would prompt is denied, since Machines cannot forward permission prompts. This is
+**not a read-only sandbox**. Allow rules such as `Bash`, `Edit`, or `Write` in
+your user or project settings still apply. Restrict a preset explicitly when a
+role must not change files, and define model-specific presets in
+`.machines/agents.ts`:
+
+```ts
+export default ({ claudeAgent }: { claudeAgent: typeof import("@dna113p/machines/claude").claudeAgent }) => ({
+  "claude-opus": {
+    description: "Runs Claude Code with Opus at high effort",
+    harness: "claude",
+    model: "opus",
+    thinking: "high",
+    runner: claudeAgent("claude", [], { model: "opus", effort: "high", output: "capture" }),
+  },
+  "claude-review": {
+    description: "Runs Claude Code without file-editing tools",
+    harness: "claude",
+    runner: claudeAgent("claude", [], {
+      disallowedTools: ["Edit", "Write", "NotebookEdit"],
+      output: "capture",
+    }),
+  },
+  "claude-write": {
+    description: "Runs Claude Code with automatic approval of file edits",
+    harness: "claude",
+    runner: claudeAgent("claude", [], { permissionMode: "acceptEdits", output: "capture" }),
+  },
+});
+```
+
+Options:
+
+- `model` and `effort`: a Claude Code model alias (`opus`, `sonnet`, `haiku`, …)
+  or full model name, and an effort level it supports. They override
+  `MACHINES_CLAUDE_MODEL` / `MACHINES_CLAUDE_EFFORT`, then `MACHINES_AGENT_MODEL` /
+  `MACHINES_AGENT_EFFORT`. Claude Code exports its own `CLAUDE_*` variables to
+  child processes, so the runner deliberately does not read `CLAUDE_EFFORT`. With
+  no setting, Claude Code selects its configured values. Observers receive the
+  resolved model name the CLI reports.
+- `permissionMode`: `dontAsk` (default), `acceptEdits`, `auto`, `plan`, `manual`,
+  or `bypassPermissions`. The last disables permission checks; use it only in a
+  disposable or externally sandboxed workspace.
+- `tools`: restricts the built-in tool set, for example `["Read"]`.
+- `allowedTools` / `disallowedTools`: permission rules added for this runner, such
+  as `["Bash(npm test)"]`. Deny rules win over allow rules in settings. Blocking
+  the edit tools does not stop an allowed `Bash` from writing files.
+- `sessionPersistence`: defaults to `false`, so no resumable session is saved. This
+  runner does not resume sessions.
+- `output`: `stream` (default) or `capture`, as for the Codex runner.
+
+Additional command arguments precede the runner's own, allowing a wrapper
+executable or other Claude Code options such as `--add-dir`. Only the CLI's final
+result determines the outcome; earlier messages and subagent text do not. A failed
+or incomplete turn fails the Agent state with Claude Code's reported reason.
+Hooks, plugins, MCP servers, and `CLAUDE.md` instructions configured for the
+workspace also apply to these runs. `npm run example:claude` demonstrates file
+creation with `acceptEdits` in a temporary directory. Live runner validation used
+Claude Code `2.1.295`; deterministic tests do not require an installation or login.
+
 ### Codex
 
 The built-in `codex` preset runs the installed Codex CLI using its existing login

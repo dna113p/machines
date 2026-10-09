@@ -1,6 +1,6 @@
 ---
 name: machine-project-setup
-description: Use proactively when acting as the project orchestrator to set up or refresh project-specific Machines for its major work. Inspect the project, build and verify useful workflows, and establish delegation routes before distributing work. Use for project onboarding or meaningful coverage gaps, not every task or an already-assigned worker state.
+description: Use proactively when acting as the project orchestrator to set up or refresh project-specific Machines for its major work. Inspect the project and the available Agents with their evidence, build and verify useful workflows, and establish delegation routes before distributing work. Use for project onboarding or meaningful coverage gaps, not every task or an already-assigned worker state.
 ---
 
 # Machine project setup
@@ -42,6 +42,56 @@ shadows ancestor project catalogs, so check each launch directory. A new child
 catalog can hide inherited Machines; preserve needed routes with explicit paths
 or existing project conventions. Put project policy with its owning project,
 not automatically in the runtime, the umbrella, or a global installation.
+
+## Survey the available Agents before designing workflows
+
+Do this before choosing states, roles, or bindings. The orchestrator's own model
+and harness are one candidate, not the default answer for every role. A setup
+that binds each role to whatever is running it has skipped this step.
+
+List every preset from `machine agents` in each launch directory, built in and
+configured. For each, establish from its source and documentation, not its name:
+the harness and provider, the model and effort it actually selects, whether it
+can edit or is sandboxed read-only, how it handles permission prompts, whose
+plan or credentials it spends, and whether it is installed and signed in here.
+A cheap local probe such as `--version` or a login-status command is enough;
+do not spend model calls to find out. Ask the user about subscriptions or
+harnesses the listing cannot reveal instead of assuming only the visible ones.
+
+Then look for evidence of what each candidate is good at. Search the project and
+its workspace for evaluation results, ranking snapshots, research priors, and
+routing notes: for example a Machine Wars checkout's exported rankings and its
+`docs/` research files, or the project's own records of earlier runs. Read the
+scores per task type (implementation, terminal work, frontend, architecture,
+debugging, review, cheap bounded steps), not one overall number, and read each
+file's own statement of what it measures. Rank the complete configuration of
+model, harness, and effort: a score for one effort level or harness does not
+transfer to another.
+
+Weigh evidence by its kind and say which kind you used:
+
+- Trials on this project's own tasks outrank everything else.
+- Local ranking snapshots that pass their own freshness and coverage gates come next.
+- Research priors and public benchmarks are starting hypotheses. Treat small gaps
+  and low-confidence entries as ties, and honor a file that marks itself
+  ineligible for automatic routing: it may inform a choice a person can review,
+  never an unattended selection.
+- No evidence is a finding. Record the role as unranked and choose on capability
+  and cost; do not invent a score or cite a general reputation as measurement.
+
+A candidate missing from the evidence is unrated, not weak, and a preset the
+evidence favors but that is not installed or authorized is a recorded gap, not a
+binding. Do not run paid evaluations to fill gaps unless the user asks for that.
+
+Let the survey shape the workflows, not only the bindings. Put the strongest
+available candidate for each task type in the matching role, keeping cost and
+plan limits visible. Prefer a reviewer from a different provider or model family
+than the author when one is available, and a truly sandboxed preset for read-only
+roles. Where several strong, dissimilar candidates exist, consider independent
+parallel review, a bounded challenge-and-rebuttal exchange, or escalation from a
+cheap candidate to a stronger one on failure; the Machine, not a model, decides
+when such an exchange ends. Where only one candidate exists, say so in the map
+instead of presenting same-model review as independent.
 
 ## Build the smallest useful set
 
@@ -87,7 +137,9 @@ to pretend readiness. Implement and test the safe parts, then identify the gap.
 Maintain a compact `.machines/README.md` (or the project's existing equivalent)
 using the [workflow map reference](references/project-workflows.md). Record which
 major work uses which Machine, the exact launch directory and input, role bindings,
-verification/results, and effects requiring approval. Mark deliberately direct,
+verification/results, and effects requiring approval. For each binding, record
+the candidates considered, the evidence and its kind and date, and unrated or
+unavailable alternatives, so a later setup can revisit the choice when evidence changes. Mark deliberately direct,
 deferred, or blocked work with reasons rather than inventing placeholder Machines.
 Keep durable routing facts here; keep private per-run evidence out of source control.
 The map is documentation, not a runtime registry or a second workflow engine.
@@ -118,9 +170,12 @@ prove a failed required check cannot become success. Confirm result retrieval.
 Run a relevant no-model workflow for real when safe, and inspect its final state
 and evidence. Never launch a paid agent solely to demonstrate setup.
 
-Report created/reused workflows, the routing-map location, verification commands
-and results, and concrete unconfigured or untested paths. Distinguish authored,
+Report created/reused workflows, the Agents surveyed and the evidence behind each
+role binding, the routing-map location, verification commands and results, and
+concrete unconfigured or untested paths. Distinguish authored,
 discoverable/bound, fixture-tested, and live-verified; fixture tests are not live-agent proof.
 Do not label a workflow ready for unattended execution just because it is listed.
 On a second setup, preserve existing decisions and edits, update only demonstrated
 gaps, and reuse passing checks; do not create duplicate definitions or instructions.
+New Agent presets, harnesses, or evaluation evidence are such a gap: repeat the
+survey and revisit the affected bindings.

@@ -14,6 +14,8 @@ Use portable project-relative paths in committed documentation.
 For each major task type, record:
 
 - Exact Machine name/source, its trigger, input, launch directory, and role bindings.
+- For each binding: the candidates surveyed, the evidence used (own trials, ranking
+  snapshot, research prior, or none), its date, and unrated or unavailable options.
 - Expected final state, checks, result retrieval, and verification command.
 - Allowed effects, Human decisions, retry limits, and untested prerequisites.
 

@@ -68,6 +68,7 @@ Run it with `node demo.ts`. No build is needed to develop against the source.
 | Child host and Human response | `npm run example:host` | Node only |
 | Real Agent writes and verifies a file | `npm run example:pi` | Configured Pi through `pi-acp`; may use network and model credits |
 | Real AGY writes and verifies a file | `npm run example:agy` | Configured Antigravity CLI (`agy`); may use network and model credits |
+| Real Claude Code writes and verifies a file | `npm run example:claude` | Installed, logged-in Claude Code CLI (`claude`); uses your Claude plan or API credits |
 | Real Codex writes and verifies a file | `npm run example:codex` | Configured Codex CLI; may use network and model credits |
 | Real ChatGPT web writes through rig-bridge | `npm run example:chatgpt-web` | rig-bridge connected to ChatGPT, a signed-in automation browser profile; uses your ChatGPT plan |
 | Real DeepSeek Harness writes and verifies a file | `npm run example:deepseek` | Installed `dsh` with a configured ACP profile; may use network and model credits |
@@ -215,6 +216,11 @@ The built-in `agy` preset selects the Antigravity CLI with AGY permission checks
 enabled. [AGY configuration](docs/authoring.md#antigravity-agy) explains runner
 settings and explicit opt-in to automatic tool approval. `npm run example:agy`
 opts in for its temporary-directory demonstration.
+
+The built-in `claude` preset runs the installed Claude Code CLI headlessly with
+its existing login. Tools run only where Claude Code's own permission rules
+already allow them; nothing prompts. See [Claude Code configuration](docs/authoring.md#claude-code)
+for model, effort, and tool-restriction presets.
 
 The built-in `codex` preset runs the Codex CLI in a read-only sandbox. See
 [Codex configuration](docs/authoring.md#codex) for a preset that permits workspace

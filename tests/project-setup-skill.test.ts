@@ -21,6 +21,18 @@ test("project setup is a discoverable orchestrator skill, distinct from a worker
   assert.match(source, /not.*live.*proof/iu);
 });
 
+test("project setup surveys every available Agent and its evidence before designing workflows", () => {
+  const source = read(skill);
+  const survey = source.indexOf("## Survey the available Agents");
+  assert.ok(survey > 0 && survey < source.indexOf("## Build the smallest useful set"));
+  assert.match(source, /own model\s+and harness are one candidate/u);
+  assert.match(source, /ranking snapshots, research priors/u);
+  assert.match(source, /unrated, not weak/u);
+  assert.match(source, /ineligible for automatic routing/u);
+  assert.match(source, /different provider or model family/u);
+  assert.match(read(reference), /candidates surveyed, the evidence used/u);
+});
+
 test("project setup references are portable and resolve within the distributed package", () => {
   for (const path of [skill, reference]) {
     const source = read(path);
