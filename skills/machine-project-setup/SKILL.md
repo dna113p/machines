@@ -45,6 +45,12 @@ not automatically in the runtime, the umbrella, or a global installation.
 
 ## Build the smallest useful set
 
+When the Dev Machines starter library is available, inspect its `docs/catalog.md`
+and candidate `defaults/` sources before rebuilding a common software process.
+Select or adapt relevant entries with the project-local installer; do not install
+the entire catalog by default. Its check commands, Agent bindings, and task inputs
+remain project-specific. Do not assume that library is globally installed.
+
 Map the major work to existing or missing workflows. Favor frequent delegation,
 important quality gates, and costly recurring mistakes. Reuse good definitions;
 parameterize variants rather than creating one Machine per ticket or directory.
