@@ -89,7 +89,8 @@ function isVisibleTo(record, sessionId, projectDir) {
 function isRecord(value) {
   if (value === null || typeof value !== "object") return false;
   const { agent, human } = value;
-  return value.schemaVersion === 1
+  // Version 2 adds what answers a waiting request; the line shows only its prompt.
+  return (value.schemaVersion === 1 || value.schemaVersion === 2)
     && typeof value.id === "string"
     && Number.isSafeInteger(value.pid) && value.pid > 0
     && isOptionalString(value.owner)

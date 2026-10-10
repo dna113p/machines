@@ -193,6 +193,21 @@ installation script is required for the direct MCP setup.
 Hosts that only run a status-line command, such as Claude Code, can show running
 Machines through [run status publication](docs/integrations.md#run-status-for-host-status-lines).
 
+Publication is opt-in: set `MACHINES_RUN_STATUS_DIR` to a directory only you can
+read. A published run that is waiting for a Human can then be answered from
+outside its own terminal:
+
+```bash
+machine runs [--json]                              # running and waiting runs
+machine respond <run-id> <request-id> <response>   # answer a waiting run
+```
+
+`machine runs` shows each waiting run's prompt, request id, and choices. A run
+started without a terminal, for example by a coordinating agent or a script,
+waits for `machine respond` instead of failing. Anything running as the same user
+can answer a waiting run, including an approval; see
+[answering a waiting run from outside](docs/integrations.md#answering-a-waiting-run-from-outside).
+
 ## Execution model and limitations
 
 Machine definitions and Agent preset files are **trusted executable code**.

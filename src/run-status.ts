@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import type { StateValue } from "xstate";
 
 /** One published run, stored as `<MACHINES_RUN_STATUS_DIR>/<id>.json`. */
 export interface RunStatusRecord {
-  readonly schemaVersion: 1;
+  /** Version 1 records carry only `human.prompt`. */
+  readonly schemaVersion: 1 | 2;
   readonly id: string;
   readonly pid: number;
   readonly owner?: string;
@@ -17,10 +18,22 @@ export interface RunStatusRecord {
   readonly status: "running" | "waiting" | "completed" | "failed";
   readonly state?: string;
   readonly agent?: RunStatusAgent;
-  readonly human?: { readonly prompt: string };
+  readonly human?: RunStatusHuman;
+  /** Names the inbox responses the run took lately, so that each sender can tell; never a response. */
+  readonly deliveries?: readonly string[];
   readonly error?: string;
   readonly startedAt: string;
   readonly updatedAt: string;
+}
+
+/** The pending Human request: what a surface needs to show it and to answer it. */
+export interface RunStatusHuman {
+  readonly prompt: string;
+  /** Names this request to `machine respond`; absent when the run takes no outside response. */
+  readonly requestId?: string;
+  readonly choices?: readonly string[];
+  readonly suggestions?: readonly string[];
+  readonly discussion?: boolean;
 }
 
 export interface RunStatusAgent {
@@ -42,7 +55,9 @@ export interface RunStatusChange {
   readonly status?: "running" | "waiting";
   readonly state?: StateValue;
   readonly agent?: RunStatusAgent;
-  readonly human?: { readonly prompt: string };
+  readonly human?: RunStatusHuman;
+  /** Names an inbox response the run took, in addition to those its record already names. */
+  readonly delivery?: string;
 }
 
 export type RunStatusOutcome =
@@ -55,8 +70,29 @@ export interface RunStatusPublisher {
 }
 
 const staleAfterMilliseconds = 60 * 60 * 1_000;
+/** How long a record goes on naming a response its run took: longer than a sender waits to hear of it. */
+export const deliveryRetentionMilliseconds = 60_000;
 const disabled: RunStatusPublisher = { update() {}, finish() {} };
 let temporaryFiles = 0;
+
+/** The directory runs publish to, or undefined while publication is off. */
+export function runStatusDirectory(environment: NodeJS.ProcessEnv = process.env): string | undefined {
+  const configured = environment.MACHINES_RUN_STATUS_DIR;
+  return configured === undefined || configured === "" ? undefined : resolve(configured);
+}
+
+/** The one pending outside response for a run, kept beside its record. */
+export function runInboxPath(directory: string, id: string): string {
+  return join(directory, `${id}.inbox`);
+}
+
+/**
+ * A second name for a response in a run's inbox, which its sender keeps. Only
+ * the sender and the run remove it, and whichever does owns the response.
+ */
+export function runDeliveryPath(directory: string, id: string, delivery: string): string {
+  return join(directory, `.${id}.${delivery}.inbox.sent`);
+}
 
 /**
  * Publishes one run for hosts that can only read files, such as a status line.
@@ -67,23 +103,23 @@ export function createRunStatusPublisher(
   run: RunStatusRun,
   environment: NodeJS.ProcessEnv = process.env,
 ): RunStatusPublisher {
-  const configured = environment.MACHINES_RUN_STATUS_DIR;
+  const directory = runStatusDirectory(environment);
   const id = run.id ?? randomUUID();
-  if (configured === undefined || configured === "" || !isFileSafeId(id)) return disabled;
+  if (directory === undefined || !isFileSafeId(id)) return disabled;
 
-  const directory = resolve(configured);
   const owner = environment.MACHINES_RUN_OWNER || environment.CLAUDE_CODE_SESSION_ID || undefined;
   const parent = environment.MACHINES_RUN_PARENT || undefined;
   const startedAt = run.startedAt ?? new Date().toISOString();
   let status: RunStatusRecord["status"] = "running";
   let state: string | undefined;
   let agent: RunStatusAgent | undefined;
-  let human: { readonly prompt: string } | undefined;
+  let human: RunStatusHuman | undefined;
+  let deliveries: ReadonlyArray<{ readonly id: string; readonly takenAt: number }> = [];
   let error: string | undefined;
 
   const publish = () => {
     const record: RunStatusRecord = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       id,
       pid: process.pid,
       ...(owner === undefined ? {} : { owner }),
@@ -95,6 +131,7 @@ export function createRunStatusPublisher(
       ...(state === undefined ? {} : { state }),
       ...(agent === undefined ? {} : { agent }),
       ...(human === undefined ? {} : { human }),
+      ...(deliveries.length === 0 ? {} : { deliveries: deliveries.map((delivery) => delivery.id) }),
       ...(error === undefined ? {} : { error }),
       startedAt,
       updatedAt: new Date().toISOString(),
@@ -130,10 +167,15 @@ export function createRunStatusPublisher(
         state: "state" in change ? formatState(change.state) : state,
         agent: "agent" in change ? pickAgent(change.agent) : agent,
         human: "human" in change ? pickHuman(change.human) : human,
+        // A later response must not hide an earlier one from a sender that has yet to look.
+        deliveries: change.delivery === undefined ? deliveries : [
+          ...deliveries.filter((delivery) => Date.now() - delivery.takenAt < deliveryRetentionMilliseconds),
+          { id: change.delivery, takenAt: Date.now() },
+        ],
       };
       // Repeated notifications for an unchanged run do not need another write.
-      if (JSON.stringify(next) === JSON.stringify({ status, state, agent, human })) return;
-      ({ status, state, agent, human } = next);
+      if (JSON.stringify(next) === JSON.stringify({ status, state, agent, human, deliveries })) return;
+      ({ status, state, agent, human, deliveries } = next);
       publish();
     },
     finish(outcome) {
@@ -148,6 +190,12 @@ export function createRunStatusPublisher(
       agent = undefined;
       human = undefined;
       publish();
+      try {
+        // Nothing reads the inbox from here on, and only the run empties it.
+        rmSync(runInboxPath(directory, id), { force: true });
+      } catch {
+        // Left for pruning.
+      }
     },
   };
 }
@@ -164,6 +212,13 @@ function pruneRunStatuses(directory: string): void {
     if (!settled || now - Date.parse(record.updatedAt) <= staleAfterMilliseconds) continue;
     try {
       rmSync(file, { force: true });
+      // A response nobody collected goes with the run it was meant for, under each of its names.
+      const id = basename(file, ".json");
+      rmSync(runInboxPath(directory, id), { force: true });
+      for (const name of readdirSync(directory)) {
+        if (!name.startsWith(`.${id}.`)) continue;
+        if (/^[^.]+\.inbox\.(?:sent|taken)$/u.test(name.slice(id.length + 2))) rmSync(join(directory, name), { force: true });
+      }
     } catch {
       // Another publisher may have pruned it first.
     }
@@ -196,7 +251,7 @@ function isRunStatusRecord(value: unknown): value is RunStatusRecord {
   const record = value as Record<string, unknown>;
   const agent = record.agent as Record<string, unknown> | null | undefined;
   const human = record.human as Record<string, unknown> | null | undefined;
-  return record.schemaVersion === 1
+  return (record.schemaVersion === 1 || record.schemaVersion === 2)
     && typeof record.id === "string" && record.id !== ""
     && Number.isSafeInteger(record.pid) && (record.pid as number) > 0
     && isOptionalString(record.owner)
@@ -209,7 +264,10 @@ function isRunStatusRecord(value: unknown): value is RunStatusRecord {
     && isOptionalString(record.state)
     && (agent === undefined || (agent !== null && typeof agent === "object" && typeof agent.harness === "string"
       && isOptionalString(agent.model) && isOptionalString(agent.thinking)))
-    && (human === undefined || (human !== null && typeof human === "object" && typeof human.prompt === "string"))
+    && (human === undefined || (human !== null && typeof human === "object" && typeof human.prompt === "string"
+      && isOptionalString(human.requestId) && isOptionalStrings(human.choices) && isOptionalStrings(human.suggestions)
+      && (human.discussion === undefined || typeof human.discussion === "boolean")))
+    && isOptionalStrings(record.deliveries)
     && isOptionalString(record.error)
     && isTimestamp(record.startedAt)
     && isTimestamp(record.updatedAt);
@@ -219,16 +277,20 @@ function isOptionalString(value: unknown): boolean {
   return value === undefined || typeof value === "string";
 }
 
+function isOptionalStrings(value: unknown): boolean {
+  return value === undefined || (Array.isArray(value) && value.every((item) => typeof item === "string"));
+}
+
 function isTimestamp(value: unknown): boolean {
   return typeof value === "string" && !Number.isNaN(Date.parse(value));
 }
 
 /** The id becomes a file name, so it must not be able to leave the directory. */
-function isFileSafeId(id: string): boolean {
+export function isFileSafeId(id: string): boolean {
   return /^[A-Za-z0-9_-][A-Za-z0-9._-]*$/u.test(id);
 }
 
-function isProcessAlive(pid: number): boolean {
+export function isProcessAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
@@ -252,6 +314,13 @@ function pickAgent(agent: RunStatusAgent | undefined): RunStatusAgent | undefine
   };
 }
 
-function pickHuman(human: { readonly prompt: string } | undefined): { readonly prompt: string } | undefined {
-  return human === undefined ? undefined : { prompt: human.prompt };
+function pickHuman(human: RunStatusHuman | undefined): RunStatusHuman | undefined {
+  if (human === undefined) return undefined;
+  return {
+    prompt: human.prompt,
+    ...(human.requestId === undefined ? {} : { requestId: human.requestId }),
+    ...(human.choices === undefined ? {} : { choices: [...human.choices] }),
+    ...(human.suggestions === undefined ? {} : { suggestions: [...human.suggestions] }),
+    ...(human.discussion === true ? { discussion: true } : {}),
+  };
 }
