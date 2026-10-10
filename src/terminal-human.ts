@@ -10,7 +10,18 @@ import { cyan, dim, green } from "yoctocolors";
 
 import type { HumanRequest } from "./index.ts";
 
-export function terminalHuman(request: HumanRequest): Promise<string> {
+export class TerminalInputClosed extends Error {
+  constructor() {
+    super("Terminal input closed before a response");
+  }
+}
+
+/**
+ * Asks on the process's own terminal. Aborting the signal withdraws the
+ * question, restores the terminal, and rejects with the signal's reason.
+ */
+export function terminalHuman(request: HumanRequest, signal?: AbortSignal): Promise<string> {
+  if (signal?.aborted) return Promise.reject(signal.reason);
   const values = request.choices ?? request.suggestions ?? [];
   const allowOther = request.suggestions !== undefined;
   if (
@@ -19,13 +30,14 @@ export function terminalHuman(request: HumanRequest): Promise<string> {
     && process.stdout.isTTY
     && typeof process.stdin.setRawMode === "function"
   ) {
-    return selectHumanInput(request.prompt, values, allowOther);
+    return selectHumanInput(request.prompt, values, allowOther, signal);
   }
 
   return readFreeformInput(
     request.prompt,
     values,
     allowOther ? "Suggestions" : "Choices",
+    signal,
   );
 }
 
@@ -33,6 +45,7 @@ function readFreeformInput(
   prompt: string,
   values: readonly string[] = [],
   heading = "Suggestions",
+  signal?: AbortSignal,
 ): Promise<string> {
   const terminal = createInterface({ input: process.stdin, output: process.stdout });
   const suggestionText = values.length === 0
@@ -42,9 +55,19 @@ function readFreeformInput(
   return new Promise((resolve, reject) => {
     let answered = false;
 
+    function onAbort() {
+      answered = true;
+      terminal.close();
+      // Leave the unanswered prompt line behind.
+      process.stdout.write("\n");
+      reject(signal?.reason);
+    }
+
     terminal.once("close", () => {
-      if (!answered) reject(new Error("Terminal input closed before a response"));
+      signal?.removeEventListener("abort", onAbort);
+      if (!answered) reject(new TerminalInputClosed());
     });
+    signal?.addEventListener("abort", onAbort, { once: true });
 
     terminal.question(`${prompt}${suggestionText}\n> `, (answer) => {
       answered = true;
@@ -58,6 +81,7 @@ function selectHumanInput(
   prompt: string,
   values: readonly string[],
   allowOther: boolean,
+  signal?: AbortSignal,
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const choices = allowOther ? [...values, "Other…"] : [...values];
@@ -87,13 +111,21 @@ function selectHumanInput(
       process.stdin.off("keypress", onKeypress);
       process.stdin.off("end", onInputClosed);
       process.stdin.off("close", onInputClosed);
+      signal?.removeEventListener("abort", onAbort);
       process.stdin.setRawMode(initialRawMode ?? false);
       if (!initialRawMode) process.stdin.pause();
     }
 
     function onInputClosed() {
       cleanup();
-      reject(new Error("Terminal input closed before a response"));
+      reject(new TerminalInputClosed());
+    }
+
+    function onAbort() {
+      clearMenu();
+      cleanup();
+      process.stdout.write(`${dim("answered elsewhere")}\n`);
+      reject(signal?.reason);
     }
 
     function onKeypress(_character: string | undefined, key: { name?: string; ctrl?: boolean }) {
@@ -115,7 +147,7 @@ function selectHumanInput(
           process.stdout.write(`${green("✔")} ${answer}\n`);
           resolve(answer);
         } else {
-          void readFreeformInput("Feedback").then(resolve, reject);
+          void readFreeformInput("Feedback", [], undefined, signal).then(resolve, reject);
         }
       }
     }
@@ -126,6 +158,7 @@ function selectHumanInput(
     process.stdin.on("keypress", onKeypress);
     process.stdin.once("end", onInputClosed);
     process.stdin.once("close", onInputClosed);
+    signal?.addEventListener("abort", onAbort, { once: true });
     process.stdin.resume();
     render();
   });

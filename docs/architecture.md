@@ -93,6 +93,16 @@ and that request. Claiming a request before asynchronous delivery prevents two
 answers from being accepted, and the identity prevents a stale card or dialog from
 answering a later prompt. Restricted choices are validated for every interface.
 
+`machine run` asks on its own terminal. With run-status publication on it also
+publishes the pending request and its request ID, and takes the first valid
+response from either the terminal or a private per-run inbox file written by
+`machine respond`; the MCP session takes inbox responses through the same
+session `respond` path as its tool, and inbox questions through the session's
+`ask`. The inbox is a second way to deliver a response to the owning run, not a
+second owner: the run still validates the request ID and choices, and a response
+to any other request is discarded. See
+[Integrations](integrations.md#answering-a-waiting-run-from-outside).
+
 Closing a session terminates active and starting hosts. Host termination includes
 ordinary descendants in the host's owned process group on POSIX and process-tree
 termination on Windows. Deliberately detached processes can escape normal ownership;
@@ -127,7 +137,9 @@ Drip uses this public host/runtime boundary to show every Machine run and route
 its Human steps through a shared web/CLI focus. Existing Pi/MCP presentation
 adapters remain answer-only unless they explicitly implement the question channel.
 The default terminal Human selector is also answer-only; Drip's `chat` command
-provides the discussion-capable terminal surface.
+provides the discussion-capable terminal surface, and `machine respond --question`
+sends a question to a published run, started by `machine run` or hosted by the
+MCP server, whose request allows discussion.
 
 ## Distribution
 

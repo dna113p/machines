@@ -43,6 +43,43 @@ test("a session rejects duplicate and stale answers without consuming the next r
   });
 });
 
+test("a session sends a question only to a request that allows discussion, and the Machine asks again", async (context) => {
+  const session = new MachineSession();
+  context.after(() => session.close());
+  const fixture = resolve("tests/fixtures/human-inbox.machine.ts");
+
+  const restricted = await session.start({ machine: fixture, input: "choices" });
+  const closed = await waiting(session, restricted.id);
+  await assert.rejects(
+    session.ask({ runId: restricted.id, requestId: closed.human!.requestId, question: "Why?" }),
+    /does not support discussion/u,
+  );
+  assert.equal(session.status(restricted.id)[0]?.human?.requestId, closed.human!.requestId);
+
+  const run = await session.start({ machine: fixture, input: "discussion" });
+  const first = await waiting(session, run.id);
+  const question = { runId: run.id, requestId: first.human!.requestId };
+  await assert.rejects(session.ask({ ...question, requestId: "stale", question: "Why?" }), /stale/u);
+  await assert.rejects(session.ask({ ...question, question: " " }), /Question must contain/u);
+  await assert.rejects(session.ask({ ...question, question: "x".repeat(8001) }), /Question must contain/u);
+  assert.equal(session.status(run.id)[0]?.human?.requestId, first.human!.requestId);
+
+  const asked = await Promise.allSettled([
+    session.ask({ ...question, question: "Why three?" }),
+    session.ask({ ...question, question: "Why three, again?" }),
+  ]);
+  assert.equal(asked.filter((sent) => sent.status === "fulfilled").length, 1);
+  await eventually(() => assert.equal(session.status(run.id)[0]?.human?.prompt, "Approve it now?"));
+  const second = session.status(run.id)[0]!;
+  assert.notEqual(second.human!.requestId, first.human!.requestId);
+  await assert.rejects(session.ask({ ...question, question: "Late?" }), /stale/u);
+  await session.respond({ runId: run.id, requestId: second.human!.requestId, response: "approve" });
+  await eventually(() => assert.deepEqual(session.status(run.id)[0]?.output, [
+    { type: "question", value: "Why three?" },
+    { type: "submitted", value: "approve" },
+  ]));
+});
+
 test("session notifications and snapshots share one lifecycle and retain only five finished runs", async (context) => {
   const session = new MachineSession();
   context.after(() => session.close());

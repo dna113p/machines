@@ -59,6 +59,20 @@ test("a run is one line, with its Agent or its Human prompt beneath it", () => {
   ], alive), ["✕ failed-r  ticket › failed · 15s", "✓ complete  ticket › done · 1m 0s"]);
 });
 
+test("records of both schema versions are shown alike", () => {
+  const request = { requestId: "request-1", choices: ["approve", "deny"], suggestions: ["later"], discussion: true };
+  const lines = (schemaVersion: 1 | 2, human: RunStatusRecord["human"]) => runStatusLines([
+    record({ schemaVersion, id: "running-run", state: "review", agent: { harness: "claude" } }),
+    record({ schemaVersion, id: "waiting-run", status: "waiting", state: "approve", human }),
+  ], alive);
+  const expected = ["● running-  ticket › review · 0s", "  claude", "◆ waiting-  ticket › input needed · 0s", "  Approve the plan?"];
+
+  assert.deepEqual(lines(1, { prompt: "Approve the plan?" }), expected);
+  assert.deepEqual(lines(2, { prompt: "Approve the plan?", ...request }), expected);
+  // What answers a request is never drawn on the status line.
+  assert.doesNotMatch(lines(2, { prompt: "Approve the plan?", ...request }).join("\n"), /request-1|deny|later/u);
+});
+
 test("statuses are coloured unless colour is disabled", () => {
   const records = [
     record({ id: "running", state: "review", agent: { harness: "claude" } }),
@@ -198,7 +212,7 @@ test("recorded text cannot inject control sequences, and invalid records are ski
       id: "hostile", machine: "tick\x1b[2Jet", state: "re\tview", status: "waiting",
       human: { prompt: "Approve\x1b]0;title\x07?\r\nmore" },
     }),
-    { ...record({ id: "wrong-schema" }), schemaVersion: 2 },
+    { ...record({ id: "wrong-schema" }), schemaVersion: 3 },
     { ...record({ id: "wrong-pid" }), pid: -1 },
     { ...record({ id: "wrong-status" }), status: "paused" },
     { ...record({ id: "wrong-time" }), updatedAt: "soon" },
@@ -298,7 +312,7 @@ test("the script starts without the runtime or any dependency", async () => {
 
 function record(change: Partial<RunStatusRecord> = {}): RunStatusRecord {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     id: "run",
     pid: 1,
     machine: "ticket",
