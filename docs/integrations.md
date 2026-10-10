@@ -179,7 +179,7 @@ When it is unset nothing is written.
 
 ```json
 {
-  "schemaVersion": 1, "id": "1a2b3c4d-…", "pid": 4242, "owner": "<session id>",
+  "schemaVersion": 2, "id": "1a2b3c4d-…", "pid": 4242, "owner": "<session id>",
   "machine": "ticket", "path": "/work/.machines/ticket.ts", "cwd": "/work",
   "status": "running", "state": "review",
   "agent": { "harness": "claude", "model": "opus", "thinking": "high" },
@@ -189,18 +189,109 @@ When it is unset nothing is written.
 
 `status` is `running`, `waiting`, `completed`, or `failed`. `state` is the current
 state as a string (JSON for a nested state). `agent` is present while an Agent
-state has reported its identity, and `error` after a failure. A run waiting for
-Human input is `waiting`; MCP-hosted runs also record `human.prompt`, while
-`machine run` asks on its own terminal. `owner` is `MACHINES_RUN_OWNER` when set,
-otherwise `CLAUDE_CODE_SESSION_ID`, otherwise absent. `machine run` exports its
-run id as `MACHINES_RUN_PARENT`, so a Machine started by one of its Operations or
-Agents records that id as `parent`; the status line shows only top-level runs.
+state has reported its identity, and `error` after a failure. `owner` is
+`MACHINES_RUN_OWNER` when set, otherwise `CLAUDE_CODE_SESSION_ID`, otherwise
+absent. `machine run` exports its run id as `MACHINES_RUN_PARENT`, so a Machine
+started by one of its Operations or Agents records that id as `parent`; the
+status line shows only top-level runs.
 
-Machine input and output are never recorded. A Human prompt is written to the
-`0600` file while its request is waiting, so choose a directory only you can
-read. Publication cannot change a run: a missing or unwritable directory is
-ignored. Starting a run prunes records that finished, or whose process is gone,
-more than an hour ago.
+A run waiting for Human input is `waiting` and records the pending request in
+`human`:
+
+```json
+"human": {
+  "prompt": "Publish version 0.4.0?", "requestId": "9f8e7d6c-…",
+  "choices": ["publish", "hold"]
+}
+```
+
+`requestId` is new for every request. `choices` restricts the response to those
+values; `suggestions` are offered but any text is accepted; `discussion: true`
+means the request also takes a question. Each is present only when the Human
+state has it. Records written before these fields existed have `schemaVersion`
+1 and only `human.prompt`; readers should accept both versions. Once a run has
+taken a response from its inbox, its record lists that delivery's id in
+`deliveries`, which is how `machine respond` knows its response was applied. An
+id stays listed for at least a minute, however many responses the run takes
+after it, and never contains the response.
+
+Machine input, Machine output, and Human responses are never recorded. A Human
+prompt and its choices are written to the `0600` file while the request is
+waiting, so choose a directory only you can read. Publication cannot change a
+run: a missing or unwritable directory is ignored. Starting a run prunes records
+that finished, or whose process is gone, more than an hour ago.
+
+### Answering a waiting run from outside
+
+With publication on, a waiting run can be seen and answered by any process
+running as the same user: a terminal, a coordinating agent, a script, or a
+presentation surface. They all read the same request, and the first valid
+response wins. Set the same `MACHINES_RUN_STATUS_DIR` for the run and for
+whatever answers it.
+
+```bash
+machine runs                 # running and waiting runs
+machine runs --json          # the same runs as their records
+machine respond <run-id> <request-id> <response>
+machine respond --question <run-id> <request-id> <text>
+```
+
+`machine runs` prints each run's id, Machine, status, and state, and for a
+waiting run its prompt, request id, and choices (tab-separated when its output
+is not a terminal):
+
+```text
+1a2b3c4d-…	release	waiting	approve
+  Publish version 0.4.0?
+  request: 9f8e7d6c-…
+  choices: publish, hold
+```
+
+`machine respond` checks the response against the current record before it
+delivers anything. It fails with a nonzero exit when the run is unknown, is not
+waiting, is waiting on a different request id, or restricts `choices` to values
+that do not include the response. `--question` sends a discussion question
+instead of an answer and is refused unless the request has `discussion: true`.
+Words after the request id are joined into one response; put `--` before a
+response that starts with a dash.
+
+The command exits zero once the run's record has left that request and names
+this delivery among the responses it took, even if the run has taken a response
+to a later request since. If that does not happen within five seconds, or the
+run leaves the request without taking the response because something else
+answered first, it exits nonzero with a "not confirmed" message.
+A response still unread is taken back and one the run read too late is
+discarded, so the same response is never applied later or twice. Read the run's
+new record before answering again.
+
+Delivery uses a private inbox beside the records: one `0600` file per run,
+`<dir>/<runId>.inbox`, written atomically and removed by the run as it reads it.
+There is no network listener and no daemon. A response for another request id,
+or one the request does not allow, is discarded and never applied to a later
+request.
+
+The inbox holds one response at a time, and a second is refused while one is
+pending. Only the run removes a file from its inbox. While `machine respond`
+waits, it holds the same file under a second name of its own,
+`<dir>/.<runId>.<delivery>.inbox.sent`; the run removes that name to take the
+response and the sender removes it to take the response back, so exactly one of
+them succeeds and neither can act on a response that arrived later. A response
+that was taken back stays in the inbox, emptied, until the run next reads its
+inbox or finishes, and a new response is refused until then. **Anything that can write to the directory as you can answer a waiting
+run**, including approvals, so do not point `MACHINES_RUN_STATUS_DIR` at a
+shared directory.
+
+`machine run` still asks on its own terminal, and whichever of the terminal and
+the inbox gives the first valid response is used. Terminal input outside a
+request's `choices` is reported and asked for again instead of failing the run.
+A published run started without terminal input, for example by a coordinating
+agent or a script, waits for `machine respond` instead of failing, and prints
+the exact command to its standard error. With publication off it fails at its
+first Human state with "Terminal input closed before a response", as before.
+Runs hosted by the MCP server take a response from their own `machine_respond`
+tool or from the inbox. That tool is answer-only, so a question to a hosted
+request that allows discussion goes through the inbox with
+`machine respond --question`.
 
 For Claude Code, set the variable in the `env` of its settings so the runs it
 launches publish there, and call the dependency-free renderer from `statusLine`:

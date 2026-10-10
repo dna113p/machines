@@ -18,7 +18,14 @@ import {
   listMachines,
   prepareMachineRun,
 } from "./launcher.ts";
-import { createRunStatusPublisher } from "./run-status.ts";
+import { inboxHuman, respondToRun } from "./run-inbox.ts";
+import {
+  createRunStatusPublisher,
+  isProcessAlive,
+  readRunStatuses,
+  runStatusDirectory,
+  type RunStatusRecord,
+} from "./run-status.ts";
 
 import type { StateValue } from "xstate";
 import type { AgentUpdate, RunOptions } from "./index.ts";
@@ -45,6 +52,10 @@ try {
     console.log(await readFile(machinePath, "utf8"));
   } else if (command === "run" && selector !== undefined) {
     await runMachine(await resolveMachine(selector), argumentsAfterSelector);
+  } else if (command === "runs" && (selector === undefined || selector === "--json") && argumentsAfterSelector.length === 0) {
+    listRuns(selector === "--json");
+  } else if (command === "respond" && selector !== undefined) {
+    await respond([selector, ...argumentsAfterSelector]);
   } else {
     throw new Error([
       "Usage:",
@@ -52,6 +63,8 @@ try {
       "  machine agents",
       "  machine show <name-or-file>",
       "  machine run <name-or-file> [--agent role=preset]... [--input-file <file|->] [--] [input]",
+      "  machine runs [--json]",
+      "  machine respond [--question] <run-id> <request-id> [--] <response>",
     ].join("\n"));
   }
 } catch (cause) {
@@ -84,6 +97,7 @@ async function runMachine(machinePath: string, args: string[]) {
   const status = createRunStatus(machinePath);
   const runId = randomUUID();
   const published = createRunStatusPublisher({ id: runId, machine: prepared.name, path: prepared.path, cwd: process.cwd() });
+  const statusDirectory = runStatusDirectory();
   // Machines started by this run's Operations and Agents are its sub-runs.
   process.env.MACHINES_RUN_PARENT = runId;
   let publishedState: string | undefined;
@@ -105,8 +119,23 @@ async function runMachine(machinePath: string, args: string[]) {
         }
         status.onAgentUpdate(update);
       },
+      // A published run can also be answered through its inbox by `machine respond`.
+      ...(statusDirectory === undefined ? {} : {
+        human: inboxHuman({
+          directory: statusDirectory,
+          runId,
+          publish: (request) => published.update({ status: "waiting", human: request }),
+          acknowledge: (delivery) => published.update({ delivery }),
+          onTerminalRefused: (reason) => console.error(reason),
+          onTerminalClosed(requestId) {
+            // Finish the unanswered prompt line before saying where the answer can come from.
+            process.stdout.write("\n");
+            console.error(`No terminal input. Answer with: machine respond ${runId} ${requestId} <response>`);
+          },
+        }),
+      }),
       onHumanInput(active) {
-        published.update({ status: active ? "waiting" : "running" });
+        published.update(active ? { status: "waiting" } : { status: "running", human: undefined });
         status.onHumanInput(active);
       },
       onState(state) {
@@ -134,6 +163,45 @@ async function runMachine(machinePath: string, args: string[]) {
   } finally {
     status.close();
   }
+}
+
+function listRuns(json: boolean) {
+  const runs = readRunStatuses(requireStatusDirectory())
+    .filter((record) => (record.status === "running" || record.status === "waiting") && isProcessAlive(record.pid))
+    .sort((left, right) => Date.parse(left.startedAt) - Date.parse(right.startedAt));
+  if (json) {
+    console.log(JSON.stringify(runs, null, 2));
+    return;
+  }
+  if (runs.length === 0) console.log("No Machine runs are running or waiting.");
+  runs.forEach((record, index) => {
+    printRunListing(record, index > 0);
+  });
+}
+
+async function respond(args: string[]) {
+  const question = args[0] === "--question";
+  const [runId, requestId, ...words] = question ? args.slice(1) : args;
+  if (words[0] === "--") words.shift();
+  if (runId === undefined || requestId === undefined || words.length === 0) {
+    throw new Error("Usage: machine respond [--question] <run-id> <request-id> [--] <response>");
+  }
+  const text = words.join(" ");
+  await respondToRun({
+    directory: requireStatusDirectory(),
+    runId,
+    requestId,
+    response: question ? { type: "question", text } : text,
+  });
+  console.log(`Machine run ${runId} took the ${question ? "question" : "response"}.`);
+}
+
+function requireStatusDirectory() {
+  const directory = runStatusDirectory();
+  if (directory === undefined) {
+    throw new Error("Run status publication is off: set MACHINES_RUN_STATUS_DIR to the directory the runs publish to.");
+  }
+  return directory;
 }
 
 async function parseRunArguments(args: string[]) {
@@ -232,6 +300,31 @@ function printAgentListing(preset: AgentPresetSummary, separate: boolean) {
   console.log(`  ${preset.description}`);
   if (identity.length > 0) console.log(`  ${magenta(identity.join(" · "))}`);
   console.log(`  ${dim(preset.source)}`);
+}
+
+function printRunListing(record: RunStatusRecord, separate: boolean) {
+  const state = record.state ?? "starting";
+  const human = record.status === "waiting" ? record.human : undefined;
+  // Recorded text must not be able to move the cursor or restyle the terminal.
+  const plain = (text: string) => text.replace(/[\u0000-\u001f\u007f-\u009f]+/gu, " ").trim();
+  const details = human === undefined ? [] : [
+    ...human.prompt.split("\n").map(plain).filter((line) => line !== ""),
+    ...(human.requestId === undefined ? [] : [`request: ${plain(human.requestId)}`]),
+    ...(human.choices === undefined ? [] : [`choices: ${human.choices.map(plain).join(", ")}`]),
+    ...(human.suggestions === undefined ? [] : [`suggestions: ${human.suggestions.map(plain).join(", ")}`]),
+    ...(human.discussion === true ? ["discussion: questions allowed"] : []),
+  ];
+
+  if (!process.stdout.isTTY) {
+    console.log([record.id, record.machine, record.status, state].map(plain).join("\t"));
+    for (const line of details) console.log(`  ${line}`);
+    return;
+  }
+
+  if (separate) console.log();
+  const status = record.status === "waiting" ? yellow("waiting") : cyan("running");
+  console.log(`${bold(plain(record.id))}  ${bold(cyan(plain(record.machine)))} › ${status} · ${plain(state)}`);
+  for (const line of details) console.log(`  ${line.startsWith("request: ") ? dim(line) : line}`);
 }
 
 function printMachineHeader(machinePath: string) {

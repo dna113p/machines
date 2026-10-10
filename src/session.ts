@@ -143,6 +143,33 @@ export class MachineSession {
     return snapshot(run);
   }
 
+  /** Sends a discussion question in place of an answer; the Machine then asks again as a new request. */
+  async ask(input: {
+    readonly runId: string;
+    readonly requestId: string;
+    readonly question: string;
+  }): Promise<RunSnapshot> {
+    const run = this.#requireRun(input.runId);
+    if (run.status !== "waiting" || run.human === undefined) {
+      throw new Error(`Machine run "${input.runId}" is not waiting for Human input`);
+    }
+    if (run.human.requestId !== input.requestId) {
+      throw new Error("Machine Human request is stale; read the current requestId");
+    }
+    if (run.human.discussion !== true) throw new Error("This Human request does not support discussion");
+    if (input.question.trim() === "" || input.question.length > 8000) {
+      throw new Error("Question must contain 1–8000 characters");
+    }
+    // Claimed as a response is: the request is spent once its question is on the way.
+    run.status = "running";
+    run.human = undefined;
+    run.updatedAt = Date.now();
+    const sent = run.host.ask(input.question, input.requestId);
+    this.#emit("updated", run);
+    await sent;
+    return snapshot(run);
+  }
+
   close(): void {
     if (this.#closed) return;
     this.#closed = true;

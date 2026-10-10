@@ -6,7 +6,14 @@ import { join, resolve } from "node:path";
 import { test, type TestContext } from "node:test";
 
 import { MachineSession as McpSession } from "../mcp/server.ts";
-import { createRunStatusPublisher, readRunStatuses, type RunStatusRecord } from "../src/run-status.ts";
+import { respondToRun } from "../src/run-inbox.ts";
+import {
+  createRunStatusPublisher,
+  readRunStatuses,
+  runDeliveryPath,
+  runInboxPath,
+  type RunStatusRecord,
+} from "../src/run-status.ts";
 
 const run = { machine: "ticket", path: "/work/.machines/ticket.ts", cwd: "/work" };
 const fixture = resolve("tests/fixtures/run-status.machine.ts");
@@ -38,7 +45,7 @@ test("a publisher writes one private record that identifies the run and its proc
   assert.ok(record);
   const { startedAt, updatedAt, ...identity } = record;
   assert.deepEqual(identity, {
-    schemaVersion: 1,
+    schemaVersion: 2,
     id: "run-1",
     pid: process.pid,
     machine: "ticket",
@@ -121,10 +128,16 @@ test("updates replace the record atomically until a terminal outcome", async (co
   assert.equal("agent" in record, false);
 
   const request = { prompt: "Approve?\nDetails", requestId: "request-1", choices: ["yes", "no"] };
-  completed.update({ status: "waiting", human: request });
+  completed.update({ status: "waiting", human: { ...request, response: "yes", input: "unpublished" } as typeof request });
   record = await read("completed");
   assert.equal(record.status, "waiting");
-  assert.deepEqual(record.human, { prompt: "Approve?\nDetails" });
+  assert.deepEqual(record.human, request);
+  completed.update({ human: { prompt: "Which?", requestId: "request-2", suggestions: ["later"], discussion: true } });
+  assert.deepEqual((await read("completed")).human, {
+    prompt: "Which?", requestId: "request-2", suggestions: ["later"], discussion: true,
+  });
+  completed.update({ human: { prompt: "Say more", requestId: "request-3", discussion: false } });
+  assert.deepEqual((await read("completed")).human, { prompt: "Say more", requestId: "request-3" });
 
   completed.update({ status: "running", human: undefined, agent: { harness: "codex" } });
   completed.finish({ state: "done" });
@@ -176,14 +189,26 @@ test("creating a publisher prunes settled records older than one hour", async (c
   for (const record of records) await writeRecord(directory, record);
   await writeFile(join(directory, "malformed.json"), "{");
   await writeFile(join(directory, "notes.txt"), "not a record");
+  // A response nobody collected is pruned with its run, and kept with a run that stays.
+  for (const id of ["old-completed", "old-lost-waiting", "old-waiting"]) await writeFile(runInboxPath(directory, id), "{}");
+  // So are the other names of a response whose sender or run was stopped while holding one.
+  for (const id of ["old-completed", "old-waiting"]) {
+    await writeFile(runDeliveryPath(directory, id, "8b5f0b0e-3c0a-4f57-9a55-0d6a2f6f6f01"), "{}");
+    await writeFile(join(directory, `.${id}.8b5f0b0e-3c0a-4f57-9a55-0d6a2f6f6f02.inbox.taken`), "{}");
+  }
+  await writeFile(runDeliveryPath(directory, "old-completed.other", "8b5f0b0e-3c0a-4f57-9a55-0d6a2f6f6f01"), "{}");
 
   createRunStatusPublisher({ ...run, id: "new" }, { MACHINES_RUN_STATUS_DIR: directory });
 
   assert.deepEqual((await readdir(directory)).sort(), [
+    ".old-completed.other.8b5f0b0e-3c0a-4f57-9a55-0d6a2f6f6f01.inbox.sent",
+    ".old-waiting.8b5f0b0e-3c0a-4f57-9a55-0d6a2f6f6f01.inbox.sent",
+    ".old-waiting.8b5f0b0e-3c0a-4f57-9a55-0d6a2f6f6f02.inbox.taken",
     "malformed.json",
     "new.json",
     "notes.txt",
     "old-running.json",
+    "old-waiting.inbox",
     "old-waiting.json",
     "recent-completed.json",
     "recent-lost.json",
@@ -193,13 +218,19 @@ test("creating a publisher prunes settled records older than one hour", async (c
 test("reading skips unreadable and malformed files", async (context) => {
   const directory = await temporaryDirectory(context);
   await writeRecord(directory, { id: "valid", owner: "session", state: "review", agent: { harness: "claude" } });
+  await writeRecord(directory, { id: "valid-1", schemaVersion: 1, status: "waiting", human: { prompt: "Approve?" } });
+  await writeRecord(directory, {
+    id: "valid-2", status: "waiting",
+    human: { prompt: "Approve?", requestId: "request-1", choices: ["yes"], suggestions: [], discussion: true },
+  });
+  await writeFile(runInboxPath(directory, "valid"), JSON.stringify({ requestId: "request-1", response: "yes" }));
   await writeFile(join(directory, "truncated.json"), '{"schemaVersion":1,"id":"trunc');
   await writeFile(join(directory, "array.json"), "[]");
   await writeFile(join(directory, "null.json"), "null");
   await writeFile(join(directory, "readme.txt"), "not a record");
   await mkdir(join(directory, "directory.json"));
   const invalid: Array<Record<string, unknown>> = [
-    { schemaVersion: 2 },
+    { schemaVersion: 3 },
     { status: "paused" },
     { pid: 0 },
     { pid: "1" },
@@ -209,13 +240,18 @@ test("reading skips unreadable and malformed files", async (context) => {
     { state: { nested: "value" } },
     { agent: { model: "opus" } },
     { human: "Approve?" },
+    { human: { prompt: "Approve?", requestId: 7 } },
+    { human: { prompt: "Approve?", choices: "yes" } },
+    { human: { prompt: "Approve?", suggestions: [7] } },
+    { human: { prompt: "Approve?", discussion: "yes" } },
+    { deliveries: "delivery-1" },
     { owner: 7 },
   ];
   for (const [index, change] of invalid.entries()) {
     await writeRecord(directory, { id: `invalid-${index}`, ...change } as Partial<RunStatusRecord>);
   }
 
-  assert.deepEqual(readRunStatuses(directory).map((record) => record.id), ["valid"]);
+  assert.deepEqual(readRunStatuses(directory).map((record) => record.id).sort(), ["valid", "valid-1", "valid-2"]);
 });
 
 test("machine run publishes a running record and then its completion", async (context) => {
@@ -333,18 +369,33 @@ test("the MCP session publishes its runs under their snapshot ids", async (conte
     { pid: waiting.pid, machine: waiting.machine, cwd: waiting.cwd, startedAt: waiting.startedAt },
     { pid: process.pid, machine: "review", cwd, startedAt: answered.startedAt },
   );
-  assert.equal(typeof waiting.human?.prompt, "string");
-  assert.deepEqual(Object.keys(waiting.human!), ["prompt"]);
   const snapshot = (session.status({ runId: answered.id }).structuredContent as {
     runs: Array<{ human: { requestId: string; prompt: string } }>;
   }).runs[0]!;
-  assert.equal(waiting.human!.prompt, snapshot.human.prompt);
+  assert.deepEqual(waiting.human, {
+    prompt: snapshot.human.prompt, requestId: snapshot.human.requestId, choices: ["approve", "deny"],
+  });
   await session.respond({ runId: answered.id, requestId: snapshot.human.requestId, response: "approve" });
   await eventually(() => assert.equal(published(answered.id)?.status, "completed"));
   assert.deepEqual(
     { state: published(answered.id)!.state, human: published(answered.id)!.human },
     { state: "done", human: undefined },
   );
+
+  // A published request is also answerable through the run's inbox, by any process of the same user.
+  const outside = await start();
+  await eventually(() => assert.equal(published(outside.id)?.status, "waiting"));
+  const requestId = published(outside.id)!.human!.requestId!;
+  const delivery = { directory, runId: outside.id, requestId };
+  await assert.rejects(respondToRun({ ...delivery, response: "maybe" }), /Expected one of: approve, deny/u);
+  await assert.rejects(
+    respondToRun({ ...delivery, response: { type: "question", text: "Why?" } }),
+    /does not support discussion/u,
+  );
+  await respondToRun({ ...delivery, response: "approve" });
+  await eventually(() => assert.equal(published(outside.id)?.status, "completed"));
+  await assert.rejects(session.respond({ runId: outside.id, requestId, response: "approve" }), /not waiting/u);
+  assert.deepEqual((await readdir(directory)).filter((name) => !name.endsWith(".json")), []);
 
   const abandoned = await start();
   await eventually(() => assert.equal(published(abandoned.id)?.status, "waiting"));
@@ -354,6 +405,56 @@ test("the MCP session publishes its runs under their snapshot ids", async (conte
     { status: "failed", error: "Machine session closed" },
   );
   assert.equal(published(answered.id)?.status, "completed");
+});
+
+test("an MCP-hosted run publishes a discussion request and takes a question through its inbox", async (context) => {
+  const directory = await temporaryDirectory(context);
+  const previous = process.env.MACHINES_RUN_STATUS_DIR;
+  process.env.MACHINES_RUN_STATUS_DIR = directory;
+  const session = new McpSession();
+  context.after(() => {
+    session.close();
+    if (previous === undefined) delete process.env.MACHINES_RUN_STATUS_DIR;
+    else process.env.MACHINES_RUN_STATUS_DIR = previous;
+  });
+  const started = await session.start({
+    cwd: resolve("tests/fixtures"), machine: resolve("tests/fixtures/human-inbox.machine.ts"), input: "discussion",
+  });
+  const { id } = (started.structuredContent as { run: { id: string } }).run;
+  const waiting = async (after?: string) => {
+    let human: RunStatusRecord["human"];
+    await eventually(() => {
+      human = readRunStatuses(directory).find((record) => record.id === id && record.status === "waiting")?.human;
+      assert.ok(human?.requestId !== undefined && human.requestId !== after);
+    });
+    return human!;
+  };
+
+  const first = await waiting();
+  assert.deepEqual(first, {
+    prompt: "Approve the plan?\nIt changes three files.", requestId: first.requestId, choices: ["approve"], discussion: true,
+  });
+  const delivery = { directory, runId: id, requestId: first.requestId! };
+  await assert.rejects(respondToRun({ ...delivery, response: { type: "question", text: " " } }), /Question must contain/u);
+  await respondToRun({ ...delivery, response: { type: "question", text: "Why three?" } });
+
+  // The question is not an answer: the Machine asks again, as a new request that also allows discussion.
+  const second = await waiting(first.requestId);
+  assert.deepEqual(second, { prompt: "Approve it now?", requestId: second.requestId, choices: ["approve"], discussion: true });
+  await assert.rejects(
+    respondToRun({ ...delivery, response: { type: "question", text: "Why?" } }),
+    /is waiting on request /u,
+  );
+  await respondToRun({ ...delivery, requestId: second.requestId!, response: "approve" });
+  await eventually(() => assert.equal(readRunStatuses(directory)[0]?.status, "completed"));
+  const [completed] = (session.status({ runId: id }).structuredContent as { runs: Array<{ output: unknown }> }).runs;
+  assert.deepEqual(completed!.output, [
+    { type: "question", value: "Why three?" },
+    { type: "submitted", value: "approve" },
+  ]);
+  const text = await readFile(join(directory, `${id}.json`), "utf8");
+  assert.doesNotMatch(text, /Why three\?|"human"/u);
+  assert.deepEqual(await readdir(directory), [`${id}.json`]);
 });
 
 function runCli(
@@ -372,7 +473,7 @@ function runCli(
 async function writeRecord(directory: string, change: Partial<RunStatusRecord>): Promise<void> {
   const now = new Date().toISOString();
   const record = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     id: "run",
     pid: process.pid,
     machine: "ticket",

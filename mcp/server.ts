@@ -20,7 +20,8 @@ import type { StateValue } from "xstate";
 import { MachineSession as RunSession, type RunSnapshot } from "../src/session.ts";
 export type { RunSnapshot } from "../src/session.ts";
 import { listAgentPresets, listMachines } from "../src/launcher.ts";
-import { createRunStatusPublisher, type RunStatusPublisher } from "../src/run-status.ts";
+import { watchRunInbox } from "../src/run-inbox.ts";
+import { createRunStatusPublisher, runStatusDirectory, type RunStatusPublisher } from "../src/run-status.ts";
 import { machineCoordinatorGuidelines, machineDiscoveryDescription, machineSupervisionGuidelines } from "../src/coordinator-guidance.ts";
 
 const widgetUri = "ui://machines/run-v1.html";
@@ -160,6 +161,9 @@ const tools = [
 export class MachineSession {
   readonly #session = new RunSession();
   readonly #published = new Map<string, RunStatusPublisher>();
+  readonly #inboxes = new Map<string, { readonly requestId: string; stop(): void }>();
+  /** The inbox delivery being handed to the session, named in the update that leaves its request. */
+  #taking: string | undefined;
 
   constructor() {
     this.#session.subscribe(({ run }) => this.#publish(run));
@@ -220,6 +224,8 @@ export class MachineSession {
     // Closing terminates the session's runs without a final event.
     for (const publisher of this.#published.values()) publisher.finish({ error: "Machine session closed" });
     this.#published.clear();
+    for (const inbox of this.#inboxes.values()) inbox.stop();
+    this.#inboxes.clear();
   }
 
   #publish(run: RunSnapshot): void {
@@ -234,12 +240,35 @@ export class MachineSession {
       });
       this.#published.set(run.id, publisher);
     }
+    const human = run.status === "waiting" ? run.human : undefined;
+    this.#watchInbox(run.id, human);
     if (run.status === "running" || run.status === "waiting") {
-      publisher.update({ status: run.status, state: run.state, agent: run.agent, human: run.human });
+      publisher.update({ status: run.status, state: run.state, agent: run.agent, human, delivery: this.#taking });
       return;
     }
     publisher.finish(run.status === "completed" ? { state: run.state } : { error: run.error ?? "Machine run failed" });
     this.#published.delete(run.id);
+  }
+
+  /** A published request can also be answered, or asked about, through the run's inbox by `machine respond`. */
+  #watchInbox(runId: string, request: RunSnapshot["human"]): void {
+    const watched = this.#inboxes.get(runId);
+    if (watched?.requestId === request?.requestId) return;
+    watched?.stop();
+    this.#inboxes.delete(runId);
+    const directory = runStatusDirectory();
+    if (request === undefined || directory === undefined) return;
+    const stop = watchRunInbox(directory, runId, request, (response, delivery) => {
+      // The session leaves the request before either call returns. A tool call
+      // may have answered first; the session then refuses this one unpublished.
+      this.#taking = delivery;
+      const sent = typeof response === "string"
+        ? this.#session.respond({ runId, requestId: request.requestId, response })
+        : this.#session.ask({ runId, requestId: request.requestId, question: response.text });
+      this.#taking = undefined;
+      sent.catch(() => {});
+    });
+    this.#inboxes.set(runId, { requestId: request.requestId, stop });
   }
 }
 
