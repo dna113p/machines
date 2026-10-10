@@ -2,7 +2,7 @@
 
 ## Agent defaults
 
-MCP initialization and Pi's tool guidance now direct coordinating agents to
+MCP initialization and Pi's tool guidance direct coordinating agents to
 inspect Machines **before delegated or multi-step implementation, debugging,
 review, and verification**, without waiting for the user to name the tool. They
 should actually launch a suitable workflow, not stop at discovery. Tiny edits,
