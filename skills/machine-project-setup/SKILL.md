@@ -95,7 +95,7 @@ instead of presenting same-model review as independent.
 
 ## Build the smallest useful set
 
-When the Dev Machines starter library is available, inspect its `docs/catalog.md`
+When the Machine Shop starter library is available, inspect its `docs/catalog.md`
 and candidate `defaults/` sources before rebuilding a common software process.
 Select or adapt relevant entries with the project-local installer; do not install
 the entire catalog by default. Its check commands, Agent bindings, and task inputs
