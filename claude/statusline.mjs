@@ -63,15 +63,25 @@ export function runStatusLines(records, options = {}) {
         : failed
           ? "failed"
           : record.state ?? "starting";
-    const elapsed = formatElapsed(Date.parse(record.startedAt), active ? now : updatedAt);
-    lines.push(
-      `${paint(code, symbol)} ${paint(2, plain(record.id).slice(0, 8))}  ${paint(1, plain(record.machine))} › ${paint(code, plain(state))} · ${paint(2, elapsed)}`,
-    );
+    const total = formatElapsed(Date.parse(record.startedAt), active ? now : updatedAt);
+    // Time in the current state leads while it runs; the whole run follows.
+    const elapsed = active && record.stateSince !== undefined
+      ? `${formatElapsed(Date.parse(record.stateSince), now)} (${total} total)`
+      : total;
+    const progress = `${paint(1, plain(record.machine))} › ${paint(code, plain(state))} · ${paint(2, elapsed)}`;
+    const agent = active && !waiting && record.agent !== undefined ? plain(formatAgent(record.agent)) : undefined;
+    const label = record.label === undefined ? "" : plain(record.label);
+    if (label !== "") {
+      // A labelled run leads with what it is for; the workflow detail follows.
+      lines.push(`${paint(code, symbol)} ${paint(1, label)}`);
+      lines.push(`  ${progress}${agent === undefined ? "" : ` · ${paint(2, agent)}`}`);
+    } else {
+      lines.push(`${paint(code, symbol)} ${paint(2, plain(record.id).slice(0, 8))}  ${progress}`);
+      if (agent !== undefined) lines.push(`  ${paint(2, agent)}`);
+    }
     if (waiting && record.human !== undefined) {
       const prompt = record.human.prompt.split("\n").map(plain).find((line) => line !== "");
       if (prompt !== undefined) lines.push(`  ${paint(33, prompt)}`);
-    } else if (active && record.agent !== undefined) {
-      lines.push(`  ${paint(2, plain(formatAgent(record.agent)))}`);
     }
   }
   if (visible.length > maximumRuns) lines.push(paint(2, `… ${visible.length - maximumRuns} more`));
@@ -94,6 +104,8 @@ function isRecord(value) {
     && Number.isSafeInteger(value.pid) && value.pid > 0
     && isOptionalString(value.owner)
     && isOptionalString(value.parent)
+    && isOptionalString(value.label)
+    && (value.stateSince === undefined || isTimestamp(value.stateSince))
     && typeof value.machine === "string"
     && typeof value.cwd === "string"
     && ["running", "waiting", "completed", "failed"].includes(value.status)
@@ -124,9 +136,9 @@ function isProcessAlive(pid) {
 }
 
 function formatAgent(agent) {
-  return [agent.harness, agent.model, agent.thinking === undefined ? undefined : `thinking ${agent.thinking}`]
-    .filter((part) => part !== undefined)
-    .join(" · ");
+  // A model id that already names its harness does not need it repeated.
+  const harness = agent.model?.startsWith(`${agent.harness}-`) ? undefined : agent.harness;
+  return [harness, agent.model, agent.thinking].filter((part) => part !== undefined).join(" · ");
 }
 
 function formatElapsed(startedAt, endedAt) {

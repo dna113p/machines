@@ -3,3 +3,4 @@
 delete process.env.MACHINES_RUN_STATUS_DIR;
 delete process.env.MACHINES_RUN_OWNER;
 delete process.env.MACHINES_RUN_PARENT;
+delete process.env.MACHINES_RUN_LABEL;

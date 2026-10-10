@@ -192,7 +192,11 @@ state as a string (JSON for a nested state). `agent` is present while an Agent
 state has reported its identity, and `error` after a failure. A run waiting for
 Human input is `waiting`; MCP-hosted runs also record `human.prompt`, while
 `machine run` asks on its own terminal. `owner` is `MACHINES_RUN_OWNER` when set,
-otherwise `CLAUDE_CODE_SESSION_ID`, otherwise absent. `machine run` exports its
+otherwise `CLAUDE_CODE_SESSION_ID`, otherwise absent. `stateSince` is when the
+current state was entered. `label` is the first line of `MACHINES_RUN_LABEL`
+(at most 160 characters) when a launcher sets it to say what the run is for,
+such as a ticket id and title; it is the launcher's choice to publish that text.
+`machine run` exports its
 run id as `MACHINES_RUN_PARENT`, so a Machine started by one of its Operations or
 Agents records that id as `parent`; the status line shows only top-level runs.
 
@@ -227,11 +231,13 @@ printf '%s' "$input" | your-status-line
 printf '%s' "$input" | node /path/to/machines/claude/statusline.mjs
 ```
 
-It prints one or two lines per run and nothing when there is nothing to show:
+A labelled run leads with its label; an unlabelled one with its short id. It
+prints one to three lines per run and nothing when there is nothing to show:
 
 ```text
-● 1a2b3c4d  ticket › review · 2m 5s
-  claude · opus · thinking high
+● org-2 → machines: Continue an existing ChatGPT web conversation
+  ticket › review · 2m 5s (31m 40s total) · claude-opus-5-5 · high
+● 1a2b3c4d  verify › verifyOrg · 12s
 ◆ 5e6f7a8b  release › input needed · 41s
   Publish version 0.4.0?
 ```

@@ -82,6 +82,27 @@ test("the owner is MACHINES_RUN_OWNER, then the Claude Code session, then omitte
   assert.equal("owner" in JSON.parse(await readFile(join(directory, "unowned.json"), "utf8")), false);
 });
 
+test("a launcher's label is one short line, and each state records when it was entered", async (context) => {
+  const directory = await temporaryDirectory(context);
+  const environment = { MACHINES_RUN_STATUS_DIR: directory };
+  const publisher = createRunStatusPublisher({ ...run, id: "labelled" }, {
+    ...environment, MACHINES_RUN_LABEL: `\n  org-2: ${"x".repeat(300)}\nsecond line`,
+  });
+  createRunStatusPublisher({ ...run, id: "plain" }, { ...environment, MACHINES_RUN_LABEL: "  " });
+  const read = () => Object.fromEntries(readRunStatuses(directory).map((record) => [record.id, record]));
+
+  assert.equal(read().labelled!.label, `org-2: ${"x".repeat(153)}`);
+  assert.equal(read().plain!.label, undefined);
+  assert.equal(read().labelled!.stateSince, undefined);
+  publisher.update({ state: "change" });
+  const entered = read().labelled!.stateSince;
+  assert.equal(typeof entered, "string");
+  publisher.update({ state: "change", agent: { harness: "claude" } });
+  assert.equal(read().labelled!.stateSince, entered);
+  publisher.finish({ state: "done" });
+  assert.equal(read().labelled!.stateSince, undefined);
+});
+
 test("a run started inside another run records its parent", async (context) => {
   const directory = await temporaryDirectory(context);
   const environment = { MACHINES_RUN_STATUS_DIR: directory };
@@ -246,8 +267,8 @@ test("machine run publishes a running record and then its completion", async (co
   assert.doesNotMatch(text, /never-published-value|observed\.json/u);
   const completed = readRunStatuses(directory)[0]!;
   assert.deepEqual(
-    { ...completed, updatedAt: undefined },
-    { ...running, status: "completed", state: "done", updatedAt: undefined },
+    { ...completed, stateSince: undefined, updatedAt: undefined },
+    { ...running, status: "completed", state: "done", stateSince: undefined, updatedAt: undefined },
   );
   assert.ok(Date.parse(completed.updatedAt) >= Date.parse(running.updatedAt));
   assert.equal((await stat(join(directory, files[0]!))).mode & 0o777, 0o600);

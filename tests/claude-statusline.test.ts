@@ -13,12 +13,32 @@ const script = resolve("claude/statusline.mjs");
 const now = Date.parse("2026-03-04T05:06:07.000Z");
 const alive = { now, sessionId: "session", projectDir: "/work/project", color: false, isAlive: () => true };
 
+test("a labelled run leads with its label, then workflow, time in state, and Agent", () => {
+  const labelled = record({
+    id: "1a2b3c4d-0000", label: "org-2 → machines: Continue a chat", state: "change",
+    startedAt: ago(1_967_000), stateSince: ago(312_000),
+    agent: { harness: "claude", model: "claude-opus-5-5", thinking: "high" },
+  });
+  assert.deepEqual(runStatusLines([labelled], alive), [
+    "● org-2 → machines: Continue a chat",
+    "  ticket › change · 5m 12s (32m 47s total) · claude-opus-5-5 · high",
+  ]);
+  // A finished run reports only its whole duration.
+  assert.deepEqual(runStatusLines([{ ...labelled, status: "completed", state: "done", updatedAt: ago(0) }], alive), [
+    "✓ org-2 → machines: Continue a chat",
+    "  ticket › done · 32m 47s",
+  ]);
+  assert.deepEqual(runStatusLines([record({ id: "1a2b3c4d-0000", state: "review", stateSince: ago(5_000), startedAt: ago(65_000) })], alive), [
+    "● 1a2b3c4d  ticket › review · 5s (1m 5s total)",
+  ]);
+});
+
 test("a run is one line, with its Agent or its Human prompt beneath it", () => {
   assert.deepEqual(runStatusLines([
     record({ id: "1a2b3c4d-0000", state: "review", startedAt: ago(125_000), agent: { harness: "claude", model: "opus", thinking: "high" } }),
   ], alive), [
     "● 1a2b3c4d  ticket › review · 2m 5s",
-    "  claude · opus · thinking high",
+    "  claude · opus · high",
   ]);
   assert.deepEqual(runStatusLines([
     record({ id: "starting", startedAt: ago(59_999), agent: { harness: "codex" } }),
@@ -136,7 +156,7 @@ test("lines are truncated to the visible width without counting colour", () => {
     agent: { harness: "claude", model: "a-very-long-model-name", thinking: "high" },
   });
   const full = "● 1a2b3c4d  implementation-workflow › review · 5s";
-  assert.deepEqual(runStatusLines([long], { ...alive, columns: full.length }), [full, "  claude · a-very-long-model-name · thinking high"]);
+  assert.deepEqual(runStatusLines([long], { ...alive, columns: full.length }), [full, "  claude · a-very-long-model-name · high"]);
   assert.deepEqual(runStatusLines([long], { ...alive, columns: 24 }), [
     "● 1a2b3c4d  implementat…",
     "  claude · a-very-long-…",
@@ -211,7 +231,7 @@ test("the script prints the visible runs for the Claude Code session on stdin", 
 
   const plain = runScript(stdin, { MACHINES_RUN_STATUS_DIR: directory, NO_COLOR: "1" });
   assert.equal(plain.status, 0, plain.stderr);
-  assert.match(plain.stdout, /^● owned-ru  ticket › review · \d+s\n  claude · opus · thinking high\n✓ local-ru  ticket › done · \d+s\n$/u);
+  assert.match(plain.stdout, /^● owned-ru  ticket › review · \d+s\n  claude · opus · high\n✓ local-ru  ticket › done · \d+s\n$/u);
 
   const colored = runScript(stdin, { MACHINES_RUN_STATUS_DIR: directory });
   assert.equal(stripVTControlCharacters(colored.stdout), plain.stdout);

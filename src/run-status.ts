@@ -11,11 +11,15 @@ export interface RunStatusRecord {
   readonly owner?: string;
   /** The enclosing run when this one was started from inside another Machine. */
   readonly parent?: string;
+  /** What this run is for, as its launcher chose to describe it. */
+  readonly label?: string;
   readonly machine: string;
   readonly path: string;
   readonly cwd: string;
   readonly status: "running" | "waiting" | "completed" | "failed";
   readonly state?: string;
+  /** When the current state was entered. */
+  readonly stateSince?: string;
   readonly agent?: RunStatusAgent;
   readonly human?: { readonly prompt: string };
   readonly error?: string;
@@ -74,9 +78,11 @@ export function createRunStatusPublisher(
   const directory = resolve(configured);
   const owner = environment.MACHINES_RUN_OWNER || environment.CLAUDE_CODE_SESSION_ID || undefined;
   const parent = environment.MACHINES_RUN_PARENT || undefined;
+  const label = formatLabel(environment.MACHINES_RUN_LABEL);
   const startedAt = run.startedAt ?? new Date().toISOString();
   let status: RunStatusRecord["status"] = "running";
   let state: string | undefined;
+  let stateSince: string | undefined;
   let agent: RunStatusAgent | undefined;
   let human: { readonly prompt: string } | undefined;
   let error: string | undefined;
@@ -88,11 +94,13 @@ export function createRunStatusPublisher(
       pid: process.pid,
       ...(owner === undefined ? {} : { owner }),
       ...(parent === undefined ? {} : { parent }),
+      ...(label === undefined ? {} : { label }),
       machine: run.machine,
       path: run.path,
       cwd: run.cwd,
       status,
       ...(state === undefined ? {} : { state }),
+      ...(stateSince === undefined ? {} : { stateSince }),
       ...(agent === undefined ? {} : { agent }),
       ...(human === undefined ? {} : { human }),
       ...(error === undefined ? {} : { error }),
@@ -133,6 +141,7 @@ export function createRunStatusPublisher(
       };
       // Repeated notifications for an unchanged run do not need another write.
       if (JSON.stringify(next) === JSON.stringify({ status, state, agent, human })) return;
+      if (next.state !== state) stateSince = new Date().toISOString();
       ({ status, state, agent, human } = next);
       publish();
     },
@@ -145,6 +154,7 @@ export function createRunStatusPublisher(
         status = "completed";
         state = formatState(outcome.state) ?? state;
       }
+      stateSince = undefined;
       agent = undefined;
       human = undefined;
       publish();
@@ -201,6 +211,8 @@ function isRunStatusRecord(value: unknown): value is RunStatusRecord {
     && Number.isSafeInteger(record.pid) && (record.pid as number) > 0
     && isOptionalString(record.owner)
     && isOptionalString(record.parent)
+    && isOptionalString(record.label)
+    && (record.stateSince === undefined || isTimestamp(record.stateSince))
     && typeof record.machine === "string"
     && typeof record.path === "string"
     && typeof record.cwd === "string"
@@ -241,6 +253,12 @@ function isProcessAlive(pid: number): boolean {
 function formatState(state: StateValue | undefined): string | undefined {
   if (state === undefined) return undefined;
   return typeof state === "string" ? state : JSON.stringify(state);
+}
+
+/** One short line: a label is a caption, not a place for task text. */
+function formatLabel(label: string | undefined): string | undefined {
+  const line = label?.split(/\r?\n/u).map((part) => part.trim()).find((part) => part !== "");
+  return line === undefined ? undefined : line.slice(0, 160);
 }
 
 function pickAgent(agent: RunStatusAgent | undefined): RunStatusAgent | undefined {
