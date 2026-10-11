@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import * as v from "valibot";
 
+import { AgentLimitError } from "./agent-limit.ts";
 import { agentPrompt, readAgentEvent } from "./agent-protocol.ts";
 import type { AgentRunner } from "./index.ts";
 
@@ -32,13 +33,14 @@ export function codexAgent(
     if (request.cwd === undefined) throw new Error("Codex Agent requires a working directory");
     if (request.outcomes.length === 0) throw new Error("Codex Agent requires at least one allowed outcome");
 
+    const harness = options.harness ?? command;
     const env = { ...process.env, ...options.env };
     const model = options.model ?? env.CODEX_MODEL ?? env.MACHINES_AGENT_MODEL;
     const effort = options.effort ?? env.CODEX_EFFORT ?? env.MACHINES_AGENT_EFFORT;
     const outputMode = options.output ?? "stream";
     report?.({
       type: "identity",
-      harness: options.harness ?? command,
+      harness,
       ...(model === undefined ? {} : { model }),
       ...(effort === undefined ? {} : { thinking: effort }),
     });
@@ -112,16 +114,21 @@ export function codexAgent(
             }
           }
         }
+        // Codex states a usage limit only in the text of a failed turn.
+        const detail = failure ?? lastError;
+        const turnFailure = (message: string, cause?: ErrorOptions) =>
+          detail !== undefined && usageLimitText.test(detail)
+            ? new AgentLimitError(message, { harness, kind: "usage" }, cause)
+            : new Error(message, cause);
         try {
           await exited;
         } catch (cause) {
-          const detail = failure ?? lastError;
           if (detail === undefined) throw cause;
           const message = cause instanceof Error ? cause.message : String(cause);
-          throw new Error(`${message}: ${detail}`, { cause });
+          throw turnFailure(`${message}: ${detail}`, { cause });
         }
-        if (failure !== undefined) throw new Error(failure);
-        if (!completed) throw new Error(lastError ?? "Codex exited without completing its turn");
+        if (failure !== undefined) throw turnFailure(failure);
+        if (!completed) throw turnFailure(lastError ?? "Codex exited without completing its turn");
 
         // A progress message may contain a preliminary event. Only the CLI's
         // final-response file determines the outcome, never accumulated activity.
@@ -135,15 +142,18 @@ export function codexAgent(
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
       const detail = stderr.trim();
-      throw new Error(
-        `Codex Agent "${command}" failed in "${request.cwd}": ${message}${detail === "" ? "" : `\n${detail}`}`,
-        { cause },
-      );
+      const text = `Codex Agent "${command}" failed in "${request.cwd}": ${message}${detail === "" ? "" : `\n${detail}`}`;
+      throw cause instanceof AgentLimitError
+        ? new AgentLimitError(text, cause.limit, { cause })
+        : new Error(text, { cause });
     } finally {
       await rm(temporary, { recursive: true, force: true });
     }
   };
 }
+
+// Codex 0.162.1 writes the first of these with a typographic apostrophe (U+2019).
+const usageLimitText = /^(?:You['’]ve hit your usage limit|Your workspace is out of credits|You hit your spend cap)/u;
 
 const statusSchema = v.optional(v.picklist(["in_progress", "completed", "failed", "declined"]));
 const itemSchema = v.variant("type", [

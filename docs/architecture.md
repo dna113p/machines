@@ -54,6 +54,7 @@ MCP server ────┘       ↑
 | `src/system-one-http.ts` | Shared bounded HTTP transport for the self-hosted providers |
 | `services/laya/server.py` | Opt-in, externally managed single-checkpoint Python Choice bridge |
 | `src/agent-protocol.ts` | Shared Agent prompt instructions and Machines event decoding |
+| `src/agent-limit.ts` | Typed provider usage-limit error and its recognition across module copies |
 | `src/discovery.ts` | Project/global definition locations and precedence |
 | `src/launcher.ts` | Definition metadata, Agent bindings, preflight, single-use launch preparation |
 | `src/discovery-worker.ts` | Fresh metadata imports in disposable workers |

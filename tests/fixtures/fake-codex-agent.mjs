@@ -32,6 +32,13 @@ if (mode === "activity") {
     ["item.completed", { type: "web_search", id: "web", query: "documentation" }],
   ]) emit({ type, item });
 }
+if (mode === "usage-limit") {
+  // Codex 0.162.1 reports a limit only as text, with a typographic apostrophe.
+  const limit = "You\u2019ve hit your usage limit. Upgrade to Pro or try again at 3:07 PM.";
+  emit({ type: "error", message: limit });
+  emit({ type: "turn.failed", error: { message: limit } });
+  process.exit(1);
+}
 const event = mode === "arguments"
   ? { type: "completed", args, prompt, cwd: process.cwd(), envModel: process.env.CODEX_MODEL, finalPath }
   : { type: "completed", source: "fake" };

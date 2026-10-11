@@ -270,7 +270,16 @@ Options:
   the edit tools does not stop an allowed `Bash` from writing files.
 - `sessionPersistence`: defaults to `false`, so no resumable session is saved. This
   runner does not resume sessions.
+- `extraUsage`: `limit` (default) or `allow`. See below.
 - `output`: `stream` (default) or `capture`, as for the Codex runner.
+
+A plan usage limit fails the turn with an `AgentLimitError` instead of a plain
+`Error`. Its `limit` names the harness and, when Claude Code states them, the
+limit's `kind` (such as `five_hour` or `seven_day_opus`) and `resetsAt` in epoch
+milliseconds. A temporary 429 throttle remains an ordinary failure. Once the plan
+limit is used up, Claude Code can continue on paid extra usage: with the default
+`extraUsage: "limit"` the runner stops the turn and throws the same error, and
+`"allow"` lets the turn spend those credits.
 
 Additional command arguments precede the runner's own, allowing a wrapper
 executable or other Claude Code options such as `--add-dir`. Only the CLI's final
@@ -329,6 +338,10 @@ Options:
 - `output`: `stream` (default) writes agent messages and stderr to the terminal;
   `capture` keeps them off the terminal and includes final prose in the event's
   `message`. Both modes report activity to observers.
+
+A usage limit fails the turn with an `AgentLimitError` whose `limit` has `kind:
+"usage"`. `codex exec --json` gives no structured signal, so the runner recognises
+the limit by the text of a failed turn and reports no reset time.
 
 Additional command arguments precede `exec`, allowing a custom executable wrapper
 or Codex global options. The runner supplies its own execution, output, sandbox,
@@ -807,6 +820,10 @@ API failures stop the example rather than silently choosing a route.
 Direct runtime users supply runners through `run(definition, { agents, human })`.
 An `AgentRunner` receives `prompt`, allowed `outcomes`, and optional `cwd`, plus an
 optional reporter for `identity`, `output`, and `tool` updates. It returns one event.
+A runner that cannot work because the provider's usage limit is reached throws
+`AgentLimitError`; `agentLimitOf(error)` returns that limit from a failure or its
+`cause` chain, or `undefined`. Both are exported from `@dna113p/machines` and
+custom preset files receive `AgentLimitError` beside the runner factories.
 A `HumanRunner` receives the prompt, suggestions, or choices and returns a string.
 
 For example, exercise the feedback loop in an installed project:

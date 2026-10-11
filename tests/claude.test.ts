@@ -4,8 +4,8 @@ import { resolve } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 
-import { claudeAgent } from "../src/claude.ts";
-import type { AgentUpdate } from "../src/index.ts";
+import { claudeAgent, type ClaudeAgentOptions } from "../src/claude.ts";
+import { AgentLimitError, agentLimitOf, type AgentUpdate } from "../src/index.ts";
 
 const fakeAgent = resolve("tests/fixtures/fake-claude-agent.mjs");
 const request = { prompt: "Do the work", outcomes: ["completed"], cwd: process.cwd() };
@@ -22,6 +22,15 @@ function outputProbe(mode: string, output?: "capture" | "stream") {
   assert.equal(result.error, undefined);
   assert.equal(result.status, 0, result.stderr);
   return result;
+}
+
+async function failure(mode: string, options: ClaudeAgentOptions = {}): Promise<unknown> {
+  try {
+    await claudeAgent(process.execPath, [fakeAgent, mode], { output: "capture", ...options })(request);
+  } catch (error) {
+    return error;
+  }
+  throw new Error(`The "${mode}" turn did not fail`);
 }
 
 test("a Claude Agent returns one Machines event and can capture its message", async () => {
@@ -247,4 +256,85 @@ test("Claude reports signal termination instead of an exit code of null", { skip
     async () => claudeAgent(process.execPath, [fakeAgent, "signal-exit"], { output: "capture" })(request),
     /Process terminated by SIGTERM/u,
   );
+});
+
+test("a Claude usage limit is thrown as a typed limit with its kind and reset time", async () => {
+  const resetsAt = Math.floor(Date.now() / 1000) + 3600;
+  const env = { MACHINES_TEST_RESETS_AT: String(resetsAt) };
+
+  const typed = await failure("usage-limit", { env, harness: "claude" });
+  assert.ok(typed instanceof AgentLimitError);
+  assert.match(typed.message, /^Claude Agent ".*" failed in ".*": Process exited with code 1: You've hit your session limit/u);
+  assert.deepEqual(agentLimitOf(typed), { harness: "claude", kind: "five_hour", resetsAt: resetsAt * 1000 });
+
+  // Without `api_error`, a 429 counts only with the limit wording or rejected rate-limit information.
+  assert.deepEqual(agentLimitOf(await failure("usage-limit-untyped", { env })), { harness: process.execPath });
+  assert.deepEqual(
+    agentLimitOf(await failure("usage-limit-rejected", { env })),
+    { harness: process.execPath, kind: "seven_day_opus", resetsAt: resetsAt * 1000 },
+  );
+  // The latest rate-limit information describes the limit even when it was not itself a rejection.
+  assert.deepEqual(
+    agentLimitOf(await failure("usage-limit-warned", { env })),
+    { harness: process.execPath, kind: "seven_day", resetsAt: resetsAt * 1000 },
+  );
+});
+
+test("a Claude usage limit with an empty final result is still a typed limit", async () => {
+  const resetsAt = Math.floor(Date.now() / 1000) + 3600;
+  const error = await failure("usage-limit-empty", { env: { MACHINES_TEST_RESETS_AT: String(resetsAt) } });
+  assert.ok(error instanceof AgentLimitError);
+  assert.match(error.message, /^Claude Agent ".*" failed in ".*": Process exited with code 1$/u);
+  assert.deepEqual(agentLimitOf(error), { harness: process.execPath, kind: "five_hour", resetsAt: resetsAt * 1000 });
+});
+
+test("a Claude reset time that is past, too distant, or malformed is dropped", async () => {
+  const now = Math.floor(Date.now() / 1000);
+  for (const resetsAt of [now - 60, now + 9 * 24 * 60 * 60, now + 3600.5, Number.NaN]) {
+    const error = await failure("usage-limit", { env: { MACHINES_TEST_RESETS_AT: String(resetsAt) } });
+    assert.deepEqual(agentLimitOf(error), { harness: process.execPath, kind: "five_hour" }, String(resetsAt));
+  }
+});
+
+test("Claude rate-limit values outside the known ones are dropped", async () => {
+  // The rejection still classifies the turn; its unlisted type and fractional reset are not reported.
+  assert.deepEqual(agentLimitOf(await failure("usage-limit-unlisted-values")), { harness: process.execPath });
+  // Information with an unlisted status is not used at all; the limit wording alone classifies the turn.
+  assert.deepEqual(agentLimitOf(await failure("unlisted-limit-status")), { harness: process.execPath });
+});
+
+test("a temporary Claude throttle and other failures are not usage limits", async () => {
+  const throttled = await failure("throttled");
+  assert.ok(throttled instanceof Error && !(throttled instanceof AgentLimitError));
+  assert.match(throttled.message, /Process exited with code 1: API Error: Request rejected \(429\)/u);
+  assert.equal(agentLimitOf(throttled), undefined);
+
+  for (const mode of ["error-exit", "error-result", "failed-result", "missing-event", "no-result", "malformed-final"]) {
+    assert.equal(agentLimitOf(await failure(mode)), undefined, mode);
+  }
+});
+
+test("Claude extra usage stops the turn as a limit unless it is allowed", async () => {
+  const resetsAt = Math.floor(Date.now() / 1000) + 3600;
+  const env = { MACHINES_TEST_RESETS_AT: String(resetsAt) };
+
+  for (const extraUsage of [undefined, "limit"] as const) {
+    const error = await failure("overage", { env, ...(extraUsage === undefined ? {} : { extraUsage }) });
+    assert.ok(error instanceof AgentLimitError);
+    assert.match(error.message, /^Claude Agent ".*" failed in ".*": Claude plan limit reached; extra usage is not used$/u);
+    assert.deepEqual(agentLimitOf(error), { harness: process.execPath, kind: "seven_day", resetsAt: resetsAt * 1000 });
+  }
+  assert.deepEqual(
+    await claudeAgent(process.execPath, [fakeAgent, "overage"], { env, extraUsage: "allow", output: "capture" })(request),
+    { type: "completed", source: "fake", message: "fake claude agent finished" },
+  );
+});
+
+test("malformed Claude limit fields do not drop a valid message or result", async () => {
+  const updates: AgentUpdate[] = [];
+  const event = await claudeAgent(process.execPath, [fakeAgent, "malformed-limit-fields"], { output: "capture" })(
+    request, (update) => updates.push(update),
+  );
+  assert.deepEqual(event, { type: "completed", source: "fake", message: "fake claude agent finished" });
+  assert.deepEqual(updates.filter((update) => update.type === "output"), [{ type: "output", text: finalText }]);
 });

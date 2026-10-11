@@ -7,7 +7,7 @@ import { pathToFileURL } from "node:url";
 import { test } from "node:test";
 
 import { codexAgent, type CodexAgentOptions } from "../src/codex.ts";
-import type { AgentUpdate } from "../src/index.ts";
+import { AgentLimitError, agentLimitOf, type AgentUpdate } from "../src/index.ts";
 import { listAgentPresets, prepareMachineRun } from "../src/launcher.ts";
 
 const fake = resolve("tests/fixtures/fake-codex-agent.mjs");
@@ -109,6 +109,25 @@ test("Codex rejects missing results, failed turns, and truncated turns despite p
     ["exit-error", /Process exited with code 3.*\ncodex diagnostic/s],
   ] as const) {
     await assert.rejects(async () => runner(mode)(request), error);
+  }
+});
+
+test("a Codex usage limit is thrown as a typed limit; other failures are not", async () => {
+  const failure = async (mode: string, options: CodexAgentOptions = {}): Promise<unknown> => {
+    try { await runner(mode, options)(request); } catch (error) { return error; }
+    throw new Error(`The "${mode}" turn did not fail`);
+  };
+
+  const limited = await failure("usage-limit", { harness: "codex" });
+  assert.ok(limited instanceof AgentLimitError);
+  assert.match(limited.message, /^Codex Agent ".*" failed in ".*": Process exited with code 1: You\u2019ve hit your usage limit/u);
+  assert.deepEqual(agentLimitOf(limited), { harness: "codex", kind: "usage" });
+  assert.deepEqual(agentLimitOf(await failure("usage-limit")), { harness: process.execPath, kind: "usage" });
+
+  for (const mode of ["empty-final", "no-event", "no-final", "failed", "exit-failed", "incomplete", "exit-error"]) {
+    const error = await failure(mode);
+    assert.ok(!(error instanceof AgentLimitError), mode);
+    assert.equal(agentLimitOf(error), undefined, mode);
   }
 });
 

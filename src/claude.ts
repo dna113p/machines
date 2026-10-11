@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import * as v from "valibot";
 
+import { AgentLimitError, type AgentLimit } from "./agent-limit.ts";
 import { agentPrompt, readAgentEvent } from "./agent-protocol.ts";
 import type { AgentRunner } from "./index.ts";
 
@@ -25,6 +26,12 @@ export interface ClaudeAgentOptions {
   readonly disallowedTools?: readonly string[];
   /** Defaults to false, so each invocation does not save a resumable Claude Code session. */
   readonly sessionPersistence?: boolean;
+  /**
+   * Defaults to "limit": once the plan limit is used up and Claude Code starts
+   * spending paid extra usage, the turn stops with an `AgentLimitError`.
+   * "allow" lets the turn continue on extra usage.
+   */
+  readonly extraUsage?: "limit" | "allow";
   readonly output?: "capture" | "stream";
 }
 
@@ -89,7 +96,11 @@ export function claudeAgent(
       });
       const lines = createInterface({ input: child.stdout });
       const toolTitles = new Map<string, string>();
-      let result: { readonly failed: boolean; readonly text: string } | undefined;
+      let result: { readonly failed: boolean; readonly text: string; readonly apiError?: ApiError } | undefined;
+      // The CLI reports a limit beside its messages: on the last top-level
+      // assistant record and in the latest rate-limit information.
+      let assistantError: ApiError = {};
+      let rateLimit: RateLimitInfo | undefined;
       // The CLI streams one record per content block, and its final result
       // joins the text blocks of the closing message.
       let closingMessage: string | undefined;
@@ -116,14 +127,31 @@ export function claudeAgent(
               model: record.model,
               ...(effort === undefined ? {} : { thinking: effort }),
             });
+          } else if (record.type === "rate_limit_event") {
+            const info = record.rate_limit_info;
+            if (info?.isUsingOverage === true && options.extraUsage !== "allow") {
+              // The plan limit is already used up; continuing would spend paid credits.
+              throw new AgentLimitError(
+                "Claude plan limit reached; extra usage is not used",
+                agentLimit(harness, info),
+              );
+            }
+            // Information without a recognised status does not replace what is known.
+            if (info?.status !== undefined) rateLimit = info;
           } else if (record.type === "result") {
             result = {
               failed: record.is_error === true || record.subtype !== "success",
               text: record.result ?? record.errors?.join("\n") ?? record.subtype,
+              ...(record.is_error === true
+                ? { apiError: { name: record.api_error, rateLimited: record.api_error_status === 429 } }
+                : {}),
             };
           } else if (record.parent_tool_use_id !== undefined && record.parent_tool_use_id !== null) {
             // Subagent activity belongs to the parent's tool call, not the final answer.
           } else if (record.type === "assistant") {
+            assistantError = { name: record.api_error, rateLimited: record.error === "rate_limit" };
+            const info = record.api_error_params?.rate_limit_info;
+            if (info?.status !== undefined) rateLimit = info;
             const message = record.message.id ?? undefined;
             if (message === undefined || message !== closingMessage) closingText = "";
             closingMessage = message;
@@ -149,15 +177,22 @@ export function claudeAgent(
             }
           }
         }
+        // Only a final result that ended on an API error can be a limit. The latest
+        // rate-limit information names it and its reset, whatever its own status.
+        const limit = result?.apiError !== undefined
+          && reachedLimit(result.apiError, assistantError, rateLimit, result.text)
+          ? agentLimit(harness, rateLimit)
+          : undefined;
         try {
           await exited;
         } catch (cause) {
-          if (result === undefined || result.text === "") throw cause;
+          // An empty result adds nothing to the exit, but a limit it carries is still reported.
+          if (result === undefined || (result.text === "" && limit === undefined)) throw cause;
           const message = cause instanceof Error ? cause.message : String(cause);
-          throw new Error(`${message}: ${result.text}`, { cause });
+          throw turnFailure(result.text === "" ? message : `${message}: ${result.text}`, limit, { cause });
         }
         if (result === undefined) throw new Error("Claude exited without a final result");
-        if (result.failed) throw new Error(result.text);
+        if (result.failed) throw turnFailure(result.text, limit);
 
         // Earlier messages may contain progress or a preliminary event. Only the
         // CLI's final result determines the outcome, never accumulated activity.
@@ -170,12 +205,55 @@ export function claudeAgent(
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
       const detail = stderr.trim();
-      throw new Error(
-        `Claude Agent "${command}" failed in "${request.cwd}": ${message}${detail === "" ? "" : `\n${detail}`}`,
-        { cause },
-      );
+      const text = `Claude Agent "${command}" failed in "${request.cwd}": ${message}${detail === "" ? "" : `\n${detail}`}`;
+      throw cause instanceof AgentLimitError
+        ? new AgentLimitError(text, cause.limit, { cause })
+        : new Error(text, { cause });
     }
   };
+}
+
+interface ApiError {
+  /** Claude Code's `api_error`, which names a plan limit. */
+  readonly name?: string | undefined;
+  /** Any 429, including a temporary throttle. */
+  readonly rateLimited?: boolean;
+}
+
+type RateLimitInfo = v.InferOutput<typeof rateLimitInfoSchema>;
+
+const planLimitErrors = new Set(["usage_limit_reached", "model_requires_usage_credits"]);
+const limitText = /^(?:You've (?:hit|reached) your |You're out of (?:usage credits|extra usage))/u;
+const maximumResetDelay = 8 * 24 * 60 * 60 * 1000;
+
+// A 429 alone may be a temporary throttle; a plan limit also names itself, is
+// rejected by the rate-limit information, or uses Claude Code's limit wording.
+function reachedLimit(
+  result: ApiError,
+  assistant: ApiError,
+  rateLimit: RateLimitInfo | undefined,
+  text: string,
+): boolean {
+  if ([result.name, assistant.name].some((name) => name !== undefined && planLimitErrors.has(name))) return true;
+  if (result.rateLimited !== true && assistant.rateLimited !== true) return false;
+  return (rateLimit?.status === "rejected" && rateLimit.isUsingOverage !== true) || limitText.test(text);
+}
+
+function agentLimit(harness: string, info: RateLimitInfo | undefined): AgentLimit {
+  const now = Date.now();
+  const resetsAt = info?.resetsAt === undefined ? undefined : info.resetsAt * 1000;
+  return {
+    harness,
+    ...(info?.rateLimitType === undefined ? {} : { kind: info.rateLimitType }),
+    // A reset time that is past or implausibly distant is not reported.
+    ...(resetsAt !== undefined && Number.isFinite(resetsAt) && resetsAt > now && resetsAt <= now + maximumResetDelay
+      ? { resetsAt }
+      : {}),
+  };
+}
+
+function turnFailure(message: string, limit: AgentLimit | undefined, options?: ErrorOptions): Error {
+  return limit === undefined ? new Error(message, options) : new AgentLimitError(message, limit, options);
 }
 
 const parentSchema = v.nullish(v.string());
@@ -190,12 +268,30 @@ const userBlockSchema = v.union([
   v.object({ type: v.literal("tool_result"), tool_use_id: v.string(), is_error: v.nullish(v.boolean()) }),
   otherBlockSchema,
 ]);
+// The limit fields were read from the Claude Code bundle, not observed at a real
+// limit, so a malformed one is dropped without rejecting the record that carries it.
+// A value outside the listed ones counts as malformed.
+const tolerant = <const TSchema extends v.GenericSchema>(schema: TSchema) =>
+  v.fallback(v.optional(schema), undefined);
+const rateLimitInfoSchema = v.object({
+  status: tolerant(v.picklist(["allowed", "allowed_warning", "rejected"])),
+  // Whole Unix seconds.
+  resetsAt: tolerant(v.pipe(v.number(), v.safeInteger())),
+  rateLimitType: tolerant(v.picklist([
+    "five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet", "seven_day_overage_included", "overage",
+  ])),
+  isUsingOverage: tolerant(v.boolean()),
+});
 const recordSchema = v.variant("type", [
   v.object({ type: v.literal("system"), subtype: v.literal("init"), model: v.string() }),
+  v.object({ type: v.literal("rate_limit_event"), rate_limit_info: tolerant(rateLimitInfoSchema) }),
   v.object({
     type: v.literal("assistant"),
     parent_tool_use_id: parentSchema,
     message: v.object({ id: v.nullish(v.string()), content: v.array(assistantBlockSchema) }),
+    error: tolerant(v.string()),
+    api_error: tolerant(v.string()),
+    api_error_params: tolerant(v.object({ rate_limit_info: tolerant(rateLimitInfoSchema) })),
   }),
   v.object({
     type: v.literal("user"),
@@ -208,6 +304,8 @@ const recordSchema = v.variant("type", [
     is_error: v.nullish(v.boolean()),
     result: v.nullish(v.string()),
     errors: v.nullish(v.array(v.string())),
+    api_error: tolerant(v.string()),
+    api_error_status: tolerant(v.number()),
   }),
 ]);
 

@@ -1,5 +1,6 @@
 import { loadAgentBindings, type AgentPreset } from "./agent-bindings.ts";
 import { acpAgent } from "./acp.ts";
+import { AgentLimitError } from "./agent-limit.ts";
 import { agyAgent } from "./agy.ts";
 import { chatGptWebAgent } from "./chatgpt-web.ts";
 import { claudeAgent } from "./claude.ts";
@@ -98,7 +99,7 @@ export async function configuredAgentPresets(
   home: string,
 ): Promise<ResolvedAgentPresets> {
   const configured = await loadAgentBindings(cwd, home, {
-    acpAgent, agyAgent, chatGptWebAgent, claudeAgent, codexAgent, deepseekAgent, decisionAgent, jevAgent, jevProvider,
+    acpAgent, AgentLimitError, agyAgent, chatGptWebAgent, claudeAgent, codexAgent, deepseekAgent, decisionAgent, jevAgent, jevProvider,
     openRouterDecisionAgent, openRouterDecisionProvider, layaAgent, layaProvider, vonAgent, vonProvider,
   });
   const defaultRunner = acpAgent("npx", ["-y", "pi-acp"], {
