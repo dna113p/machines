@@ -55,7 +55,7 @@ MCP server ────┘       ↑
 | `services/laya/server.py` | Opt-in, externally managed single-checkpoint Python Choice bridge |
 | `src/agent-protocol.ts` | Shared Agent prompt instructions and Machines event decoding |
 | `src/agent-limit.ts` | Typed provider usage-limit error and its recognition across module copies |
-| `src/agent-limits.ts` | Limit-aware runner: fallback order, handoff note, reset waiting, per-run memory of limited presets |
+| `src/agent-limits.ts` | Limit-aware runner: fallback order, handoff note, reset waiting, per-run memory of limited presets, report-only requests |
 | `src/discovery.ts` | Project/global definition locations and precedence |
 | `src/launcher.ts` | Definition metadata, Agent bindings, preflight, single-use launch preparation |
 | `src/discovery-worker.ts` | Fresh metadata imports in disposable workers |
@@ -83,7 +83,10 @@ The launcher resolves required semantic Agent roles and configured presets befor
 starting the actor. Missing bindings, invalid overrides, or invalid definitions
 fail preflight. It then wraps each role's runner so that a usage limit swaps to
 the bound preset's allowed fallbacks or waits for the reset; the runtime still
-receives one runner per role. The resulting prepared run can be started once. Long-lived hosted
+receives one runner per role. An Agent state that names an `onLimit` event keeps
+that policy in the Machine: the runtime asks the runner to report the limit and
+delivers it as the event, and the wrapper neither swaps nor waits for that
+request. The resulting prepared run can be started once. Long-lived hosted
 runs get a fresh child process; direct runtime users own their own definitions.
 
 ## Session and process lifecycle

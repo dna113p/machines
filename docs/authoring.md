@@ -101,6 +101,51 @@ The Machine owns this loop. An Agent runner only returns an allowed outcome; it
 does not decide destination states. Add verification Operations where the workflow
 has a concrete condition to check.
 
+### Handling a usage limit in the Machine
+
+By default an Agent state never sees its provider's usage limit: the launcher
+swaps to a fallback preset or waits for the reset, as described under
+[Usage limits](#usage-limits). When the workflow should do something else, such
+as skip a cross-provider review or ask a Human, name the event the state
+receives with `onLimit`:
+
+```ts
+review: agent(
+  "Review the change",
+  { approved: "commit", revise: "repair", limited: "soloFlow" },
+  { using: "reviewer", onLimit: "limited" },
+),
+```
+
+`onLimit` must be one of the state's transitions, and at least one other must
+remain for the Agent. The Agent is not offered the event: the request's outcomes
+here are `approved` and `revise`, and a runner that returns `limited` itself
+fails the state. The runtime delivers the event when the runner throws an
+`AgentLimitError`:
+
+```ts
+{
+  type: "limited",
+  limit: {
+    role: "reviewer",                  // the state's `using`
+    agent: "claude-opus",              // the preset, when the launcher selected it
+    harness: "claude",
+    kind: "five_hour",                 // when the provider names the limit
+    resetsAt: "2026-10-10T21:00:00.000Z", // when the provider states a reset
+  },
+  message: "Claude plan limit reached; extra usage is not used", // the runner's error message
+}
+```
+
+A state that handles the limit event owns the policy; otherwise the binding's
+fallback and waiting apply. With `onLimit`, the role's bound preset is tried
+alone: no fallback takes over, the state does not wait, and no swap or wait is
+reported. Under the launcher, a preset that another state of the same run
+already found limited delivers the event without being asked again. Any other
+failure still fails the state. The event is plain JSON, so a transition action can keep it for a later
+prompt or the Machine's output. Direct `run()` callers get the same event from
+their own runners.
+
 ## Agent presets
 
 Named Agent states select a semantic role with `using`. Declare each named role in
@@ -224,6 +269,11 @@ real request every 15 minutes. Nothing is remembered between runs. When no prese
 becomes available in time, the state fails with an `AgentLimitError` whose
 message names each preset tried, and whose `limits` lists each one's limit.
 
+None of this applies to a state that names an `onLimit` event: it
+[handles the limit in the Machine](#handling-a-usage-limit-in-the-machine), so
+its preset is tried alone and the limit arrives as that event. A limit found
+either way is remembered for the run's other states.
+
 Two environment variables adjust this for a run:
 
 - `MACHINES_AGENT_LIMIT_WAIT_MINUTES`: the longest one Agent state waits, `360`
@@ -244,7 +294,8 @@ swap from one to the next, and the wait stays shown. The Claude Code and Codex r
 recognise their limits. A custom runner takes part by throwing the
 `AgentLimitError` passed to the `agents.ts` function. All of this belongs to the
 launcher, so `machine run` and hosted runs have it; a direct `run()` call uses
-exactly the runners it is given.
+exactly the runners it is given. The `onLimit` event is the runtime's, and works
+in both.
 
 ### Antigravity (AGY)
 
@@ -905,6 +956,8 @@ API failures stop the example rather than silently choosing a route.
 Direct runtime users supply runners through `run(definition, { agents, human })`.
 An `AgentRunner` receives `prompt`, allowed `outcomes`, and optional `cwd`, plus an
 optional reporter for `identity`, `output`, and `tool` updates. It returns one event.
+A request from a state with [`onLimit`](#handling-a-usage-limit-in-the-machine)
+also has `limits: "report"`; a runner that neither swaps nor waits ignores it.
 A runner that cannot work because the provider's usage limit is reached throws
 `AgentLimitError`; `agentLimitOf(error)` returns that limit from a failure or its
 `cause` chain, or `undefined`. Both are exported from `@dna113p/machines` and

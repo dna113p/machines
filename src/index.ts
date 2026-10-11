@@ -1,3 +1,4 @@
+import { agentLimitOf, type AgentLimit } from "./agent-limit.ts";
 import { terminalHuman } from "./terminal-human.ts";
 
 import {
@@ -46,6 +47,12 @@ export type HumanRunner = (
 export interface AgentOptions {
   readonly cwd?: string;
   readonly using?: string;
+  /**
+   * The transition this state takes when its Agent is at a usage limit. The
+   * event is delivered by the runtime and never offered to the Agent. A state
+   * that names it decides what a limit means: no fallback preset, no waiting.
+   */
+  readonly onLimit?: string;
 }
 
 export type AgentPrompt = string | (() => string);
@@ -54,10 +61,17 @@ export interface AgentRequest {
   readonly prompt: string;
   readonly outcomes: readonly string[];
   readonly cwd?: string;
+  /**
+   * Set for a state that handles its own usage limit: a limit is to be thrown
+   * as it is found, not swapped away from or waited out. Runners that do
+   * neither ignore it.
+   */
+  readonly limits?: "report";
 }
 
 interface AgentInvocation extends AgentRequest {
   readonly using: string;
+  readonly onLimit?: string;
 }
 
 export type AgentUpdate =
@@ -187,18 +201,35 @@ export function agent<const TTransitions extends Readonly<Record<string, unknown
   if (typeof using !== "string" || using.trim() === "" || using !== using.trim()) {
     throw new Error("Agent runner name must be a non-empty trimmed string");
   }
+  const onLimit = options.onLimit;
+  if (onLimit !== undefined) {
+    if (typeof onLimit !== "string" || onLimit.trim() === "" || onLimit !== onLimit.trim()) {
+      throw new Error("Agent onLimit must be a non-empty trimmed event name");
+    }
+    if (!Object.hasOwn(on, onLimit)) {
+      throw new Error(`Agent onLimit event "${onLimit}" must be one of the state's transitions`);
+    }
+  }
+  // The limit event comes from the runtime, so the Agent is never offered it.
+  const outcomes = Object.keys(on).filter((outcome) => outcome !== onLimit);
+  if (onLimit !== undefined && outcomes.length === 0) {
+    throw new Error(
+      `Agent onLimit event "${onLimit}" cannot be the state's only transition: the Agent needs an outcome of its own`,
+    );
+  }
 
   return {
     meta: {
-      [agentMetaKey]: { using },
+      [agentMetaKey]: { using, ...(onLimit === undefined ? {} : { onLimit }) },
     },
     invoke: {
       src: "agent",
       input: () => ({
         using,
         prompt: typeof prompt === "function" ? prompt() : prompt,
-        outcomes: Object.keys(on),
+        outcomes,
         ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+        ...(onLimit === undefined ? {} : { limits: "report" as const, onLimit }),
       }),
       ...actorLifecycle("Agent", on),
     },
@@ -296,12 +327,28 @@ export function run<TMachine extends AnyStateMachine>(
           : {
             agent: fromPromise<Event, AgentInvocation>(
               async ({ input }) => {
-                const { using, ...request } = input;
+                const { using, onLimit, ...request } = input;
                 const runner = agentRunners[using];
                 if (runner === undefined) {
                   throw new Error(`Agent runner "${using}" was not supplied`);
                 }
-                return runner(request, options.onAgentUpdate);
+                if (onLimit === undefined) return runner(request, options.onAgentUpdate);
+
+                let event: Event;
+                try {
+                  event = await runner(request, options.onAgentUpdate);
+                } catch (cause) {
+                  const limit = agentLimitOf(cause);
+                  if (limit === undefined) throw cause;
+                  return limitEvent(onLimit, using, limit, cause);
+                }
+                // Only the runtime may say that the Agent is at a limit.
+                if (event !== null && typeof event === "object" && event.type === onLimit) {
+                  throw new Error(
+                    `the runner returned "${onLimit}", which this state reserves for its usage-limit event`,
+                  );
+                }
+                return event;
               },
             ),
           }),
@@ -330,6 +377,23 @@ export function run<TMachine extends AnyStateMachine>(
     options.onState?.(initialValue);
     actor.start();
   });
+}
+
+/** The event a state that names `onLimit` receives. It is plain JSON, so a Machine can keep or publish it. */
+function limitEvent(type: string, role: string, limit: AgentLimit, cause: unknown): Event {
+  const resets = typeof limit.resetsAt === "number" ? new Date(limit.resetsAt) : undefined;
+  return {
+    type,
+    limit: {
+      role,
+      ...(typeof limit.agent === "string" ? { agent: limit.agent } : {}),
+      harness: limit.harness,
+      ...(typeof limit.kind === "string" ? { kind: limit.kind } : {}),
+      // A reset outside the range of a date has no ISO form.
+      ...(resets === undefined || Number.isNaN(resets.getTime()) ? {} : { resetsAt: resets.toISOString() }),
+    },
+    message: cause instanceof Error ? cause.message : String(cause),
+  };
 }
 
 function collectAgentNames(value: unknown, names: Set<string>): void {

@@ -20,12 +20,15 @@ import {
   prepareMachineRun,
 } from "../src/launcher.ts";
 import {
+  AgentLimitError,
   type AgentRequest,
+  type Event,
   agent,
   final,
   human,
   machine,
   operation,
+  requiredAgentNames,
   run,
 } from "../src/index.ts";
 
@@ -470,6 +473,53 @@ test("a limited role swaps along the chain of the preset it is bound to, unless 
     const unknown = runMachineCommand(["run", "work"], fixture, { HOME: home, MACHINES_AGENT_FALLBACK: "false" });
     assert.notEqual(unknown.status, 0);
     assert.match(unknown.stderr, /MACHINES_AGENT_FALLBACK must be "off" or "on", not "false"/u);
+  } finally {
+    rmSync(fixture, { force: true, recursive: true });
+  }
+});
+
+test("a state that handles its usage limit receives the event instead of its preset's fallback", async () => {
+  const fixture = mkdtempSync(join(tmpdir(), "machines-agents-on-limit-"));
+  const directory = join(fixture, ".machines");
+  const reset = Date.UTC(2099, 0, 1);
+
+  try {
+    mkdirSync(directory);
+    writeFileSync(join(directory, "agents.ts"), [
+      "export const fallback = ['shared'];",
+      "export default ({ AgentLimitError }) => ({",
+      `  reviewer: { description: 'Limited reviewer', harness: 'fixture', runner: (_request, report) => { report?.({ type: 'identity', harness: 'reviewer' }); throw new AgentLimitError('Out of quota', { harness: 'fixture', kind: 'five_hour', resetsAt: ${reset} }); } },`,
+      "  shared: { description: 'Completes as shared', runner: (_request, report) => { report?.({ type: 'identity', harness: 'shared' }); return { type: 'approved' }; } },",
+      "});",
+    ].join("\n"));
+    writeFileSync(join(directory, "review.ts"), [
+      'export const description = "Reviews with another provider when it has quota.";',
+      'export const agentRoles = { reviewer: "Reviews the change" };',
+      "export default function review({ agent, final, machine }) {",
+      "  let received;",
+      "  return machine({ initial: 'review', output: () => received, states: {",
+      "    review: agent('Review', {",
+      "      approved: 'reviewed',",
+      "      limited: { target: 'unreviewed', actions: ({ event }) => { received = event; } },",
+      "    }, { using: 'reviewer', onLimit: 'limited' }),",
+      "    reviewed: final(),",
+      "    unreviewed: final(),",
+      "  } });",
+      "}",
+    ].join("\n"));
+
+    const updates: import("../src/index.ts").AgentUpdate[] = [];
+    const prepared = await prepareMachineRun({ cwd: fixture, home: join(fixture, "home"), machine: "review" });
+    const result = await prepared.start({ onAgentUpdate: (update) => updates.push(update) });
+
+    assert.equal(result.value, "unreviewed");
+    assert.deepEqual(result.output, {
+      type: "limited",
+      limit: { role: "reviewer", agent: "reviewer", harness: "fixture", kind: "five_hour", resetsAt: "2099-01-01T00:00:00.000Z" },
+      message: "Out of quota",
+    });
+    // The configured fallback is never asked, and nothing is reported as swapped or waiting.
+    assert.deepEqual(updates, [{ type: "identity", harness: "reviewer" }]);
   } finally {
     rmSync(fixture, { force: true, recursive: true });
   }
@@ -1101,6 +1151,149 @@ test("a missing Agent runner fails at the Agent state", async () => {
     run(example),
     /Machine requires missing Agent runner: default/u,
   );
+});
+
+test("an Agent state validates the usage-limit event it names", () => {
+  const transitions = { approved: "done", limited: "done" };
+
+  assert.throws(
+    () => agent("Review", transitions, { onLimit: "exhausted" }),
+    /Agent onLimit event "exhausted" must be one of the state's transitions/u,
+  );
+  assert.throws(
+    () => agent("Review", { limited: "done" }, { onLimit: "limited" }),
+    /Agent onLimit event "limited" cannot be the state's only transition: the Agent needs an outcome of its own/u,
+  );
+  for (const onLimit of [" limited", "limited ", "", "  "]) {
+    assert.throws(
+      () => agent("Review", { ...transitions, [onLimit]: "done" }, { onLimit }),
+      /Agent onLimit must be a non-empty trimmed event name/u,
+    );
+  }
+  assert.throws(
+    () => agent("Review", transitions, { onLimit: 1 as unknown as string }),
+    /Agent onLimit must be a non-empty trimmed event name/u,
+  );
+});
+
+test("a usage limit becomes the event its Agent state names, which the Agent is never offered", async () => {
+  const requests: AgentRequest[] = [];
+  const received: Event[] = [];
+  const resetsAt = Date.UTC(2026, 9, 10, 21);
+  const example = machine({
+    initial: "review",
+    states: {
+      review: agent(
+        "Review the change",
+        {
+          approved: "commit",
+          revise: "repair",
+          limited: { target: "soloFlow", actions: ({ event }: { event: Event }) => { received.push(event); } },
+        },
+        { using: "reviewer", onLimit: "limited", cwd: "/tmp/machines-fake" },
+      ),
+      commit: final(),
+      repair: final(),
+      soloFlow: agent("Review your own change", { approved: "commit" }),
+    },
+  });
+
+  assert.deepEqual(requiredAgentNames(example), ["default", "reviewer"]);
+  assert.deepEqual(
+    (example.config.states as Record<string, { readonly meta?: unknown }>).review?.meta,
+    { "machines.agent": { using: "reviewer", onLimit: "limited" } },
+  );
+
+  const result = await run(example, {
+    agents: {
+      reviewer: (request) => {
+        requests.push(request);
+        throw new Error("Turn failed", {
+          cause: new AgentLimitError("Out of quota until 21:00", { harness: "claude", kind: "five_hour", resetsAt }),
+        });
+      },
+      default: (request) => {
+        requests.push(request);
+        return { type: "approved" };
+      },
+    },
+  });
+
+  assert.equal(result.value, "commit");
+  assert.deepEqual(requests, [
+    { prompt: "Review the change", outcomes: ["approved", "revise"], cwd: "/tmp/machines-fake", limits: "report" },
+    { prompt: "Review your own change", outcomes: ["approved"] },
+  ]);
+  const expected = {
+    type: "limited",
+    limit: { role: "reviewer", harness: "claude", kind: "five_hour", resetsAt: "2026-10-10T21:00:00.000Z" },
+    message: "Turn failed",
+  };
+  assert.deepEqual(received, [expected]);
+  assert.deepEqual(JSON.parse(JSON.stringify(received[0])), expected);
+
+  // Only what the limit states is in the event: a preset name comes from whoever selected the preset.
+  received.length = 0;
+  await run(example, {
+    agents: {
+      reviewer: () => { throw new AgentLimitError("No quota", { harness: "codex", agent: "codex-write", resetsAt: Number.NaN }); },
+      default: () => ({ type: "approved" }),
+    },
+  });
+  assert.deepEqual(received, [{
+    type: "limited",
+    limit: { role: "reviewer", agent: "codex-write", harness: "codex" },
+    message: "No quota",
+  }]);
+});
+
+test("an Agent state that names a usage-limit event still fails on any other error", async () => {
+  const example = machine({
+    initial: "review",
+    states: {
+      review: agent("Review the change", { approved: "done", limited: "done" }, { onLimit: "limited" }),
+      done: final(),
+    },
+  });
+
+  await assert.rejects(
+    run(example, { agents: { default: () => { throw new Error("claude crashed"); } } }),
+    /^Error: Agent failed in state "review": claude crashed$/u,
+  );
+  // The Agent is at no limit until its runner says so: it cannot take the transition by naming the event.
+  await assert.rejects(
+    run(example, { agents: { default: () => ({ type: "limited" }) } }),
+    /^Error: Agent failed in state "review": the runner returned "limited", which this state reserves for its usage-limit event$/u,
+  );
+  await assert.rejects(
+    run(example, { agents: { default: () => ({ type: "unexpected" }) } }),
+    /State "review" does not handle event "unexpected"/u,
+  );
+  assert.equal((await run(example, { agents: { default: () => ({ type: "approved" }) } })).value, "done");
+});
+
+test("a usage limit fails an Agent state that names no event for it", async () => {
+  const requests: AgentRequest[] = [];
+  const example = machine({
+    initial: "work",
+    states: {
+      work: agent("Implement the tiny task", { completed: "done", limited: "done" }),
+      done: final(),
+    },
+  });
+
+  await assert.rejects(
+    run(example, {
+      agents: {
+        default: (request) => {
+          requests.push(request);
+          throw new AgentLimitError("Out of quota", { harness: "claude" });
+        },
+      },
+    }),
+    /^Error: Agent failed in state "work": Out of quota$/u,
+  );
+  assert.deepEqual(requests, [{ prompt: "Implement the tiny task", outcomes: ["completed", "limited"] }]);
 });
 
 test("a Human accepts free-form terminal input even when a suggestion is shown", async () => {

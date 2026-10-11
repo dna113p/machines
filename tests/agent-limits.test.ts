@@ -464,3 +464,81 @@ test("a state announced in the tick its Agent starts hears of a remembered limit
   await pending;
   assert.deepEqual(order, ["state announced", "waiting", "resumed"]);
 });
+
+test("a request that reports its limit is tried on the bound preset alone, with no swap or wait", async () => {
+  const time = clock();
+  const bound = scripted("claude", { kind: "five_hour", resetsAt: start + hour }, { type: "approved" });
+  const spare = scripted("codex");
+  const { updates, report } = observed();
+  const memory = createLimitMemory();
+  const candidates = [
+    { name: "reviewer", runner: bound.runner, harness: "claude" },
+    { name: "reviewer-sol", runner: spare.runner, harness: "codex" },
+  ];
+  const reporting: AgentRequest = { ...request, limits: "report" };
+  const runner = limitAwareRunner("reviewer", candidates, memory, policy(time));
+
+  await assert.rejects(async () => runner(reporting, report), (cause) => {
+    assert.ok(cause instanceof AgentLimitError);
+    assert.equal(cause.message, "claude is out of quota");
+    assert.deepEqual(cause.limit, { harness: "claude", agent: "reviewer", kind: "five_hour", resetsAt: start + hour });
+    assert.equal(cause.limits, undefined);
+    assert.equal(agentLimitOf(cause.cause)?.agent, undefined, "the runner's own error is kept as the cause");
+    return true;
+  });
+  assert.equal(bound.requests[0], reporting);
+  assert.deepEqual(spare.requests, []);
+  assert.deepEqual(updates, [{ type: "identity", harness: "claude" }]);
+  assert.deepEqual(time.sleeps, []);
+
+  // Known to be limited: the preset is not asked again, by this role or under another role's name.
+  await assert.rejects(async () => runner(reporting, report), (cause) => {
+    assert.ok(cause instanceof AgentLimitError);
+    assert.equal(cause.message, "reviewer is at its usage limit (resets 2026-10-10T21:00:00Z)");
+    assert.deepEqual(cause.limit, { harness: "claude", agent: "reviewer", kind: "five_hour", resetsAt: start + hour });
+    return true;
+  });
+  await assert.rejects(
+    async () => limitAwareRunner("judge", candidates, memory, policy(time))(reporting, report),
+    /^AgentLimitError: reviewer \(role judge\) is at its usage limit \(resets 2026-10-10T21:00:00Z\)$/u,
+  );
+  assert.equal(bound.requests.length, 1);
+  assert.deepEqual(spare.requests, []);
+  assert.deepEqual(limits(updates), []);
+  assert.deepEqual(time.sleeps, []);
+
+  // Past the reset the preset is asked again, and one that answers is forgotten as limited.
+  time.advance(hour);
+  assert.deepEqual(await runner(reporting, report), { type: "approved" });
+  assert.equal(bound.requests[1], reporting, "no handoff note: the state never moved on from its Agent");
+  assert.equal(memory.size, 0);
+  assert.deepEqual(limits(updates), []);
+});
+
+test("a reported limit is remembered, so another role of the run skips that preset", async () => {
+  const time = clock();
+  const claude = scripted("claude", {});
+  const codex = scripted("codex");
+  const candidates = [{ name: "claude", runner: claude.runner }, { name: "codex", runner: codex.runner }];
+  const memory = createLimitMemory();
+  const settings = policy(time, { maxWaitMs: 0 });
+
+  await assert.rejects(
+    async () => limitAwareRunner("reviewer", candidates, memory, settings)({ ...request, limits: "report" }),
+    (cause) => agentLimitOf(cause)?.agent === "claude",
+  );
+
+  const { updates, report } = observed();
+  assert.deepEqual(await limitAwareRunner("implementer", candidates, memory, settings)(request, report), { type: "completed" });
+  assert.equal(claude.requests.length, 1);
+  assert.equal(codex.requests[0], request);
+  assert.deepEqual(limits(updates).map((update) => update.text), [
+    "claude (role implementer) is at its usage limit (reset unknown); continuing with codex",
+  ]);
+
+  // A failure that is not a usage limit is the runner's own, and is remembered as nothing.
+  const failure = new Error("claude crashed");
+  const broken = limitAwareRunner("reviewer", [{ name: "broken", runner: scripted("claude", failure).runner }], memory, settings);
+  await assert.rejects(async () => broken({ ...request, limits: "report" }), (cause) => cause === failure);
+  assert.deepEqual([...memory.keys()], ["claude"]);
+});

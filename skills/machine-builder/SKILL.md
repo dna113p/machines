@@ -65,7 +65,10 @@ the launcher supplies primitives and type-only imports are erased at execution.
 
 Declare semantic `agentRoles` for named Agents, then use those exact roles in states.
 Select harnesses and models through presets, keeping environment details out of
-workflow policy. The [bundled examples](../../dist/examples/) show runtime usage
+workflow policy. A provider usage limit normally swaps to a fallback preset or
+waits; give an Agent state `onLimit: "<event>"` only when the workflow itself
+should branch at a limit, for example to skip a cross-provider review or ask a
+Human. The [bundled examples](../../dist/examples/) show runtime usage
 after the package is built; authoring examples in the guide also work before a build.
 
 Keep module initialization side-effect free: discovery imports definitions and

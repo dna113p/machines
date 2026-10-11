@@ -1,5 +1,5 @@
 import { AgentLimitError, agentLimitOf, type AgentLimit } from "./agent-limit.ts";
-import type { AgentRequest, AgentRunner, AgentUpdate } from "./index.ts";
+import type { AgentReporter, AgentRequest, AgentRunner, AgentUpdate, Event } from "./index.ts";
 
 export interface LimitPolicy {
   /** Longest one invocation waits for a reset, from its first wait. `0` never waits. */
@@ -48,6 +48,8 @@ export function createLimitMemory(): LimitMemory {
  * Runs one role's request on the first candidate that is not at a usage limit.
  * A limited candidate hands the same request to the next one; when all are
  * limited the request waits for a reset within the policy, or fails.
+ * A request with `limits: "report"` is tried on the bound candidate alone, and
+ * its limit is thrown at once.
  */
 export function limitAwareRunner(
   role: string,
@@ -65,7 +67,27 @@ export function limitAwareRunner(
     return remembered !== undefined && remembered.until > now() && retrying?.has(remembered) !== true;
   };
 
+  // The state decides what its limit means, so nothing is swapped, waited for, or reported as an update.
+  const reported = async (request: AgentRequest, report?: AgentReporter): Promise<Event> => {
+    const known = memory.get(bound.name);
+    if (known !== undefined && known.until > now()) {
+      throw new AgentLimitError(`${named(bound.name)} is at its usage limit (${resetText(known)})`, known.limit);
+    }
+    try {
+      const event = await bound.runner(request, report);
+      if (known !== undefined && memory.get(bound.name) === known) memory.delete(bound.name);
+      return event;
+    } catch (cause) {
+      const limit = agentLimitOf(cause);
+      if (limit === undefined) throw cause;
+      // The run's other roles skip this preset, and the limit names it.
+      throw new AgentLimitError(cause instanceof Error ? cause.message : String(cause), remember(bound, limit).limit, { cause });
+    }
+  };
+
   return async (request, report) => {
+    if (request.limits === "report") return reported(request, report);
+
     // A state is announced after its Agent starts, in the same tick. Observers
     // attach an update to the announced state, so none is reported before then.
     const tell = async (update: Extract<AgentUpdate, { type: "limit" }>) => {
