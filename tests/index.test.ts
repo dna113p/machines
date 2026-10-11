@@ -244,6 +244,347 @@ test("Agent presets reject unknown metadata fields", async () => {
   }
 });
 
+test("fallback lists are validated where they are written", async () => {
+  const fixture = mkdtempSync(join(tmpdir(), "machines-agents-fallback-shape-"));
+  const preset = (name: string, fallback?: string) =>
+    `${name}: { description: 'Works', ${fallback === undefined ? "" : `fallback: ${fallback}, `}runner: () => ({ type: 'done' }) }`;
+  // A new directory each time, since an imported file is cached by its path.
+  const load = (shared: string | undefined, ...presets: string[]) => {
+    const directory = mkdtempSync(join(fixture, "project-"));
+    mkdirSync(join(directory, ".machines"));
+    writeFileSync(join(directory, ".machines", "agents.ts"), [
+      ...(shared === undefined ? [] : [`export const fallback = ${shared};`]),
+      `export default () => ({ ${presets.join(", ")} });`,
+    ].join("\n"));
+    return loadAgentBindings(directory, join(fixture, "no-home"));
+  };
+
+  try {
+    for (const [shared, problem] of [
+      ["'codex'", /Agent bindings ".*agents\.ts" fallback export must be an array of preset names/u],
+      ["['codex', 7]", /fallback export must contain only non-empty, trimmed, one-line preset names/u],
+      ["['codex', '']", /fallback export must contain only non-empty, trimmed, one-line preset names/u],
+      ["[' codex']", /fallback export must contain only non-empty, trimmed, one-line preset names/u],
+      ["['co\\ndex']", /fallback export must contain only non-empty, trimmed, one-line preset names/u],
+      ["['codex', 'claude', 'codex']", /fallback export names "codex" more than once/u],
+    ] as const) {
+      await assert.rejects(load(shared), problem, shared);
+    }
+    for (const [chain, problem] of [
+      ["'codex'", /Agent preset "writer" fallback in ".*agents\.ts" must be an array of preset names/u],
+      ["['codex', 'codex']", /Agent preset "writer" fallback in ".*agents\.ts" names "codex" more than once/u],
+      ["['codex ']", /Agent preset "writer" fallback .* must contain only non-empty, trimmed, one-line preset names/u],
+      ["['codex', 'writer']", /Agent preset "writer" fallback in ".*agents\.ts" must not name the preset itself/u],
+    ] as const) {
+      await assert.rejects(load(undefined, preset("writer", chain)), problem, chain);
+    }
+
+    // The shared list may name any preset, its own members included, and one that is not written yet.
+    const loaded = await load(
+      "['writer', 'reviewer', 'unwritten']", preset("writer"), preset("reviewer", "[]"), preset("pinned", "['writer']"),
+    );
+    assert.deepEqual(loaded.fallback, ["writer", "reviewer", "unwritten"]);
+    assert.equal("fallback" in loaded.presets.writer!, false);
+    assert.deepEqual(loaded.presets.reviewer!.fallback, []);
+    assert.deepEqual(loaded.presets.pinned!.fallback, ["writer"]);
+  } finally {
+    rmSync(fixture, { force: true, recursive: true });
+  }
+});
+
+test("the project fallback list replaces the global one, and listings show each preset's effective fallback", async () => {
+  const fixture = mkdtempSync(join(tmpdir(), "machines-agents-fallback-"));
+  const home = join(fixture, "home");
+  const project = join(fixture, "project");
+  const inherits = join(fixture, "inherits");
+  const runner = "runner: () => ({ type: 'done' })";
+
+  try {
+    for (const directory of [home, project, inherits]) mkdirSync(join(directory, ".machines"), { recursive: true });
+    writeFileSync(join(home, ".machines", "agents.ts"), [
+      "export const fallback = ['claude', 'codex'];",
+      `export default () => ({ globalWriter: { description: 'Writes globally', ${runner} } });`,
+    ].join("\n"));
+    writeFileSync(join(project, ".machines", "agents.ts"), [
+      "export const fallback = ['writer', 'spare'];",
+      "export default () => ({",
+      `  writer: { description: 'Writes', harness: 'claude', ${runner} },`,
+      `  spare: { description: 'Stands in', ${runner} },`,
+      `  pinned: { description: 'Never swaps', fallback: [], ${runner} },`,
+      `  chained: { description: 'Has its own chain', fallback: ['codex', 'writer'], ${runner} },`,
+      "});",
+    ].join("\n"));
+    writeFileSync(join(inherits, ".machines", "agents.ts"), `export default () => ({ local: { description: 'Local', ${runner} } });\n`);
+
+    assert.deepEqual((await loadAgentBindings(project, home)).fallback, ["writer", "spare"]);
+    assert.deepEqual((await loadAgentBindings(inherits, home)).fallback, ["claude", "codex"]);
+    assert.equal("fallback" in await loadAgentBindings(inherits, join(fixture, "no-home")), false);
+
+    const listed = Object.fromEntries((await listAgentPresets({ cwd: project, home })).map((preset) => [preset.name, preset.fallback]));
+    assert.deepEqual(
+      { writer: listed.writer, spare: listed.spare, pinned: listed.pinned, chained: listed.chained, claude: listed.claude },
+      { writer: ["spare"], spare: ["writer"], pinned: [], chained: ["codex", "writer"], claude: ["writer", "spare"] },
+    );
+    assert.deepEqual((await listAgentPresets({ cwd: inherits, home })).find((preset) => preset.name === "claude")?.fallback, ["codex"]);
+
+    const rows = runMachineCommand(["agents"], project, { HOME: home }).stdout.trimEnd().split("\n").map((row) => row.split("\t"));
+    const row = (name: string) => rows.find((columns) => columns[0] === name);
+    assert.ok(rows.every((columns) => columns.length === 7), "every row has the fallback column, last");
+    assert.deepEqual(row("writer"), ["writer", "Writes", "claude", "", "", join(project, ".machines", "agents.ts"), "spare"]);
+    assert.equal(row("chained")?.[6], "codex, writer");
+    assert.equal(row("pinned")?.[6], "");
+    assert.equal(row("default")?.[6], "writer, spare");
+
+    const unconfigured = runMachineCommand(["agents"], fixture, { HOME: join(fixture, "no-home") });
+    assert.match(unconfigured.stdout, /^default\tRuns the current Pi Agent through ACP\tpi-acp\t\t\tbuilt in\t$/mu);
+  } finally {
+    rmSync(fixture, { force: true, recursive: true });
+  }
+});
+
+test("a missing fallback preset fails preflight only for a role the Machine uses or declares", async () => {
+  const fixture = mkdtempSync(join(tmpdir(), "machines-agents-fallback-preflight-"));
+  const directory = join(fixture, ".machines");
+  const home = join(fixture, "home");
+  const workflow = (name: string, role: string, declared: string) => [
+    `export const description = "Uses the ${role} role.";`,
+    `export const agentRoles = { ${declared} };`,
+    `export default function ${name}({ agent, final, machine }) {`,
+    `  return machine({ initial: "work", states: { work: agent("Work", { completed: "done" }, { using: "${role}" }), done: final() } });`,
+    "}",
+  ].join("\n");
+
+  try {
+    mkdirSync(directory);
+    writeFileSync(join(directory, "agents.ts"), [
+      "export default () => ({",
+      "  reviewer: { description: 'Reviews', runner: () => ({ type: 'completed' }) },",
+      "  writer: { description: 'Writes', fallback: ['ghost'], runner: () => ({ type: 'completed' }) },",
+      "  orphan: { description: 'Used by no Machine', fallback: ['missing'], runner: () => ({ type: 'completed' }) },",
+      "});",
+    ].join("\n"));
+    writeFileSync(join(directory, "review.ts"), workflow("review", "reviewer", 'reviewer: "Reviews the change"'));
+    writeFileSync(join(directory, "write.ts"), workflow("write", "writer", 'writer: "Writes the change"'));
+    writeFileSync(join(directory, "declare.ts"), workflow("declare", "reviewer", 'reviewer: "Reviews", writer: "Declared, never used"'));
+
+    const listed = runMachineCommand(["list"], fixture, { HOME: home });
+    assert.equal(listed.status, 0, listed.stderr);
+    assert.match(listed.stdout, /^write\t.*\tready$/mu);
+    const presets = runMachineCommand(["agents"], fixture, { HOME: home });
+    assert.equal(presets.status, 0, presets.stderr);
+    assert.match(presets.stdout, /^orphan\t.*\tmissing$/mu);
+
+    const reviewed = await prepareMachineRun({ cwd: fixture, home, machine: "review" });
+    assert.equal((await reviewed.start()).value, "done");
+
+    const expected = /^Agent preset "writer" for role "writer" falls back to "ghost", which is not a configured preset\. Available presets: .*\borphan, reviewer\b/u;
+    assert.match(await rejectedMessage(prepareMachineRun({ cwd: fixture, home, machine: "write" })), expected);
+    assert.match(await rejectedMessage(prepareMachineRun({ cwd: fixture, home, machine: "declare" })), expected);
+    assert.match(
+      await rejectedMessage(prepareMachineRun({ cwd: fixture, home, machine: "review", agents: { reviewer: "orphan" } })),
+      /^Agent preset "orphan" for role "reviewer" falls back to "missing", which is not a configured preset\./u,
+    );
+    // Rebinding the role leaves the broken preset unused.
+    const rebound = await prepareMachineRun({ cwd: fixture, home, machine: "write", agents: { writer: "reviewer" } });
+    assert.equal((await rebound.start()).value, "done");
+    // So does turning swapping off: no fallback is part of the role's chain.
+    const unswapped = runMachineCommand(["run", "write"], fixture, { HOME: home, MACHINES_AGENT_FALLBACK: "off" });
+    assert.equal(unswapped.status, 0, unswapped.stderr);
+    const swapping = runMachineCommand(["run", "write"], fixture, { HOME: home, MACHINES_AGENT_FALLBACK: "on" });
+    assert.notEqual(swapping.status, 0);
+    assert.match(swapping.stderr, /Agent preset "writer" for role "writer" falls back to "ghost"/u);
+  } finally {
+    rmSync(fixture, { force: true, recursive: true });
+  }
+});
+
+test("a limited role swaps along the chain of the preset it is bound to, unless swapping is off", async () => {
+  const fixture = mkdtempSync(join(tmpdir(), "machines-agents-fallback-run-"));
+  const directory = join(fixture, ".machines");
+  const home = join(fixture, "home");
+  const reset = Date.UTC(2099, 0, 1);
+  const named = (name: string, extra = "") =>
+    `${name}: { description: 'Completes as ${name}', ${extra}runner: (_request, report) => { report?.({ type: 'identity', harness: '${name}' }); return { type: 'completed' }; } }`;
+  const limited = (name: string, extra = "") =>
+    `${name}: { description: 'Limited ${name}', harness: 'fixture', ${extra}runner: (_request, report) => { report?.({ type: 'identity', harness: '${name}' }); throw new AgentLimitError('Out of quota', { harness: 'fixture', kind: 'five_hour', resetsAt: ${reset} }); } }`;
+
+  try {
+    mkdirSync(directory);
+    writeFileSync(join(directory, "agents.ts"), [
+      "export const fallback = ['shared'];",
+      "export default ({ AgentLimitError }) => ({",
+      `  ${limited("worker")},`,
+      `  ${limited("other", "fallback: ['otherSpare'], ")},`,
+      `  ${limited("alone", "fallback: [], ")},`,
+      `  ${named("shared")},`,
+      `  ${named("otherSpare")},`,
+      "});",
+    ].join("\n"));
+    writeFileSync(join(directory, "work.ts"), [
+      'export const description = "Runs one worker.";',
+      'export const agentRoles = { worker: "Does the work" };',
+      "export default function work({ agent, final, machine }) {",
+      '  return machine({ initial: "work", states: { work: agent("Work", { completed: "done" }, { using: "worker" }), done: final() } });',
+      "}",
+    ].join("\n"));
+    const location = { cwd: fixture, home };
+    const observe = async (agents?: Readonly<Record<string, string>>) => {
+      const updates: import("../src/index.ts").AgentUpdate[] = [];
+      const prepared = await prepareMachineRun({ ...location, machine: "work", ...(agents === undefined ? {} : { agents }) });
+      const result = await prepared.start({ onAgentUpdate: (update) => updates.push(update) });
+      return { state: result.value, updates: updates.map((update) => update.type === "identity" ? update.harness : update.type === "limit" ? update.text : update.type) };
+    };
+
+    assert.deepEqual(await observe(), {
+      state: "done",
+      updates: ["worker", "worker reached its usage limit (resets 2099-01-01T00:00:00Z); continuing with shared", "shared"],
+    });
+    // An override brings its own preset's chain, not the role's usual one.
+    assert.deepEqual(await observe({ worker: "other" }), {
+      state: "done",
+      updates: ["other", "other (role worker) reached its usage limit (resets 2099-01-01T00:00:00Z); continuing with otherSpare", "otherSpare"],
+    });
+
+    const exhausted = /Agent failed in state "work": Agent role "worker" is at a usage limit on every allowed preset: (\w+) \(fixture, five_hour, resets 2099-01-01T00:00:00Z\); (.+)$/mu;
+    // `fallback: []` keeps a preset from ever swapping; a reset that far away is not waited for.
+    const pinned = await rejectedMessage(observe({ worker: "alone" }));
+    assert.deepEqual(pinned.match(exhausted)?.slice(1), ["alone", "none is available within the 360-minute wait limit"]);
+
+    const swapped = runMachineCommand(["run", "work"], fixture, { HOME: home });
+    assert.equal(swapped.status, 0, swapped.stderr);
+    // Outside a terminal the swap is one line between the states it happened in.
+    assert.ok(swapped.stderr.endsWith([
+      "● work · work",
+      "worker reached its usage limit (resets 2099-01-01T00:00:00Z); continuing with shared",
+      "● work · done",
+      "",
+    ].join("\n")), swapped.stderr);
+
+    const off = runMachineCommand(["run", "work"], fixture, {
+      HOME: home, MACHINES_AGENT_FALLBACK: "off", MACHINES_AGENT_LIMIT_WAIT_MINUTES: "0",
+    });
+    assert.notEqual(off.status, 0);
+    assert.deepEqual(off.stderr.match(exhausted)?.slice(1), ["worker", "waiting for a reset is off"]);
+    assert.doesNotMatch(off.stderr, /continuing with/u);
+
+    const unknown = runMachineCommand(["run", "work"], fixture, { HOME: home, MACHINES_AGENT_FALLBACK: "false" });
+    assert.notEqual(unknown.status, 0);
+    assert.match(unknown.stderr, /MACHINES_AGENT_FALLBACK must be "off" or "on", not "false"/u);
+  } finally {
+    rmSync(fixture, { force: true, recursive: true });
+  }
+});
+
+test("the wait limit is a non-negative number of minutes, and a role with no fallback waits for its reset", async () => {
+  for (const value of ["soon", "-1", "1e3", " "]) {
+    const result = runMachineCommand(["run", "tests/fixtures/input.machine.ts", "exact input"], process.cwd(), {
+      MACHINES_AGENT_LIMIT_WAIT_MINUTES: value,
+    });
+    assert.notEqual(result.status, 0, value);
+    assert.ok(
+      result.stderr.includes(`MACHINES_AGENT_LIMIT_WAIT_MINUTES must be a non-negative number of minutes, not "${value}"`),
+      result.stderr,
+    );
+  }
+  for (const value of ["0", "90", "7.5", ""]) {
+    const result = runMachineCommand(["run", "tests/fixtures/input.machine.ts", "exact input"], process.cwd(), {
+      MACHINES_AGENT_LIMIT_WAIT_MINUTES: value,
+    });
+    assert.equal(result.status, 0, result.stderr);
+  }
+
+  const location = { cwd: resolvePath("tests/fixtures/agent-limit-project"), home: resolvePath("tests/fixtures/empty-home") };
+  for (const waitMinutes of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
+    await assert.rejects(
+      prepareMachineRun({ ...location, machine: "work", agentLimits: { waitMinutes } }),
+      /agentLimits\.waitMinutes must be a non-negative number of minutes/u,
+    );
+  }
+
+  // Nothing is configured for the wait: the preset has no fallback and its reset is an hour away.
+  let time = Date.now();
+  const slept: number[] = [];
+  const texts: string[] = [];
+  const wait = (waitMinutes?: number) => prepareMachineRun({
+    ...location,
+    machine: "work",
+    agents: { default: "waits" },
+    agentLimits: {
+      ...(waitMinutes === undefined ? {} : { waitMinutes }),
+      now: () => time,
+      sleep: async (milliseconds) => { slept.push(milliseconds); time += milliseconds; },
+    },
+  });
+  await assert.rejects(
+    (await wait(30)).start({ onAgentUpdate: (update) => { if (update.type === "limit") texts.push(update.text); } }),
+    /is at a usage limit on every allowed preset: waits \(fixture, five_hour, resets .*Z\); none is available within the 30-minute wait limit/u,
+  );
+  assert.deepEqual({ slept, texts }, { slept: [], texts: [] });
+
+  // The default is six hours. The fixture preset stays limited: once its stated reset has passed it is
+  // probed every fifteen minutes, and a last time when the six hours are up.
+  const states: unknown[] = [];
+  await assert.rejects(
+    (await wait()).start({
+      onState: (state) => states.push(state),
+      onAgentUpdate: (update) => { if (update.type === "limit") texts.push(`${update.status}: ${update.text}`); },
+    }),
+    /none is available within the 360-minute wait limit/u,
+  );
+  assert.deepEqual(states, ["work"]);
+  // The wait is reported once for all of those probes, and the Agent never resumes.
+  assert.equal(texts.length, 1, texts.join("\n"));
+  assert.match(texts[0]!, /^waiting: waits \(role default\) reached its usage limit; waiting for the reset at .*Z$/u);
+  assert.ok(slept.every((milliseconds) => milliseconds <= 60_000));
+  assert.equal(Math.round(slept.reduce((total, milliseconds) => total + milliseconds, 0) / 60_000), 360);
+});
+
+test("a Claude Code usage limit falls back to Codex and the Machine finishes", async () => {
+  const fixture = mkdtempSync(join(tmpdir(), "machines-agents-fallback-cli-"));
+  const directory = join(fixture, ".machines");
+  const command = (file: string, mode: string) =>
+    `${JSON.stringify(process.execPath)}, ${JSON.stringify([resolvePath("tests/fixtures", file), mode])}, { output: "capture", harness: "fake-${mode}" }`;
+
+  try {
+    mkdirSync(directory);
+    writeFileSync(join(directory, "agents.ts"), [
+      "export const fallback = ['claude', 'codex'];",
+      "export default ({ claudeAgent, codexAgent }) => ({",
+      `  claude: { description: 'Claude Code at its limit', harness: 'claude', runner: claudeAgent(${command("fake-claude-agent.mjs", "usage-limit")}) },`,
+      `  codex: { description: 'Codex', harness: 'codex', runner: codexAgent(${command("fake-codex-agent.mjs", "normal")}) },`,
+      "});",
+    ].join("\n"));
+    writeFileSync(join(directory, "task.ts"), [
+      'export const description = "Runs one implementer.";',
+      'export const agentRoles = { implementer: "Implements the task" };',
+      "export default function task({ agent, final, machine }) {",
+      `  return machine({ initial: "implement", states: {`,
+      `    implement: agent("Do the task", { completed: "done" }, { using: "implementer", cwd: ${JSON.stringify(fixture)} }),`,
+      "    done: final(),",
+      "  } });",
+      "}",
+    ].join("\n"));
+
+    const updates: import("../src/index.ts").AgentUpdate[] = [];
+    const prepared = await prepareMachineRun({
+      cwd: fixture, home: join(fixture, "home"), machine: "task", agents: { implementer: "claude" },
+    });
+    const result = await prepared.start({ onAgentUpdate: (update) => updates.push(update) });
+
+    assert.equal(result.value, "done");
+    const order = updates.flatMap((update) => update.type === "identity" ? [update.harness] : update.type === "limit" ? ["limit"] : []);
+    assert.deepEqual(order.filter((item, index) => item !== order[index - 1]), ["fake-usage-limit", "limit", "fake-normal"]);
+    const swap = updates.find((update) => update.type === "limit")!;
+    assert.deepEqual({ status: swap.status, agent: swap.agent, to: swap.to }, { status: "swapped", agent: "claude", to: "codex" });
+    assert.match(
+      swap.text,
+      /^claude \(role implementer\) reached its usage limit \(resets \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\); continuing with codex$/u,
+    );
+  } finally {
+    rmSync(fixture, { force: true, recursive: true });
+  }
+});
+
 test("the command finds a project Machine upward and prefers its file", () => {
   const cwd = resolvePath("tests/fixtures/discovery/project/nested");
   const result = runMachineCommand(["run", "shared"], cwd);

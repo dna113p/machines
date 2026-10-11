@@ -116,6 +116,13 @@ async function runMachine(machinePath: string, args: string[]) {
             arriving = undefined;
             published.update({ agent: update });
           });
+        } else if (update.type === "limit" && update.status !== "swapped") {
+          // A swap while every preset is being tried again leaves the wait as it is published.
+          published.update({
+            limit: update.status === "resumed"
+              ? undefined
+              : { text: update.text, ...(update.until === undefined ? {} : { until: update.until }) },
+          });
         }
         status.onAgentUpdate(update);
       },
@@ -291,6 +298,7 @@ function printAgentListing(preset: AgentPresetSummary, separate: boolean) {
       preset.model ?? "",
       preset.thinking ?? "",
       preset.source,
+      preset.fallback?.join(", ") ?? "",
     ].join("\t"));
     return;
   }
@@ -299,6 +307,7 @@ function printAgentListing(preset: AgentPresetSummary, separate: boolean) {
   console.log(bold(cyan(preset.name)));
   console.log(`  ${preset.description}`);
   if (identity.length > 0) console.log(`  ${magenta(identity.join(" · "))}`);
+  if (preset.fallback !== undefined) console.log(`  fallback: ${preset.fallback.join(", ") || "none"}`);
   console.log(`  ${dim(preset.source)}`);
 }
 
@@ -307,7 +316,7 @@ function printRunListing(record: RunStatusRecord, separate: boolean) {
   const human = record.status === "waiting" ? record.human : undefined;
   // Recorded text must not be able to move the cursor or restyle the terminal.
   const plain = (text: string) => text.replace(/[\u0000-\u001f\u007f-\u009f]+/gu, " ").trim();
-  const details = human === undefined ? [] : [
+  const details = human === undefined ? (record.limit === undefined ? [] : [plain(record.limit.text)]) : [
     ...human.prompt.split("\n").map(plain).filter((line) => line !== ""),
     ...(human.requestId === undefined ? [] : [`request: ${plain(human.requestId)}`]),
     ...(human.choices === undefined ? [] : [`choices: ${human.choices.map(plain).join(", ")}`]),
@@ -351,7 +360,9 @@ function createRunStatus(machinePath: string): RunStatus {
       onState(state) {
         console.error(`● ${name} · ${formatState(state)}`);
       },
-      onAgentUpdate() {},
+      onAgentUpdate(update) {
+        if (update.type === "limit") console.error(update.text.replace(/\s+/gu, " "));
+      },
       onHumanInput() {},
       succeed() {},
       fail() {},
@@ -365,6 +376,8 @@ function createRunStatus(machinePath: string): RunStatus {
   let activityExpanded = false;
   let agentOutput = "";
   let agentIdentity: Partial<Extract<AgentUpdate, { type: "identity" }>> = {};
+  let agentLimit = "";
+  let agentWaiting = false;
   let refresh: NodeJS.Timeout | undefined;
   const tools = new Map<string, { title: string; status?: Extract<AgentUpdate, { type: "tool" }>["status"] }>();
   const hotkeysAvailable = Boolean(process.stdin.isTTY && process.stdin.setRawMode);
@@ -385,13 +398,15 @@ function createRunStatus(machinePath: string): RunStatus {
         ? undefined
         : `thinking ${agentIdentity.thinking}`,
     ].filter(Boolean).join(" · ");
-    const identityLine = identity === ""
+    const width = Math.max(20, (process.stderr.columns ?? 100) - 4);
+    const identityLine = identity === "" ? "" : `\n  ${dim(truncate(identity, width))}`;
+    const limitLine = agentLimit === ""
       ? ""
-      : `\n  ${dim(truncate(identity, Math.max(20, (process.stderr.columns ?? 100) - 4)))}`;
+      : `\n  ${yellow(truncate(stripVTControlCharacters(agentLimit).replace(/\s+/gu, " "), width))}`;
 
     return activityExpanded
-      ? `${status}${identityLine}\n${activityText()}`
-      : `${status}${identityLine}`;
+      ? `${status}${identityLine}${limitLine}\n${activityText()}`
+      : `${status}${identityLine}${limitLine}`;
   }
 
   function completedText() {
@@ -496,6 +511,10 @@ function createRunStatus(machinePath: string): RunStatus {
         agentIdentity = update;
       } else if (update.type === "output") {
         agentOutput = (agentOutput + update.text).slice(-32_768);
+      } else if (update.type === "limit") {
+        // A wait stays on screen while its presets are tried again, until one of them resumes.
+        if (update.status !== "swapped") agentWaiting = update.status === "waiting";
+        if (update.status !== "swapped" || !agentWaiting) agentLimit = update.text;
       } else {
         const previous = tools.get(update.id);
         tools.set(update.id, {
@@ -523,6 +542,8 @@ function createRunStatus(machinePath: string): RunStatus {
       enteredAt = Date.now();
       agentOutput = "";
       agentIdentity = {};
+      agentLimit = "";
+      agentWaiting = false;
       tools.clear();
 
       if (humanInputActive) return;

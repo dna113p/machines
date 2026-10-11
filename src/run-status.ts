@@ -22,6 +22,8 @@ export interface RunStatusRecord {
   /** When the current state was entered. */
   readonly stateSince?: string;
   readonly agent?: RunStatusAgent;
+  /** Present while the current Agent state waits for a usage limit to reset; `status` stays `running`. */
+  readonly limit?: RunStatusLimit;
   readonly human?: RunStatusHuman;
   /** Names the inbox responses the run took lately, so that each sender can tell; never a response. */
   readonly deliveries?: readonly string[];
@@ -46,6 +48,12 @@ export interface RunStatusAgent {
   readonly thinking?: string;
 }
 
+/** A wait for an Agent usage limit: a one-line summary, and when the wait is expected to end. */
+export interface RunStatusLimit {
+  readonly text: string;
+  readonly until?: string;
+}
+
 export interface RunStatusRun {
   readonly id?: string;
   readonly machine: string;
@@ -59,6 +67,8 @@ export interface RunStatusChange {
   readonly status?: "running" | "waiting";
   readonly state?: StateValue;
   readonly agent?: RunStatusAgent;
+  /** Leaving the state clears it as well. */
+  readonly limit?: RunStatusLimit;
   readonly human?: RunStatusHuman;
   /** Names an inbox response the run took, in addition to those its record already names. */
   readonly delivery?: string;
@@ -119,6 +129,7 @@ export function createRunStatusPublisher(
   let state: string | undefined;
   let stateSince: string | undefined;
   let agent: RunStatusAgent | undefined;
+  let limit: RunStatusLimit | undefined;
   let human: RunStatusHuman | undefined;
   let deliveries: ReadonlyArray<{ readonly id: string; readonly takenAt: number }> = [];
   let error: string | undefined;
@@ -138,6 +149,7 @@ export function createRunStatusPublisher(
       ...(state === undefined ? {} : { state }),
       ...(stateSince === undefined ? {} : { stateSince }),
       ...(agent === undefined ? {} : { agent }),
+      ...(limit === undefined ? {} : { limit }),
       ...(human === undefined ? {} : { human }),
       ...(deliveries.length === 0 ? {} : { deliveries: deliveries.map((delivery) => delivery.id) }),
       ...(error === undefined ? {} : { error }),
@@ -170,10 +182,13 @@ export function createRunStatusPublisher(
   return {
     update(change) {
       if (status === "completed" || status === "failed") return;
+      const nextState = "state" in change ? formatState(change.state) : state;
       const next = {
         status: change.status ?? status,
-        state: "state" in change ? formatState(change.state) : state,
+        state: nextState,
         agent: "agent" in change ? pickAgent(change.agent) : agent,
+        // A wait belongs to the state whose Agent is waiting.
+        limit: "limit" in change ? pickLimit(change.limit) : nextState === state ? limit : undefined,
         human: "human" in change ? pickHuman(change.human) : human,
         // A later response must not hide an earlier one from a sender that has yet to look.
         deliveries: change.delivery === undefined ? deliveries : [
@@ -182,9 +197,9 @@ export function createRunStatusPublisher(
         ],
       };
       // Repeated notifications for an unchanged run do not need another write.
-      if (JSON.stringify(next) === JSON.stringify({ status, state, agent, human, deliveries })) return;
+      if (JSON.stringify(next) === JSON.stringify({ status, state, agent, limit, human, deliveries })) return;
       if (next.state !== state) stateSince = new Date().toISOString();
-      ({ status, state, agent, human, deliveries } = next);
+      ({ status, state, agent, limit, human, deliveries } = next);
       publish();
     },
     finish(outcome) {
@@ -198,6 +213,7 @@ export function createRunStatusPublisher(
       }
       stateSince = undefined;
       agent = undefined;
+      limit = undefined;
       human = undefined;
       publish();
       try {
@@ -261,6 +277,7 @@ function isRunStatusRecord(value: unknown): value is RunStatusRecord {
   const record = value as Record<string, unknown>;
   const agent = record.agent as Record<string, unknown> | null | undefined;
   const human = record.human as Record<string, unknown> | null | undefined;
+  const limit = record.limit as Record<string, unknown> | null | undefined;
   return (record.schemaVersion === 1 || record.schemaVersion === 2)
     && typeof record.id === "string" && record.id !== ""
     && Number.isSafeInteger(record.pid) && (record.pid as number) > 0
@@ -279,6 +296,8 @@ function isRunStatusRecord(value: unknown): value is RunStatusRecord {
     && (human === undefined || (human !== null && typeof human === "object" && typeof human.prompt === "string"
       && isOptionalString(human.requestId) && isOptionalStrings(human.choices) && isOptionalStrings(human.suggestions)
       && (human.discussion === undefined || typeof human.discussion === "boolean")))
+    && (limit === undefined || (limit !== null && typeof limit === "object" && typeof limit.text === "string"
+      && isOptionalString(limit.until)))
     && isOptionalStrings(record.deliveries)
     && isOptionalString(record.error)
     && isTimestamp(record.startedAt)
@@ -330,6 +349,11 @@ function pickAgent(agent: RunStatusAgent | undefined): RunStatusAgent | undefine
     ...(agent.model === undefined ? {} : { model: agent.model }),
     ...(agent.thinking === undefined ? {} : { thinking: agent.thinking }),
   };
+}
+
+function pickLimit(limit: RunStatusLimit | undefined): RunStatusLimit | undefined {
+  if (limit === undefined) return undefined;
+  return { text: limit.text, ...(limit.until === undefined ? {} : { until: limit.until }) };
 }
 
 function pickHuman(human: RunStatusHuman | undefined): RunStatusHuman | undefined {

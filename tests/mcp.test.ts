@@ -43,6 +43,18 @@ test("the MCP adapter exposes five tools and one optional UI resource", async (c
   assert.match("text" in content! ? content.text : "", /machine_respond/u);
 });
 
+test("the MCP adapter lists each Agent preset with the presets that take over at a usage limit", async (context) => {
+  const { client, close } = await connectedClient();
+  context.after(close);
+
+  const listed = await client.callTool({
+    name: "machine_agents", arguments: { cwd: resolve("tests/fixtures/agent-limit-project") },
+  });
+  assert.equal(listed.isError, undefined);
+  assert.match(toolText(listed), /^default — .* \(fixture\)\n  .*agents\.ts · fallback: spare$/mu);
+  assert.match(toolText(listed), /^waits — .*\n  .*agents\.ts · fallback: none$/mu);
+});
+
 test("the MCP adapter starts, observes, and responds to a hosted Machine", async (context) => {
   const { client, close } = await connectedClient();
   context.after(close);

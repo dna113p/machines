@@ -63,7 +63,7 @@ The five tools are:
 | Tool | Inputs and result |
 | --- | --- |
 | `machine_list` | Absolute `cwd`; definitions, descriptions, missing Agents, per-file errors |
-| `machine_agents` | Absolute `cwd`; configured Agent preset names and metadata |
+| `machine_agents` | Absolute `cwd`; configured Agent preset names, metadata, and usage-limit fallbacks |
 | `machine_start` | Absolute `cwd`, Machine name, optional input/preset overrides; immediate run snapshot |
 | `machine_status` | Optional exact `runId`; authoritative current-session snapshots |
 | `machine_respond` | Exact `runId`, current `human.requestId`, and response; submits one waiting request |
@@ -197,6 +197,24 @@ say what the run is for, such as a ticket id and title; it is the launcher's
 choice to publish that text. `machine run` exports its run id as
 `MACHINES_RUN_PARENT`, so a Machine started by one of its Operations or Agents
 records that id as `parent`; the status line shows only top-level runs.
+
+While an Agent state waits for a [usage limit](authoring.md#usage-limits) to
+reset, the record stays `running` and carries the wait in `limit`:
+
+```json
+"limit": {
+  "text": "implementer reached its usage limit; waiting for the reset at 2026-10-10T21:00:00Z",
+  "until": "2026-10-10T21:00:00Z"
+}
+```
+
+`text` is a ready one-line summary. `until` is when the wait is expected to end:
+the earliest stated reset, or the end of the wait limit when no reset is stated.
+The field is removed when the Agent resumes or the state is left; a swap between
+presets that are tried again during the wait leaves it in place. It did not
+exist in earlier version 2 records, and readers should ignore fields they do not
+know. `machine runs` prints the summary under the run, and MCP and Pi run
+snapshots carry the same `limit`.
 
 A run waiting for Human input is `waiting` and records the pending request in
 `human`:

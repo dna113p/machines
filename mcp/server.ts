@@ -195,7 +195,8 @@ export class MachineSession {
         const identity = [agent.harness, agent.model, agent.thinking]
           .filter((part) => part !== undefined)
           .join(" · ");
-        return `${agent.name} — ${agent.description}${identity === "" ? "" : ` (${identity})`}\n  ${agent.source}`;
+        const fallback = agent.fallback === undefined ? "" : ` · fallback: ${agent.fallback.join(", ") || "none"}`;
+        return `${agent.name} — ${agent.description}${identity === "" ? "" : ` (${identity})`}\n  ${agent.source}${fallback}`;
       }).join("\n\n");
     return result(text, { agents });
   }
@@ -243,7 +244,9 @@ export class MachineSession {
     const human = run.status === "waiting" ? run.human : undefined;
     this.#watchInbox(run.id, human);
     if (run.status === "running" || run.status === "waiting") {
-      publisher.update({ status: run.status, state: run.state, agent: run.agent, human, delivery: this.#taking });
+      publisher.update({
+        status: run.status, state: run.state, agent: run.agent, limit: run.limit, human, delivery: this.#taking,
+      });
       return;
     }
     publisher.finish(run.status === "completed" ? { state: run.state } : { error: run.error ?? "Machine run failed" });
@@ -364,6 +367,7 @@ function formatSnapshot(run: RunSnapshot): string {
       run.agent.thinking === undefined ? undefined : `thinking ${run.agent.thinking}`,
     ].filter((part) => part !== undefined).join(" · ")}`);
   }
+  if (run.limit !== undefined) lines.push(`Limit: ${run.limit.text}`);
   if (run.human !== undefined) {
     lines.push(`Human: ${run.human.prompt}`, `Request id: ${run.human.requestId}`);
     if (run.human.choices !== undefined) lines.push(`Choices: ${run.human.choices.join(", ")}`);

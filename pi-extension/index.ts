@@ -241,7 +241,8 @@ export default function machinesExtension(pi: PiLike): void {
           const identity = [agent.harness, agent.model, agent.thinking]
             .filter((part) => part !== undefined)
             .join(" · ");
-          return `${agent.name} — ${agent.description}${identity === "" ? "" : ` (${identity})`}\n  ${agent.source}`;
+          const fallback = agent.fallback === undefined ? "" : ` · fallback: ${agent.fallback.join(", ") || "none"}`;
+          return `${agent.name} — ${agent.description}${identity === "" ? "" : ` (${identity})`}\n  ${agent.source}${fallback}`;
         }).join("\n");
       return result(text, {
         summary: `${agents.length} Agent preset${agents.length === 1 ? "" : "s"}`,
@@ -369,6 +370,7 @@ function formatSnapshot(run: RunSnapshot): string {
     `Elapsed: ${run.elapsedSeconds}s`,
   ];
   if (run.agent !== undefined) lines.push(`Agent: ${formatAgent(run.agent)}`);
+  if (run.limit !== undefined) lines.push(`Limit: ${run.limit.text}`);
   if (run.human !== undefined) {
     lines.push(`Human: ${run.human.prompt}`, `Request id: ${run.human.requestId}`);
     if (run.human.choices !== undefined) lines.push(`Choices: ${run.human.choices.join(", ")}`);
@@ -428,6 +430,8 @@ function widgetLines(
       for (const promptLine of run.human.prompt.split("\n")) {
         lines.push(`${edge("│")}   ${theme.fg("warning", promptLine)}`);
       }
+    } else if (run.limit !== undefined) {
+      lines.push(`${edge("│")}   ${theme.fg("warning", run.limit.text)}`);
     } else if (run.agent !== undefined) {
       lines.push(`${edge("│")}   ${theme.fg("muted", formatAgent(run.agent))}`);
     }

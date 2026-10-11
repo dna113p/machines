@@ -3,7 +3,8 @@ import { basename, dirname, isAbsolute, resolve } from "node:path";
 import type { AnyStateMachine, SnapshotFrom } from "xstate";
 
 import { assertJsonValue, type JsonValue } from "./json.ts";
-import type { AgentPreset } from "./agent-bindings.ts";
+import { fallbackPresets, type AgentPreset } from "./agent-bindings.ts";
+import { createLimitMemory, defaultProbeMs, limitAwareRunner, type LimitPolicy } from "./agent-limits.ts";
 import { configuredAgentPresets, type LauncherLocation, type MachineSummary, type AgentPresetSummary } from "./catalog.ts";
 import { queryCatalog } from "./discovery-worker.ts";
 import { loadMachineModule, readAgentRoles, requireMachineDescription } from "./machine-module.ts";
@@ -25,6 +26,15 @@ export interface PrepareMachineRunOptions extends LauncherLocation {
   readonly machine: string;
   readonly input?: JsonValue;
   readonly agents?: Readonly<Record<string, string>>;
+  /**
+   * How this process waits at an Agent usage limit. `waitMinutes` overrides
+   * MACHINES_AGENT_LIMIT_WAIT_MINUTES; a hosted run reads the variable instead.
+   */
+  readonly agentLimits?: {
+    readonly waitMinutes?: number;
+    readonly now?: () => number;
+    readonly sleep?: (milliseconds: number) => Promise<void>;
+  };
 }
 
 export interface PreparedMachineRun {
@@ -64,14 +74,11 @@ export async function prepareMachineRun(
   ) as AnyStateMachine;
   const configured = await configuredAgentPresets(cwd, home);
   const usedAgentRoles = requiredAgentNames(definition);
-  const agents = applyAgentOverrides(
-    path,
-    configured.agents,
-    configured.presets,
-    new Set([...usedAgentRoles, ...Object.keys(agentRoles)]),
-    options.agents ?? {},
-  );
+  const requiredRoles = new Set([...usedAgentRoles, ...Object.keys(agentRoles)]);
+  const overrides = options.agents ?? {};
+  const agents = applyAgentOverrides(path, configured.agents, configured.presets, requiredRoles, overrides);
   preflightAgentRoles(path, usedAgentRoles, agentRoles, agents);
+  const limitAware = limitAwareAgents(requiredRoles, overrides, configured, limitPolicy(options.agentLimits));
 
   let started = false;
   return {
@@ -82,7 +89,7 @@ export async function prepareMachineRun(
     start(runOptions = {}) {
       if (started) throw new Error(`Prepared Machine "${path}" has already started`);
       started = true;
-      return run(definition, { ...runOptions, agents });
+      return run(definition, { ...runOptions, agents: { ...agents, ...limitAware } });
     },
   };
 }
@@ -130,6 +137,78 @@ function applyAgentOverrides(
     resolved[role] = selected.runner;
   }
   return resolved;
+}
+
+/**
+ * Wraps each role the Machine uses or declares so that a usage limit swaps to
+ * the bound preset's fallbacks or waits for a reset. The roles share one memory
+ * of limited presets, kept only for this prepared run.
+ */
+function limitAwareAgents(
+  roles: ReadonlySet<string>,
+  overrides: Readonly<Record<string, string>>,
+  configured: Awaited<ReturnType<typeof configuredAgentPresets>>,
+  policy: LimitPolicy,
+): Readonly<Record<string, AgentRunner>> {
+  const swapping = fallbackEnabled();
+  const memory = createLimitMemory();
+  const wrapped: Record<string, AgentRunner> = {};
+  for (const role of roles) {
+    const bound = Object.hasOwn(overrides, role) ? overrides[role] ?? role : role;
+    // With swapping off a role still waits for its own preset's reset, and names no other preset.
+    const fallback = swapping
+      ? fallbackPresets(bound, presetNamed(configured.presets, bound) ?? {}, configured.fallback) ?? []
+      : [];
+    const candidates = [bound, ...fallback].map((name) => {
+      const preset = presetNamed(configured.presets, name);
+      if (preset === undefined) {
+        const available = Object.keys(configured.presets).sort().join(", ");
+        throw new Error(
+          `Agent preset "${bound}" for role "${role}" falls back to "${name}", which is not a configured preset. Available presets: ${available}`,
+        );
+      }
+      return { name, runner: preset.runner, ...(preset.harness === undefined ? {} : { harness: preset.harness }) };
+    });
+    wrapped[role] = limitAwareRunner(role, candidates, memory, policy);
+  }
+  return wrapped;
+}
+
+function presetNamed(presets: Readonly<Record<string, AgentPreset>>, name: string): AgentPreset | undefined {
+  return Object.hasOwn(presets, name) ? presets[name] : undefined;
+}
+
+function fallbackEnabled(): boolean {
+  const configured = process.env.MACHINES_AGENT_FALLBACK;
+  if (configured === undefined || configured === "" || configured === "on") return true;
+  if (configured === "off") return false;
+  throw new Error(`MACHINES_AGENT_FALLBACK must be "off" or "on", not "${configured}"`);
+}
+
+const defaultLimitWaitMinutes = 360;
+
+function limitPolicy(options: PrepareMachineRunOptions["agentLimits"] = {}): LimitPolicy {
+  const configured = process.env.MACHINES_AGENT_LIMIT_WAIT_MINUTES;
+  let minutes = defaultLimitWaitMinutes;
+  if (options.waitMinutes !== undefined) {
+    if (!Number.isFinite(options.waitMinutes) || options.waitMinutes < 0) {
+      throw new Error("agentLimits.waitMinutes must be a non-negative number of minutes");
+    }
+    minutes = options.waitMinutes;
+  } else if (configured !== undefined && configured !== "") {
+    if (!/^\d+(?:\.\d+)?$/u.test(configured)) {
+      throw new Error(
+        `MACHINES_AGENT_LIMIT_WAIT_MINUTES must be a non-negative number of minutes, not "${configured}"`,
+      );
+    }
+    minutes = Number(configured);
+  }
+  return {
+    maxWaitMs: minutes * 60_000,
+    probeMs: defaultProbeMs,
+    ...(options.now === undefined ? {} : { now: options.now }),
+    ...(options.sleep === undefined ? {} : { sleep: options.sleep }),
+  };
 }
 
 function preflightAgentRoles(

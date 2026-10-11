@@ -145,7 +145,8 @@ use `acpAgent` from `@dna113p/machines/acp` for Pi execution.
 Global presets live in `~/.machines/agents.ts`; project presets replace matching
 global names. Each preset requires a description and runner. Optional `harness`,
 `model`, and `thinking` fields are discovery labels, while the runner reports its
-actual identity during execution. Harness configuration belongs in the runner
+actual identity during execution. Optional `fallback` names the presets that take
+over at a [usage limit](#usage-limits). Harness configuration belongs in the runner
 command, arguments, or `env` option; labels do not change model settings.
 
 Use `machine agents` to inspect configured names. Rebind a role for one run:
@@ -160,6 +161,90 @@ before starting the actor. `machine list` refreshes metadata on each call and
 reports missing bindings or invalid definitions.
 `ready` describes valid metadata and resolved roles; it does not verify that a
 real harness is installed, authenticated, or able to run the requested model.
+
+### Usage limits
+
+A provider usage limit does not have to fail a run. There are three levels, and
+each one is optional:
+
+1. **Nothing to configure.** When an Agent's preset reaches its usage limit, the
+   state waits for the reset and then continues with the same request. It waits
+   when the reset is at most six hours away; a later reset fails the state.
+2. **One list.** Export the presets that may stand in for any other, in order,
+   beside the default export of `agents.ts`:
+
+   ```ts
+   export const fallback = ["claude", "codex"];
+
+   export default () => ({ /* presets */ });
+   ```
+
+   A limited preset hands its request to the first listed preset that is not
+   limited too, skipping its own name. The state waits only when all are limited.
+   A project file's list replaces the global file's list; they are not merged.
+3. **One preset's own chain.** A preset's `fallback` replaces the list for that
+   preset. `[]` means the preset is never swapped:
+
+   ```ts
+   export default ({ claudeAgent }) => ({
+     "claude-opus": {
+       description: "Runs Claude Code with Opus",
+       fallback: ["claude-sonnet", "codex-write"],
+       runner: claudeAgent("claude", [], { model: "opus", output: "capture" }),
+     },
+     publisher: {
+       description: "Publishes the release",
+       fallback: [],
+       runner: claudeAgent("claude", [], { allowedTools: ["Bash(npm publish)"], output: "capture" }),
+     },
+   });
+   ```
+
+A role's chain is the preset it is bound to, after any `--agent role=preset`
+override, followed by that preset's fallbacks. A fallback's own `fallback` is not
+followed, so two presets may name each other. `machine agents` lists each
+preset's fallbacks; outside a terminal they are the last tab-separated column.
+A fallback name that is not a configured preset fails preflight for the Machines
+whose roles would use it, and never breaks a listing.
+
+The replacement starts a new turn: no session or conversation is carried over.
+Files the limited Agent already changed stay in the workspace, so the re-issued
+prompt ends with a note that a previous Agent was interrupted by a usage limit,
+and asks the new one to inspect the current state and continue the same
+assignment rather than start over. The allowed outcomes and working directory are
+unchanged. An action the first Agent completed outside the workspace, such as
+sending a message or publishing a package, could be repeated; give a preset that
+performs one `fallback: []`. A swapped preset runs with its own harness, model,
+and permissions, which may be wider or narrower than those of the preset the
+role names. List only presets you would accept for the same work.
+
+Within one run, a preset found at its limit is not tried again by any role until
+its reset. A limit with no stated reset, such as Codex's, is tried again with the
+real request every 15 minutes. Nothing is remembered between runs. When no preset
+becomes available in time, the state fails with an `AgentLimitError` whose
+message names each preset tried, and whose `limits` lists each one's limit.
+
+Two environment variables adjust this for a run:
+
+- `MACHINES_AGENT_LIMIT_WAIT_MINUTES`: the longest one Agent state waits, `360`
+  by default. `0` never waits.
+- `MACHINES_AGENT_FALLBACK=off`: never swap, whatever is configured. A limited
+  state still waits for its own preset, and fallback names are not checked. Use
+  it when a result must be attributable to the preset that was asked for, as in
+  an evaluation.
+
+The run reports each swap, wait, and resumption as a one-line Agent update:
+`machine run` shows it under the state, and prints it as one line on stderr
+outside a terminal. A waiting run stays `running`; `machine runs`, the MCP and Pi
+status, and the [run-status record](integrations.md#run-status-for-host-status-lines)
+show the same line until the Agent resumes. A wait is reported once, however
+often a preset is tried again, and ends when a preset makes its first tool call
+or finishes its turn. Trying the presets again during a wait still reports each
+swap from one to the next, and the wait stays shown. The Claude Code and Codex runners
+recognise their limits. A custom runner takes part by throwing the
+`AgentLimitError` passed to the `agents.ts` function. All of this belongs to the
+launcher, so `machine run` and hosted runs have it; a direct `run()` call uses
+exactly the runners it is given.
 
 ### Antigravity (AGY)
 

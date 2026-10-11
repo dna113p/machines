@@ -18,12 +18,19 @@ const maximumCauseDepth = 8;
 /** Thrown by an Agent runner when the provider refuses a turn because a usage limit is reached. */
 export class AgentLimitError extends Error {
   readonly limit: AgentLimit;
+  /** Every limit behind the failure when several presets were tried, each naming its preset in `agent`. */
+  readonly limits?: readonly AgentLimit[];
   readonly [brand] = true;
 
-  constructor(message: string, limit: AgentLimit, options?: ErrorOptions) {
+  constructor(
+    message: string,
+    limit: AgentLimit,
+    options?: ErrorOptions & { readonly limits?: readonly AgentLimit[] },
+  ) {
     super(message, options);
     this.name = "AgentLimitError";
     this.limit = limit;
+    if (options?.limits !== undefined) this.limits = options.limits;
   }
 }
 

@@ -1,4 +1,4 @@
-import { loadAgentBindings, type AgentPreset } from "./agent-bindings.ts";
+import { fallbackPresets, loadAgentBindings, type AgentPreset } from "./agent-bindings.ts";
 import { acpAgent } from "./acp.ts";
 import { AgentLimitError } from "./agent-limit.ts";
 import { agyAgent } from "./agy.ts";
@@ -30,6 +30,8 @@ export interface AgentPresetSummary {
   readonly harness?: string;
   readonly model?: string;
   readonly thinking?: string;
+  /** The presets that take over at a usage limit, in order; absent when none is configured. */
+  readonly fallback?: readonly string[];
   readonly source: string;
 }
 
@@ -42,6 +44,7 @@ interface ResolvedAgentPresets {
   readonly agents: Readonly<Record<string, AgentRunner>>;
   readonly presets: Readonly<Record<string, AgentPreset>>;
   readonly sources: Readonly<Record<string, string>>;
+  readonly fallback?: readonly string[];
 }
 
 export async function inspectMachines(
@@ -83,14 +86,18 @@ export async function inspectAgentPresets(
   const configured = await configuredAgentPresets(cwd, home);
 
   return Object.entries(configured.presets)
-    .map(([name, preset]) => ({
-      name,
-      description: preset.description,
-      ...(preset.harness === undefined ? {} : { harness: preset.harness }),
-      ...(preset.model === undefined ? {} : { model: preset.model }),
-      ...(preset.thinking === undefined ? {} : { thinking: preset.thinking }),
-      source: configured.sources[name] ?? "unknown",
-    }))
+    .map(([name, preset]) => {
+      const fallback = fallbackPresets(name, preset, configured.fallback);
+      return {
+        name,
+        description: preset.description,
+        ...(preset.harness === undefined ? {} : { harness: preset.harness }),
+        ...(preset.model === undefined ? {} : { model: preset.model }),
+        ...(preset.thinking === undefined ? {} : { thinking: preset.thinking }),
+        ...(fallback === undefined ? {} : { fallback }),
+        source: configured.sources[name] ?? "unknown",
+      };
+    })
     .sort((left, right) => left.name.localeCompare(right.name));
 }
 
@@ -180,6 +187,7 @@ export async function configuredAgentPresets(
       default: "built in", agy: "built in", claude: "built in", codex: "built in", "chatgpt-web": "built in", deepseek: "built in", jev: "built in",
       "openrouter-decision": "built in", laya: "built in", von: "built in", ...configured.sources,
     },
+    ...(configured.fallback === undefined ? {} : { fallback: configured.fallback }),
   };
 }
 

@@ -76,6 +76,18 @@ export type AgentUpdate =
     readonly id: string;
     readonly title?: string;
     readonly status?: "pending" | "in_progress" | "completed" | "failed";
+  }
+  | {
+    /** A usage limit changed which preset runs this Agent, or made it wait. `text` is a ready one-line summary. */
+    readonly type: "limit";
+    readonly status: "swapped" | "waiting" | "resumed";
+    /** The limited preset. */
+    readonly agent: string;
+    /** The preset that continues the request. */
+    readonly to?: string;
+    /** ISO time the wait is expected to end. */
+    readonly until?: string;
+    readonly text: string;
   };
 
 export type AgentReporter = (update: AgentUpdate) => void;

@@ -93,6 +93,28 @@ test("a host reports harness-neutral Agent updates", async () => {
   ]);
 });
 
+test("a host reports an Agent usage limit and the preset that takes over", async () => {
+  const updates: unknown[] = [];
+  const hosted = await startMachineHost({
+    cwd: resolve("tests/fixtures/agent-limit-project"),
+    home: resolve("tests/fixtures/empty-home"),
+    machine: "work",
+    onAgentUpdate: (update) => updates.push(update),
+  });
+
+  assert.deepEqual(await hosted.result, { state: "done" });
+  assert.deepEqual(updates, [
+    {
+      type: "limit",
+      status: "swapped",
+      agent: "default",
+      to: "spare",
+      text: "default reached its usage limit (resets 2099-01-01T00:00:00Z); continuing with spare",
+    },
+    { type: "identity", harness: "spare" },
+  ]);
+});
+
 test("a hosted Machine reports execution failure", async () => {
   const hosted = await startMachineHost({ machine: fixture, input: "fail" });
 

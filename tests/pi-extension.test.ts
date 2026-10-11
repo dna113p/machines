@@ -71,7 +71,7 @@ class FakeUi {
   }
 }
 
-function setup() {
+function setup(cwd = resolve("tests/fixtures/pi-project")) {
   const tools = new Map<string, RegisteredTool>();
   let shutdown: ((event: unknown, context: Context) => void | Promise<void>) | undefined;
   machinesExtension({
@@ -84,7 +84,7 @@ function setup() {
     },
   });
   const ui = new FakeUi();
-  const context = { cwd: resolve("tests/fixtures/pi-project"), ui };
+  const context = { cwd, ui };
   const execute = (name: string, params: Record<string, unknown> = {}) => {
     const tool = tools.get(name);
     if (tool === undefined) throw new Error(`Tool ${name} was not registered`);
@@ -125,6 +125,24 @@ test("lists discoverable Machines and configured Agent presets", async () => {
   assert.match(machines.content[0].text, /wait — Waits for a deterministic Human decision/u);
   assert.match(agents.content[0].text, /fast — A deterministic Agent preset/u);
   assert.match(agents.content[0].text, /fixture · tiny · low/u);
+});
+
+test("lists usage-limit fallbacks and shows a run that waits for a reset", async () => {
+  const extension = setup(resolve("tests/fixtures/agent-limit-project"));
+  const agents = await extension.execute("machine_agents");
+  assert.match(agents.content[0].text, /^default — .* \(fixture\)\n  .*agents\.ts · fallback: spare$/mu);
+  assert.match(agents.content[0].text, /^waits — .*\n  .*agents\.ts · fallback: none$/mu);
+
+  const started = await extension.execute("machine_start", { machine: "work", agents: { default: "waits" } });
+  await eventually(async () => {
+    const status = await extension.execute("machine_status", { runId: runId(started) });
+    const [run] = statusRuns(status);
+    assert.equal(run?.status, "running");
+    const limit = "waits (role default) reached its usage limit; waiting for the reset at ";
+    assert.ok(status.content[0].text.includes(`\nLimit: ${limit}`));
+    assert.ok(extension.ui.widget?.some((line) => line.includes(limit)));
+  });
+  await extension.shutdown();
 });
 
 test("starts two concurrent runs, reports both, and responds by exact id", async () => {

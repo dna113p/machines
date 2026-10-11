@@ -64,6 +64,14 @@ const agentUpdateSchema = v.variant("type", [
     title: v.optional(v.string()),
     status: v.optional(v.picklist(["pending", "in_progress", "completed", "failed"])),
   }),
+  v.strictObject({
+    type: v.literal("limit"),
+    status: v.picklist(["swapped", "waiting", "resumed"]),
+    agent: v.string(),
+    to: v.optional(v.string()),
+    until: v.optional(v.string()),
+    text: v.string(),
+  }),
 ]);
 
 const stateValueSchema = v.union([

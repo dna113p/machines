@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -181,6 +181,160 @@ test("updates replace the record atomically until a terminal outcome", async (co
   );
 });
 
+test("a wait for an Agent usage limit is published until the Agent resumes or the state is left", async (context) => {
+  const directory = await temporaryDirectory(context);
+  const read = async (): Promise<RunStatusRecord> => JSON.parse(await readFile(join(directory, "limited.json"), "utf8"));
+  const publisher = createRunStatusPublisher({ ...run, id: "limited" }, { MACHINES_RUN_STATUS_DIR: directory });
+  const waiting = { text: "claude reached its usage limit; waiting for the reset at 2026-10-10T21:00:00Z", until: "2026-10-10T21:00:00Z" };
+
+  publisher.update({ state: "implement", agent: { harness: "claude" } });
+  assert.equal("limit" in await read(), false);
+  publisher.update({ limit: { ...waiting, status: "waiting", agent: "claude" } as typeof waiting });
+  let record = await read();
+  assert.deepEqual(record.limit, waiting);
+  // The run is working, not asking: `waiting` is reserved for Human input.
+  assert.deepEqual({ status: record.status, schemaVersion: record.schemaVersion }, { status: "running", schemaVersion: 2 });
+  assert.deepEqual(readRunStatuses(directory).map((found) => found.limit), [waiting]);
+
+  publisher.update({ state: "implement", agent: { harness: "claude" } });
+  assert.deepEqual((await read()).limit, waiting, "an update within the state keeps the wait");
+  publisher.update({ limit: undefined });
+  assert.equal("limit" in await read(), false, "resuming clears it");
+
+  publisher.update({ limit: { text: "codex reached its usage limit; no reset is stated, retrying until 2026-10-11T02:00:00Z" } });
+  assert.deepEqual(Object.keys((await read()).limit!), ["text"]);
+  publisher.update({ state: "review" });
+  record = await read();
+  assert.equal("limit" in record, false, "leaving the state clears it");
+
+  publisher.update({ limit: waiting });
+  publisher.finish({ error: "Agent failed" });
+  assert.equal("limit" in await read(), false);
+});
+
+test("a hosted run that waits for a usage limit shows it in its snapshot, its record, and machine runs", async (context) => {
+  const directory = await temporaryDirectory(context);
+  const previous = process.env.MACHINES_RUN_STATUS_DIR;
+  process.env.MACHINES_RUN_STATUS_DIR = directory;
+  const session = new McpSession();
+  context.after(() => {
+    session.close();
+    if (previous === undefined) delete process.env.MACHINES_RUN_STATUS_DIR;
+    else process.env.MACHINES_RUN_STATUS_DIR = previous;
+  });
+  const started = await session.start({
+    cwd: resolve("tests/fixtures/agent-limit-project"), machine: "work", agents: { default: "waits" },
+  });
+  const { id } = (started.structuredContent as { run: { id: string } }).run;
+  const published = () => readRunStatuses(directory).find((record) => record.id === id);
+
+  await eventually(() => assert.ok(published()?.limit !== undefined));
+  const record = published()!;
+  assert.deepEqual({ status: record.status, state: record.state }, { status: "running", state: "work" });
+  assert.match(record.limit!.text, /^waits \(role default\) reached its usage limit; waiting for the reset at \d{4}-.*Z$/u);
+  assert.ok(Date.parse(record.limit!.until!) > Date.now());
+
+  const status = session.status({ runId: id });
+  assert.deepEqual((status.structuredContent as { runs: Array<{ status: string; limit: unknown }> }).runs.map(
+    ({ status: reported, limit }) => ({ status: reported, limit }),
+  ), [{ status: "running", limit: record.limit }]);
+  assert.ok((status.content[0] as { text: string }).text.includes(`\nLimit: ${record.limit!.text}`));
+
+  const listed = spawnSync(process.execPath, [resolve("src/cli.ts"), "runs"], {
+    encoding: "utf8", env: { ...process.env, MACHINES_RUN_STATUS_DIR: directory },
+  });
+  assert.equal(listed.stdout, `${id}\twork\trunning\twork\n  ${record.limit!.text}\n`, listed.stderr);
+
+  session.close();
+  assert.deepEqual(
+    { status: published()!.status, limit: published()!.limit },
+    { status: "failed", limit: undefined },
+  );
+});
+
+test("a published wait survives the swaps of its probes, in a hosted run and in machine run", async (context) => {
+  const root = await temporaryDirectory(context);
+  const release = join(root, "release");
+  await mkdir(join(root, ".machines"));
+  // Both presets are limited with no stated reset, so the wait ends in one probe of each when the wait limit is
+  // up. The fallback then answers, and holds its turn until the test has looked at what is published.
+  await writeFile(join(root, ".machines", "agents.ts"), [
+    'import { existsSync } from "node:fs";',
+    "export default function agents({ AgentLimitError }) {",
+    "  let calls = 0;",
+    '  const limit = (harness) => new AgentLimitError("Out of quota", { harness });',
+    "  return {",
+    '    default: { description: "Stays limited.", fallback: ["spare"], runner: () => { throw limit("fixture"); } },',
+    '    spare: { description: "Answers its second call.", runner: async (_request, report) => {',
+    '      if (++calls === 1) throw limit("spare");',
+    '      report?.({ type: "identity", harness: "spare-again" });',
+    `      while (!existsSync(${JSON.stringify(release)})) await new Promise((resolve) => setTimeout(resolve, 10));`,
+    '      return { type: "completed" };',
+    "    } },",
+    "  };",
+    "}",
+  ].join("\n"));
+  await writeFile(join(root, ".machines", "work.ts"), [
+    'export const description = "Runs one Agent whose presets are at a usage limit.";',
+    "export default function work({ agent, final, machine }) {",
+    '  return machine({ initial: "work", states: { work: agent("Do the work.", { completed: "done" }), done: final() } });',
+    "}",
+  ].join("\n"));
+  const waiting = /^default and its fallback \(spare\) reached their usage limits; no reset is stated, retrying until .*Z$/u;
+  const swapped = "default reached its usage limit (reset unknown); continuing with spare";
+  const hosted = join(root, "hosted");
+  const previous = { ...process.env };
+  process.env.MACHINES_RUN_STATUS_DIR = hosted;
+  process.env.MACHINES_AGENT_LIMIT_WAIT_MINUTES = "0.01";
+  process.env.HOME = join(root, "home");
+  const session = new McpSession();
+  context.after(() => {
+    session.close();
+    for (const key of ["MACHINES_RUN_STATUS_DIR", "MACHINES_AGENT_LIMIT_WAIT_MINUTES", "HOME"]) {
+      if (previous[key] === undefined) delete process.env[key];
+      else process.env[key] = previous[key];
+    }
+  });
+
+  const started = await session.start({ cwd: root, machine: "work" });
+  const { id } = (started.structuredContent as { run: { id: string } }).run;
+  type Shown = { status: string; agent?: { harness: string }; limit?: { text: string } };
+  const shown = () => (session.status({ runId: id }).structuredContent as { runs: Shown[] }).runs[0]!;
+  // The fallback is running again: the probe has swapped to it, and it has yet to resume.
+  await eventually(() => assert.equal(shown().agent?.harness, "spare-again"));
+  assert.match(shown().limit?.text ?? "", waiting);
+  let record = readRunStatuses(hosted).find((found) => found.id === id)!;
+  assert.deepEqual({ status: record.status, agent: record.agent }, { status: "running", agent: { harness: "spare-again" } });
+  assert.equal(record.limit?.text, shown().limit!.text);
+  await writeFile(release, "");
+  await eventually(() => assert.equal(shown().status, "completed"));
+  assert.equal(shown().limit, undefined);
+  assert.equal("limit" in JSON.parse(await readFile(join(hosted, `${id}.json`), "utf8")), false);
+
+  await rm(release);
+  const direct = join(root, "direct");
+  const inherited = { ...process.env };
+  for (const key of ["MACHINES_RUN_OWNER", "CLAUDE_CODE_SESSION_ID"]) delete inherited[key];
+  const child = spawn(process.execPath, [resolve("src/cli.ts"), "run", "work"], {
+    cwd: root, env: { ...inherited, MACHINES_RUN_STATUS_DIR: direct }, stdio: ["ignore", "ignore", "pipe"],
+  });
+  let stderr = "";
+  child.stderr.setEncoding("utf8").on("data", (text: string) => { stderr += text; });
+  const exited = new Promise<number | null>((done) => { child.on("close", done); });
+  context.after(() => { child.kill(); });
+  await eventually(() => assert.equal(readRunStatuses(direct)[0]?.agent?.harness, "spare-again", stderr));
+  record = readRunStatuses(direct)[0]!;
+  assert.equal(record.status, "running");
+  assert.match(record.limit?.text ?? "", waiting);
+  await writeFile(release, "");
+  assert.equal(await exited, 0, stderr);
+  const lines = stderr.split("\n").filter((line) => line.includes("usage limit"));
+  assert.deepEqual([lines[0], lines[2], lines[3]], [swapped, swapped, "default waited for a usage limit to reset; continuing with spare"]);
+  assert.match(lines[1]!, waiting);
+  assert.equal(lines.length, 4, stderr);
+  assert.equal("limit" in JSON.parse(await readFile(join(direct, `${record.id}.json`), "utf8")), false);
+});
+
 test("an unusable directory never fails the run it describes", async (context) => {
   const root = await temporaryDirectory(context);
   await writeFile(join(root, "file"), "not a directory");
@@ -267,6 +421,9 @@ test("reading skips unreadable and malformed files", async (context) => {
     { human: { prompt: "Approve?", discussion: "yes" } },
     { deliveries: "delivery-1" },
     { owner: 7 },
+    { limit: "soon" },
+    { limit: { until: "2026-10-10T21:00:00Z" } },
+    { limit: { text: "Waiting", until: 7 } },
   ];
   for (const [index, change] of invalid.entries()) {
     await writeRecord(directory, { id: `invalid-${index}`, ...change } as Partial<RunStatusRecord>);

@@ -11,17 +11,21 @@ export interface AgentPreset {
   readonly harness?: string;
   readonly model?: string;
   readonly thinking?: string;
+  /** Presets that take over at a usage limit, in order, instead of the shared list. `[]` never swaps. */
+  readonly fallback?: readonly string[];
 }
 
 export interface LoadedAgentBindings {
   readonly agents: Readonly<Record<string, AgentRunner>>;
   readonly presets: Readonly<Record<string, AgentPreset>>;
   readonly sources: Readonly<Record<string, string>>;
+  /** The shared fallback list from the nearest file that exports one. */
+  readonly fallback?: readonly string[];
 }
 
 export type AgentAdapters = Readonly<Record<string, unknown>>;
 
-const presetFields = new Set(["description", "runner", "harness", "model", "thinking"]);
+const presetFields = new Set(["description", "runner", "harness", "model", "thinking", "fallback"]);
 
 export async function loadAgentBindings(
   cwd = process.cwd(),
@@ -39,24 +43,36 @@ export async function loadAgentBindings(
   const agents: Record<string, AgentRunner> = {};
   const presets: Record<string, AgentPreset> = {};
   const sources: Record<string, string> = {};
+  let fallback: readonly string[] | undefined;
 
   for (const path of paths) {
     if (!await isFile(path)) continue;
-    const bindings = await loadBindingFile(path, adapters);
-    for (const [name, preset] of Object.entries(bindings)) {
+    const loaded = await loadBindingFile(path, adapters);
+    for (const [name, preset] of Object.entries(loaded.presets)) {
       agents[name] = preset.runner;
       presets[name] = preset;
       sources[name] = path;
     }
+    // The nearer file's list replaces the other; the lists are never merged.
+    fallback = loaded.fallback ?? fallback;
   }
 
-  return { agents, presets, sources };
+  return { agents, presets, sources, ...(fallback === undefined ? {} : { fallback }) };
+}
+
+/** The presets that take over from one preset at a usage limit: its own chain, else the shared list without itself. */
+export function fallbackPresets(
+  name: string,
+  preset: Pick<AgentPreset, "fallback">,
+  shared: readonly string[] | undefined,
+): readonly string[] | undefined {
+  return preset.fallback ?? shared?.filter((other) => other !== name);
 }
 
 async function loadBindingFile(
   path: string,
   adapters: AgentAdapters,
-): Promise<Readonly<Record<string, AgentPreset>>> {
+): Promise<{ readonly presets: Readonly<Record<string, AgentPreset>>; readonly fallback?: readonly string[] }> {
   let loaded: unknown;
   try {
     loaded = await import(pathToFileURL(path).href);
@@ -106,9 +122,30 @@ async function loadBindingFile(
       ...optionalField(candidate.harness, "harness", name, path),
       ...optionalField(candidate.model, "model", name, path),
       ...optionalField(candidate.thinking, "thinking", name, path),
+      ...(candidate.fallback === undefined
+        ? {}
+        : { fallback: fallbackNames(candidate.fallback, `Agent preset "${name}" fallback in "${path}"`, name) }),
     };
   }
-  return bindings;
+  const shared = (loaded as { readonly fallback?: unknown }).fallback;
+  return {
+    presets: bindings,
+    ...(shared === undefined ? {} : { fallback: fallbackNames(shared, `Agent bindings "${path}" fallback export`) }),
+  };
+}
+
+function fallbackNames(value: unknown, subject: string, self?: string): readonly string[] {
+  if (!Array.isArray(value)) throw new Error(`${subject} must be an array of preset names`);
+  const names: string[] = [];
+  for (const name of value as readonly unknown[]) {
+    if (typeof name !== "string" || name.trim() === "" || name !== name.trim() || /\r|\n|\t/u.test(name)) {
+      throw new Error(`${subject} must contain only non-empty, trimmed, one-line preset names`);
+    }
+    if (names.includes(name)) throw new Error(`${subject} names "${name}" more than once`);
+    if (name === self) throw new Error(`${subject} must not name the preset itself`);
+    names.push(name);
+  }
+  return names;
 }
 
 function optionalField(
