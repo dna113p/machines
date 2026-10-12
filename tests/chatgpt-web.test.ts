@@ -1,8 +1,6 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { createServer as createSecureServer, type Server as SecureServer } from "node:https";
+import { createServer, type Server } from "node:http";
 import { type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -15,44 +13,27 @@ import {
   chatGptWebPrompt,
   fetchLatestRigBridgeHandoff,
   fetchRigBridgeStatus,
-  findChromeExecutable,
   rigBridgeHandoffOperation,
   type ChatGptWebAgentOptions,
 } from "../src/chatgpt-web.ts";
 import type { AgentUpdate } from "../src/index.ts";
 import { listAgentPresets } from "../src/launcher.ts";
+import { startFakeBrowser, type FakeBrowser } from "./fixtures/fake-browser.ts";
 
 const page = await readFile(resolve("tests/fixtures/fake-chatgpt.html"), "utf8");
-const executable = await findChromeExecutable();
+const earlierPage = page.replace('data-markup="current"', 'data-markup="earlier"');
 const workspace = await mkdtemp(join(tmpdir(), "machines-chatgpt-web-"));
 const request = { prompt: "Fix the failing test", outcomes: ["completed", "blocked"], cwd: workspace };
 
-// chatGptWebContinue only accepts https://chatgpt.com conversations, so the test
-// browser resolves that host to a local TLS listener serving the same fake page.
-const certificate = await (async () => {
-  const directory = await mkdtemp(join(tmpdir(), "machines-chatgpt-tls-"));
-  try {
-    execFileSync("openssl", [
-      "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=chatgpt.com",
-      "-keyout", join(directory, "key.pem"), "-out", join(directory, "cert.pem"),
-    ], { stdio: "ignore" });
-    return { key: await readFile(join(directory, "key.pem")), cert: await readFile(join(directory, "cert.pem")) };
-  } catch {
-    return undefined;
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
-})();
-
 let server: Server;
-let secure: SecureServer | undefined;
+let browser: FakeBrowser;
 let base: string;
-let profile: string;
 let cdpUrl: string;
 const readHandoffs = new Set<string>();
 const started = Date.now();
-/** What the fake page reported: each send click and each tool approval. */
+/** What the fake page reported: each send click, tool approval, and change of address. */
 const pageEvents: { kind: string; text: string; at: number }[] = [];
+const reported = (kind: string) => pageEvents.filter(event => event.kind === kind);
 
 const handoff = (id: string, threadId: string, createdAt: number, projectId = "p-1") => ({
   id, projectId, threadId, reason: "needs_input", summary: `Summary of ${id}`, createdAt, readAt: null,
@@ -69,34 +50,28 @@ const defaultNotifications = (now: number): unknown[] => [
   },
 ];
 let notifications = defaultNotifications;
+/** The fake page has ChatGPT's markup as it is today, or as it was before. */
+let markup: "current" | "earlier" = "current";
 
 beforeEach(() => {
   pageEvents.length = 0;
+  readHandoffs.clear();
   notifications = defaultNotifications;
+  markup = "current";
 });
 
-async function freePort(): Promise<number> {
-  const probe = createServer();
-  await new Promise<void>(done => probe.listen(0, "127.0.0.1", done));
-  const { port } = probe.address() as AddressInfo;
-  await new Promise(done => probe.close(done));
-  return port;
+/** Runs a test against both markups, since a rollout may not have reached every account. */
+function onBothPages(name: string, run: () => Promise<void>): void {
+  for (const served of ["current", "earlier"] as const) {
+    test(`${name} (${served} page)`, async () => {
+      markup = served;
+      await run();
+    });
+  }
 }
 
 before(async () => {
-  let opened: number | undefined;
-  const handler = (req: IncomingMessage, res: ServerResponse) => {
-    if (req.url === "/page-events" && req.method === "POST") {
-      const chunks: Buffer[] = [];
-      req.on("data", chunk => chunks.push(chunk));
-      req.on("end", () => {
-        const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { kind: string; text: string };
-        pageEvents.push({ kind: body.kind, text: body.text, at: Date.now() });
-        res.writeHead(204);
-        res.end();
-      });
-      return;
-    }
+  server = createServer((req, res) => {
     if (req.url === "/api/handoffs/read" && req.method === "POST") {
       const chunks: Buffer[] = [];
       req.on("data", chunk => chunks.push(chunk));
@@ -143,57 +118,35 @@ before(async () => {
       }));
       return;
     }
-    res.writeHead(200, { "content-type": "text/html" });
-    res.end(page);
-  };
-  server = createServer(handler);
+    res.writeHead(404);
+    res.end();
+  });
   await new Promise<void>(done => server.listen(0, "127.0.0.1", done));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  if (certificate !== undefined) {
-    const listener = createSecureServer(certificate, handler);
-    await new Promise<void>(done => listener.listen(0, "127.0.0.1", done));
-    secure = listener;
-  }
-  profile = await mkdtemp(join(tmpdir(), "machines-chatgpt-profile-"));
-  cdpUrl = `http://127.0.0.1:${await freePort()}`;
+  // No browser is started. Tabs open in a fake DevTools endpoint that loads the fake page whatever
+  // their address, so the chatgpt.com addresses in these tests are never contacted.
+  browser = await startFakeBrowser({
+    page: () => markup === "earlier" ? earlierPage : page,
+    fetch: (url, init) => {
+      if (url.pathname !== "/page-events") return;
+      const body = JSON.parse(init.body ?? "") as { kind: string; text: string };
+      pageEvents.push({ kind: body.kind, text: body.text, at: Date.now() });
+    },
+  });
+  cdpUrl = browser.cdpUrl;
 });
 
 after(async () => {
-  // The runner leaves its browser running for reuse; tests own this temporary one.
-  try {
-    const version = await (await fetch(`${cdpUrl}/json/version`)).json() as { webSocketDebuggerUrl: string };
-    const socket = new WebSocket(version.webSocketDebuggerUrl);
-    await new Promise(done => socket.addEventListener("open", done, { once: true }));
-    socket.send(JSON.stringify({ id: 1, method: "Browser.close" }));
-    await new Promise(done => socket.addEventListener("close", done, { once: true }));
-  } catch { /* the browser was never started */ }
+  await browser.close();
   await new Promise(done => server.close(done));
-  if (secure !== undefined) {
-    secure.closeAllConnections();
-    await new Promise(done => secure!.close(done));
-  }
-  await rm(profile, { recursive: true, force: true, maxRetries: 5 });
   await rm(workspace, { recursive: true, force: true });
 });
 
-// Every test shares one browser, so whichever launches it must map chatgpt.com for the continuation tests.
-const launch = () => ({
-  headless: true,
-  userDataDir: profile,
-  args: [
-    "--disable-gpu",
-    ...(secure === undefined ? [] : [
-      `--host-resolver-rules=MAP chatgpt.com 127.0.0.1:${(secure.address() as AddressInfo).port}`,
-      "--ignore-certificate-errors",
-    ]),
-  ],
-  ...(executable === undefined ? {} : { executable }),
-});
-
 const runner = (scenario: string, options: ChatGptWebAgentOptions = {}) => chatGptWebAgent({
-  url: `${base}/?scenario=${scenario}`,
+  url: `https://chatgpt.com/?scenario=${scenario}`,
   cdpUrl,
-  launch: launch(),
+  // Without the fake endpoint a run fails; it never starts a browser of its own.
+  launch: false,
   bridgeStatusUrl: `${base}/api/status`,
   settleMs: 300,
   pollMs: 100,
@@ -243,7 +196,7 @@ test("ChatGPT Web is a built-in preset and an Agent binding adapter", async () =
   }
 });
 
-test("ChatGPT Web enables the connector, submits the task, captures handoff, and returns the final event", { skip: executable === undefined && "no Chromium browser" }, async () => {
+onBothPages("ChatGPT Web enables the connector, submits the task, captures handoff, and returns the final event", async () => {
   const updates: AgentUpdate[] = [];
   const event = await runner("normal")(request, update => updates.push(update));
   assert.equal(event.type, "completed");
@@ -267,21 +220,21 @@ test("ChatGPT Web enables the connector, submits the task, captures handoff, and
     && update.title?.endsWith("/c/fake-conversation")));
 });
 
-test("ChatGPT Web falls back to work_handoff reason when MACHINES_EVENT line is omitted", { skip: executable === undefined && "no Chromium browser" }, async () => {
+onBothPages("ChatGPT Web falls back to work_handoff reason when MACHINES_EVENT line is omitted", async () => {
   const event = await runner("handoff-no-event")(request);
   assert.equal(event.type, "completed");
   assert.equal(event.summary, "Fixed test and passed verification");
   assert.equal(event.handoff?.id, "h-1");
 });
 
-test("ChatGPT Web falls back to typed input when paste is not handled", { skip: executable === undefined && "no Chromium browser" }, async () => {
+onBothPages("ChatGPT Web falls back to typed input when paste is not handled", async () => {
   const event = await runner("no-paste", { selectConnector: false })(request);
   assert.equal(event.type, "completed");
   assert.equal(event.connector, false);
   assert.ok(typeof event.prompt === "string" && event.prompt.includes("Fix the failing test"));
 });
 
-test("ChatGPT Web approves tool confirmations only when allowed", { skip: executable === undefined && "no Chromium browser" }, async () => {
+onBothPages("ChatGPT Web approves tool confirmations only when allowed", async () => {
   const event = await runner("approve", { approveToolCalls: true })(request);
   assert.equal(event.type, "completed");
   const updates: AgentUpdate[] = [];
@@ -292,9 +245,78 @@ test("ChatGPT Web approves tool confirmations only when allowed", { skip: execut
   assert.ok(updates.some(update => update.type === "output" && update.text.includes("waiting for tool approval")));
 });
 
-test("ChatGPT Web reports replies without a Machines event and without a handoff", { skip: executable === undefined && "no Chromium browser" }, async () => {
+onBothPages("ChatGPT Web reports replies without a Machines event and without a handoff", async () => {
   // If statusUrl is disabled, no handoff is observed and missing MACHINES_EVENT fails as expected
   await assert.rejects(async () => runner("no-event", { bridgeStatusUrl: false })(request), /finished without returning a Machines event/u);
+});
+
+test("ChatGPT Web returns the lasting address of a chat that first shows a temporary one", async () => {
+  const updates: AgentUpdate[] = [];
+  const event = await runner("temporary-address")(request, update => updates.push(update));
+  assert.deepEqual(reported("address").map(({ text }) => text), [
+    "/c/local-chatgpt%3A570c498e-7d4a-48a1-8e7a-d7367e869bf0",
+    "/c/fake-conversation",
+  ]);
+  assert.equal(event.type, "completed");
+  assert.equal(event.conversation, "https://chatgpt.com/c/fake-conversation");
+  assert.equal(event.summary, "Fixed test and passed verification");
+  assert.ok(!JSON.stringify([event.conversation, updates]).includes("local-chatgpt"), "the temporary address was reported");
+  const tools = updates.filter(update => update.type === "tool").filter(update => update.id === "chatgpt-conversation");
+  assert.ok(tools.length > 0 && tools.every(update => update.title === "ChatGPT conversation https://chatgpt.com/c/fake-conversation"));
+  assert.equal(tools.at(-1)?.status, "completed");
+});
+
+test("ChatGPT Web returns no conversation when the chat never shows a lasting address", async () => {
+  const updates: AgentUpdate[] = [];
+  const event = await runner("no-lasting-address")(request, update => updates.push(update));
+  assert.deepEqual(reported("address").map(({ text }) => text), ["/c/local-chatgpt%3A570c498e-7d4a-48a1-8e7a-d7367e869bf0"]);
+  assert.equal(event.type, "completed");
+  assert.ok(!("conversation" in event));
+  assert.equal(event.handoff?.id, "h-1");
+  assert.match(event.summary ?? "", /^Fixed test and passed verification\nChatGPT did not show the chat's lasting address/u);
+  assert.ok(updates.some(update => update.type === "output" && update.text.includes("did not show the chat's lasting address")));
+  assert.ok(!updates.some(update => update.type === "tool" && update.id === "chatgpt-conversation"));
+  assert.ok(!JSON.stringify([event.summary, event.handoff, updates.filter(update => update.type === "tool")]).includes("local-chatgpt"));
+
+  // A failed run does not name the temporary address either.
+  await assert.rejects(
+    async () => runner("no-lasting-address", { timeoutMs: 400 })(request),
+    (error: Error) => {
+      assert.match(error.message, /did not finish within 400 ms/u);
+      assert.ok(!error.message.includes("Conversation:"));
+      return true;
+    },
+  );
+});
+
+test("ChatGPT Web does not return a conversation address the assistant wrote in its event", async () => {
+  const updates: AgentUpdate[] = [];
+  const event = await runner("written-address")(request, update => updates.push(update));
+  // The reply's event line carried the temporary address, and the page never showed a lasting one.
+  assert.ok(updates.some(update => update.type === "output"
+    && update.text.includes('"conversation":"https://chatgpt.com/c/local-chatgpt%3A570c498e-7d4a-48a1-8e7a-d7367e869bf0"')));
+  assert.equal(event.type, "completed");
+  assert.equal(event.connector, true);
+  assert.ok(!("conversation" in event));
+  assert.ok(!JSON.stringify(event).includes("local-chatgpt"));
+  assert.match(event.summary ?? "", /ChatGPT did not show the chat's lasting address/u);
+});
+
+test("ChatGPT Web tells a signed-out page from out-of-date selectors when the composer does not appear", async () => {
+  await assert.rejects(
+    async () => runner("signed-out", { composerTimeoutMs: 1_000 })(request),
+    (error: Error) => {
+      assert.match(error.message, /composer did not appear at .*scenario=signed-out: the page shows a sign-in control, so the browser is not signed in\. Sign in to ChatGPT/u);
+      assert.ok(!error.message.includes("selectors"));
+      return true;
+    },
+  );
+  // The page is signed in and has a composer, but not where the selectors look for it.
+  await assert.rejects(
+    async () => runner("normal", { composerTimeoutMs: 1_000, selectors: { composer: "#composer-of-another-day" } })(request),
+    /composer did not appear at .*scenario=normal, and the page shows no sign-in control\. The page selectors are most likely out of date: .*override `selectors`/u,
+  );
+  assert.deepEqual(reported("sent"), []);
 });
 
 test("rigBridgeHandoffOperation and query utilities read and acknowledge handoffs for Machines", async () => {
@@ -318,18 +340,16 @@ test("rigBridgeHandoffOperation and query utilities read and acknowledge handoff
   );
 });
 
-const skipContinue = executable === undefined ? "no Chromium browser" : certificate === undefined ? "no openssl" : false;
 const conversation = (scenario: string) => `https://chatgpt.com/c/fake-conversation?scenario=${scenario}`;
 const continuation = (options: ChatGptWebAgentOptions = {}) => chatGptWebContinue({
   cdpUrl,
-  launch: launch(),
+  launch: false,
   bridgeStatusUrl: `${base}/api/status`,
   pollMs: 100,
   timeoutMs: 20_000,
   output: "capture",
   ...options,
 });
-const reported = (kind: string) => pageEvents.filter(event => event.kind === kind);
 const staleHandoff = handoff("h-stale", "t-1", started - 60_000);
 const openTabs = async () => (await (await fetch(`${cdpUrl}/json/list`)).json() as { url: string }[]).map(tab => tab.url);
 
@@ -368,7 +388,31 @@ test("ChatGPT Web continuation validates its input before touching a browser", a
   );
 });
 
-test("ChatGPT Web continuation sends one message and returns the handoff created after it", { skip: skipContinue }, async () => {
+test("ChatGPT Web continuation refuses a temporary address before it opens a tab", async () => {
+  const send = chatGptWebContinue({ cdpUrl: "http://127.0.0.1:9", launch: false, bridgeStatusUrl: `${base}/api/status` });
+  for (const temporary of [
+    "https://chatgpt.com/c/local-chatgpt%3A570c498e-7d4a-48a1-8e7a-d7367e869bf0",
+    "https://chatgpt.com/c/local-chatgpt:570c498e-7d4a-48a1-8e7a-d7367e869bf0",
+    "https://chatgpt.com/g/g-p-project/c/local-chatgpt%3A570c498e-7d4a-48a1-8e7a-d7367e869bf0",
+  ]) {
+    await assert.rejects(async () => send({ conversation: temporary, text: "Yes, ship it.", cwd: workspace }), (error: Error) => {
+      assert.match(error.message, /requires the chat's lasting https:\/\/chatgpt\.com\/c\/<id> address: "local-chatgpt(%3A|:)570c498e-7d4a-48a1-8e7a-d7367e869bf0" is a temporary identifier/u);
+      // Reaching the browser would fail on the missing DevTools endpoint instead.
+      assert.ok(!error.message.includes("DevTools"));
+      return true;
+    });
+  }
+});
+
+test("ChatGPT Web continuation reports a signed-out page when the composer does not appear", async () => {
+  await assert.rejects(
+    async () => continuation({ composerTimeoutMs: 1_000 })({ conversation: conversation("signed-out"), text: "Hello again", cwd: workspace }),
+    /continuation failed for https:\/\/chatgpt\.com\/c\/fake-conversation\?scenario=signed-out: ChatGPT composer did not appear at .*: the page shows a sign-in control, so the browser is not signed in/u,
+  );
+  assert.deepEqual(pageEvents, []);
+});
+
+onBothPages("ChatGPT Web continuation sends one message and returns the handoff created after it", async () => {
   notifications = () => [staleHandoff, ...reported("sent").map(event => handoff("h-2", "t-1", event.at))];
   const updates: AgentUpdate[] = [];
   const event = await continuation()(
@@ -396,7 +440,7 @@ test("ChatGPT Web continuation sends one message and returns the handoff created
   assert.ok(!(await openTabs()).some(url => url.includes("scenario=continue")), "A successful run closes its tab");
 });
 
-test("ChatGPT Web continuation keeps assistant text from the page out of the event and reported output", { skip: skipContinue }, async () => {
+onBothPages("ChatGPT Web continuation keeps assistant text from the page out of the event and reported output", async () => {
   notifications = () => reported("sent").map(event => handoff("h-3", "t-1", event.at));
   const updates: AgentUpdate[] = [];
   const event = await continuation({ keepTab: true })(
@@ -414,7 +458,7 @@ test("ChatGPT Web continuation keeps assistant text from the page out of the eve
   assert.ok(!updates.some(update => update.type === "output"));
 });
 
-test("ChatGPT Web continuation does not submit to a conversation that is still generating", { skip: skipContinue }, async () => {
+onBothPages("ChatGPT Web continuation does not submit to a conversation that is still generating", async () => {
   notifications = now => [handoff("h-busy", "t-1", now)];
   await assert.rejects(
     async () => continuation()({ conversation: conversation("busy"), text: "Are you done?", cwd: workspace }),
@@ -424,7 +468,7 @@ test("ChatGPT Web continuation does not submit to a conversation that is still g
   assert.ok((await openTabs()).some(url => url.includes("scenario=busy")), "A failed run keeps its tab");
 });
 
-test("ChatGPT Web continuation does not submit when generation starts while the message is entered", { skip: skipContinue }, async () => {
+onBothPages("ChatGPT Web continuation does not submit when generation starts while the message is entered", async () => {
   // The conversation is idle when it opens; a reply starts before the fake send button is ready.
   notifications = now => [handoff("h-delayed-busy", "t-1", now)];
   await assert.rejects(
@@ -436,7 +480,7 @@ test("ChatGPT Web continuation does not submit when generation starts while the 
   assert.ok((await openTabs()).some(url => url.includes("scenario=delayed-busy")), "A failed run keeps its tab");
 });
 
-test("ChatGPT Web continuation does not submit when the conversation did not open", { skip: skipContinue }, async () => {
+onBothPages("ChatGPT Web continuation does not submit when the conversation did not open", async () => {
   await assert.rejects(
     async () => continuation()({ conversation: conversation("moved"), text: "Hello again", cwd: workspace }),
     /instead of the conversation; the message was not sent/u,
@@ -444,7 +488,7 @@ test("ChatGPT Web continuation does not submit when the conversation did not ope
   assert.deepEqual(pageEvents, []);
 });
 
-test("ChatGPT Web continuation counts only the given rig-bridge thread's handoff", { skip: skipContinue }, async () => {
+onBothPages("ChatGPT Web continuation counts only the given rig-bridge thread's handoff", async () => {
   // Another conversation in the same project hands off first; this thread's handoff follows.
   notifications = now => reported("sent").flatMap(event => [
     handoff("h-other", "t-2", event.at),
@@ -467,7 +511,7 @@ test("ChatGPT Web continuation counts only the given rig-bridge thread's handoff
   assert.equal(unscoped.handoff?.id, "h-other");
 });
 
-test("ChatGPT Web continuation ignores a handoff from another directory of the same project", { skip: skipContinue }, async () => {
+onBothPages("ChatGPT Web continuation ignores a handoff from another directory of the same project", async () => {
   // A conversation working in another worktree of the project hands off first; this directory's handoff follows.
   notifications = now => reported("sent").flatMap(event => [
     handoff("h-worktree", "t-worktree", event.at),
@@ -484,7 +528,7 @@ test("ChatGPT Web continuation ignores a handoff from another directory of the s
   assert.ok(!readHandoffs.has("h-worktree"));
 });
 
-test("ChatGPT Web continuation ignores a handoff recorded before the message was sent", { skip: skipContinue }, async () => {
+onBothPages("ChatGPT Web continuation ignores a handoff recorded before the message was sent", async () => {
   // The fake send button enables a second after the text is entered, and a handoff is recorded during that wait.
   notifications = now => reported("sent").flatMap(event => [
     ...(now - event.at > 300 ? [handoff("h-after", "t-1", event.at + 300)] : []),
@@ -501,7 +545,7 @@ test("ChatGPT Web continuation ignores a handoff recorded before the message was
   assert.ok(!readHandoffs.has("h-before"));
 });
 
-test("ChatGPT Web continuation does not send a saved composer draft along with the message", { skip: skipContinue }, async () => {
+onBothPages("ChatGPT Web continuation does not send a saved composer draft along with the message", async () => {
   notifications = now => [handoff("h-draft", "t-1", now)];
   // The draft is already in the composer when the conversation opens.
   await assert.rejects(
@@ -523,7 +567,7 @@ test("ChatGPT Web continuation does not send a saved composer draft along with t
   assert.ok((await openTabs()).some(url => url.includes("scenario=draft")), "A failed run keeps its tab");
 });
 
-test("ChatGPT Web continuation times out when no new handoff arrives for the workspace", { skip: skipContinue }, async () => {
+onBothPages("ChatGPT Web continuation times out when no new handoff arrives for the workspace", async () => {
   // A handoff from before the message, and a new one from a project with no workspace in this directory.
   notifications = now => [staleHandoff, handoff("h-elsewhere", "t-9", now, "p-9")];
   await assert.rejects(
@@ -543,7 +587,7 @@ test("ChatGPT Web continuation times out when no new handoff arrives for the wor
   assert.ok(!readHandoffs.has("h-unmatched"));
 });
 
-test("ChatGPT Web continuation approves tool confirmations only when allowed", { skip: skipContinue }, async () => {
+onBothPages("ChatGPT Web continuation approves tool confirmations only when allowed", async () => {
   notifications = () => reported("approved").map(event => handoff("h-approved", "t-1", event.at));
   const event = await continuation({ approveToolCalls: true })({ conversation: conversation("approve"), text: "Go ahead.", cwd: workspace });
   assert.equal(event.handoff?.id, "h-approved");
@@ -561,7 +605,7 @@ test("ChatGPT Web continuation approves tool confirmations only when allowed", {
   assert.ok(updates.some(update => update.type === "output" && update.text.includes("waiting for tool approval")));
 });
 
-test("ChatGPT Web continuation reports uncertain delivery instead of sending again", { skip: skipContinue }, async () => {
+onBothPages("ChatGPT Web continuation reports uncertain delivery instead of sending again", async () => {
   // The fake page registers the click but never clears the composer or starts generating.
   notifications = now => [handoff("h-late", "t-1", now)];
   await assert.rejects(

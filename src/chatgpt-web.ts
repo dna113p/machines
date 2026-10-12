@@ -17,15 +17,19 @@ export interface ChatGptWebSelectors {
   readonly assistant: string;
   readonly plus: string;
   readonly menuItem: string;
+  /** A control only a signed-out page shows. Links and buttons labelled "Log in" or "Sign in" also count. */
+  readonly signIn: string;
 }
 
+/** Each list names the page as it is today and as it was before, for accounts a rollout has not reached. */
 export const defaultChatGptWebSelectors: ChatGptWebSelectors = {
-  composer: "#prompt-textarea",
-  send: 'button[data-testid="send-button"]',
-  stop: 'button[data-testid="stop-button"]',
-  assistant: '[data-message-author-role="assistant"]',
-  plus: 'button[data-testid="composer-plus-btn"]',
-  menuItem: '[role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="option"]',
+  composer: '#prompt-textarea, div.ProseMirror[contenteditable="true"]',
+  send: 'button[data-testid="send-button"], button[aria-label="Send"]',
+  stop: 'button[data-testid="stop-button"], button[aria-label="Stop"]',
+  assistant: '[data-message-author-role="assistant"], [data-chatgpt-search-unit-key$=":assistant"]',
+  plus: 'button[data-testid="composer-plus-btn"], button[aria-label="Add files and more"]',
+  menuItem: '[role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="option"], button[data-list-navigation-item]',
+  signIn: '[data-testid="login-button"]',
 };
 
 export interface ChatGptWebBrowserLaunch {
@@ -54,6 +58,7 @@ export interface ChatGptWebEvent extends Event {
   readonly summary?: string;
   readonly message?: string;
   readonly handoff?: RigBridgeHandoff;
+  /** The chat's lasting address. Absent when ChatGPT did not show one before the run ended. */
   readonly conversation?: string;
 }
 
@@ -85,7 +90,10 @@ export interface ChatGptWebAgentOptions {
   readonly cdpUrl?: string;
   /** Launch a persistent, detached browser when the endpoint is unreachable. Defaults to true. */
   readonly launch?: boolean | ChatGptWebBrowserLaunch;
-  /** Name of the rig-bridge app in ChatGPT. Defaults to `CHATGPT_WEB_CONNECTOR` or "rig-bridge". */
+  /**
+   * Name the rig-bridge app has in this person's ChatGPT, matched against the text of the composer's add menu.
+   * Defaults to `CHATGPT_WEB_CONNECTOR` or "rig-bridge".
+   */
   readonly connector?: string;
   /** Try to enable the connector from the composer's + menu. Defaults to true. */
   readonly selectConnector?: boolean;
@@ -97,6 +105,8 @@ export interface ChatGptWebAgentOptions {
   /** Automatically mark handoff notifications read on rig-bridge when completed. Defaults to true. */
   readonly acknowledgeHandoff?: boolean;
   readonly timeoutMs?: number;
+  /** How long the composer may take to appear after the tab opens. Defaults to 45 seconds. */
+  readonly composerTimeoutMs?: number;
   /** Quiet period after generation stops before the reply is treated as final. */
   readonly settleMs?: number;
   readonly pollMs?: number;
@@ -174,7 +184,22 @@ export type ChatGptWebContinueRunner = (
 ) => Promise<ChatGptWebEvent>;
 
 const defaultApproveLabels: readonly string[] = ["Confirm", "Allow", "Approve", "Allow once"];
-const conversationPath = /\/c\/([\w-]+)/u;
+const signInLabels: readonly string[] = ["log in", "sign in"];
+const conversationSegment = /\/c\/([^/]+)/u;
+const noLastingAddress = "ChatGPT did not show the chat's lasting address before the run ended, so this event has no conversation to continue.";
+
+/**
+ * Reads the conversation identifier from a page path. ChatGPT shows a new chat under a temporary
+ * identifier first, such as `local-chatgpt%3A<uuid>`, which stops opening the chat once it has a lasting one.
+ */
+function conversationId(pathname: string): { readonly id: string; readonly lasting: boolean } | undefined {
+  const id = conversationSegment.exec(pathname)?.[1];
+  return id === undefined ? undefined : { id, lasting: /^[\w-]+$/u.test(id) };
+}
+
+function lastingConversation(url: string): string | undefined {
+  return conversationId(new URL(url).pathname)?.lasting === true ? url : undefined;
+}
 
 function outputEmitter(report: AgentReporter | undefined, outputMode: "capture" | "stream"): (text: string) => void {
   return text => {
@@ -187,14 +212,20 @@ function outputEmitter(report: AgentReporter | undefined, outputMode: "capture" 
 function parseConversation(value: unknown): { readonly href: string; readonly id: string } {
   let url: URL | undefined;
   try { url = new URL(String(value)); } catch { /* reported below */ }
-  const id = url === undefined ? undefined : conversationPath.exec(url.pathname)?.[1];
+  const found = url === undefined ? undefined : conversationId(url.pathname);
   if (
-    url === undefined || id === undefined || url.protocol !== "https:" || url.host !== "chatgpt.com"
+    url === undefined || found === undefined || url.protocol !== "https:" || url.host !== "chatgpt.com"
     || url.username !== "" || url.password !== ""
   ) {
     throw new Error("ChatGPT Web continuation requires an https://chatgpt.com/c/<id> conversation URL without credentials");
   }
-  return { href: url.href, id };
+  if (!found.lasting) {
+    throw new Error(
+      `ChatGPT Web continuation requires the chat's lasting https://chatgpt.com/c/<id> address: "${found.id}" is a temporary `
+      + "identifier that ChatGPT shows while a chat is new, and its address no longer opens the chat",
+    );
+  }
+  return { href: url.href, id: found.id };
 }
 
 /** Runs one fresh ChatGPT web conversation that works in the request's directory via rig-bridge. */
@@ -215,6 +246,7 @@ export function chatGptWebAgent(options: ChatGptWebAgentOptions = {}): ChatGptWe
     const timeoutMs = options.timeoutMs ?? 60 * 60_000;
     const settleMs = options.settleMs ?? 5_000;
     const pollMs = options.pollMs ?? 1_000;
+    const composerTimeoutMs = options.composerTimeoutMs ?? 45_000;
     const start = new URL(options.url ?? env.CHATGPT_WEB_URL ?? "https://chatgpt.com/");
     if (model !== undefined) start.searchParams.set("model", model);
 
@@ -237,11 +269,7 @@ export function chatGptWebAgent(options: ChatGptWebAgentOptions = {}): ChatGptWe
       await page.send("Page.enable");
       await page.send("Page.bringToFront");
 
-      const ready = await waitFor(page, selectors, snapshot => snapshot.composer, 45_000, pollMs);
-      if (ready === undefined) {
-        const url = (await snapshot(page, selectors)).url;
-        throw new Error(`ChatGPT composer did not appear at ${url}. Sign in to ChatGPT in the automation browser profile and retry`);
-      }
+      await waitForComposer(page, selectors, composerTimeoutMs, pollMs);
       if (options.selectConnector ?? true) {
         if (!await selectConnector(page, selectors, connector)) {
           emit(`Could not enable "${connector}" from the composer menu; relying on the prompt to invoke it.`);
@@ -260,7 +288,8 @@ export function chatGptWebAgent(options: ChatGptWebAgentOptions = {}): ChatGptWe
       let finalText: string | undefined;
       while (Date.now() < deadline) {
         const current = await snapshot(page, selectors, approveLabels);
-        if (conversation === undefined && conversationPath.test(current.url)) {
+        // The address is the temporary one at first; only the lasting one opens the chat again.
+        if (conversation === undefined && lastingConversation(current.url) !== undefined) {
           conversation = current.url;
           report?.({ type: "tool", id: "chatgpt-conversation", title: `ChatGPT conversation ${conversation}`, status: "in_progress" });
         }
@@ -293,6 +322,7 @@ export function chatGptWebAgent(options: ChatGptWebAgentOptions = {}): ChatGptWe
       }
       if (finalText === undefined) throw new Error(`ChatGPT did not finish within ${timeoutMs} ms`);
       await bridge?.poll();
+      conversation ??= lastingConversation((await snapshot(page, selectors)).url);
       if (conversation !== undefined) {
         report?.({ type: "tool", id: "chatgpt-conversation", title: `ChatGPT conversation ${conversation}`, status: "completed" });
       }
@@ -326,8 +356,15 @@ export function chatGptWebAgent(options: ChatGptWebAgentOptions = {}): ChatGptWe
         event = readAgentEvent(finalText, { adapter: "ChatGPT Web", includeMessage: outputMode === "capture" });
       }
 
+      // Only the address the page showed is returned: one the assistant wrote in its event may be the temporary one.
+      const { conversation: _written, ...read } = event;
       if (conversation !== undefined) {
-        event = { ...event, conversation };
+        event = { ...read, conversation };
+      } else {
+        // A temporary address would be returned in vain, so the event says why it carries none.
+        emit(noLastingAddress);
+        const summary = typeof read.summary === "string" && read.summary.trim() !== "" ? `${read.summary}\n` : "";
+        event = { ...read, summary: `${summary}${noLastingAddress}` };
       }
 
       if (handoff !== undefined && (options.acknowledgeHandoff ?? true)) {
@@ -379,6 +416,7 @@ export function chatGptWebContinue(options: ChatGptWebAgentOptions = {}): ChatGp
     const selectors: PageSelectors = { ...defaultChatGptWebSelectors, ...options.selectors, assistant: undefined };
     const timeoutMs = options.timeoutMs ?? 60 * 60_000;
     const pollMs = options.pollMs ?? 1_000;
+    const composerTimeoutMs = options.composerTimeoutMs ?? 45_000;
     const approveLabels = (options.approveLabels ?? defaultApproveLabels).map(label => label.toLowerCase());
     const emit = outputEmitter(report, options.output ?? "stream");
     const reportConversation = (status: "in_progress" | "completed") => {
@@ -398,15 +436,11 @@ export function chatGptWebContinue(options: ChatGptWebAgentOptions = {}): ChatGp
       await page.send("Page.enable");
       await page.send("Page.bringToFront");
 
-      const ready = await waitFor(page, selectors, current => current.composer, 45_000, pollMs);
-      if (ready === undefined) {
-        const url = (await snapshot(page, selectors)).url;
-        throw new Error(`ChatGPT composer did not appear at ${url}. Sign in to ChatGPT in the automation browser profile and retry`);
-      }
+      const ready = await waitForComposer(page, selectors, composerTimeoutMs, pollMs);
       // The stop button can render after the composer while the page loads, so look twice before sending.
       await sleep(pollMs);
       const loaded = await snapshot(page, selectors);
-      if (conversationPath.exec(new URL(loaded.url).pathname)?.[1] !== id) {
+      if (conversationId(new URL(loaded.url).pathname)?.id !== id) {
         throw new Error(`ChatGPT opened ${loaded.url} instead of the conversation; the message was not sent`);
       }
       if (ready.generating || loaded.generating) {
@@ -700,6 +734,16 @@ function pasteText(arg: { selector: string; text: string }): boolean {
   return true;
 }
 
+function signInVisible(arg: { selector: string; labels: string[] }): boolean {
+  const shown = (element: Element) => {
+    const rect = element.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  };
+  if (Array.from(document.querySelectorAll(arg.selector)).some(shown)) return true;
+  return (Array.from(document.querySelectorAll('a, button, [role="button"]')) as HTMLElement[])
+    .some(control => shown(control) && arg.labels.includes(control.innerText.trim().toLowerCase()));
+}
+
 function snapshot(page: CdpPage, selectors: PageSelectors, approveLabels: string[] = []): Promise<PageSnapshot> {
   return page.call(pageSnapshot, { selectors, approveLabels });
 }
@@ -720,6 +764,29 @@ async function waitFor(
     await sleep(Math.min(pollMs, 250));
   }
   return undefined;
+}
+
+/** Waits for the composer. When it does not appear, the error tells a signed-out page from out-of-date selectors. */
+async function waitForComposer(
+  page: CdpPage,
+  selectors: PageSelectors,
+  timeoutMs: number,
+  pollMs: number,
+): Promise<PageSnapshot> {
+  const ready = await waitFor(page, selectors, current => current.composer, timeoutMs, pollMs);
+  if (ready !== undefined) return ready;
+  const url = (await snapshot(page, selectors)).url;
+  if (await page.call(signInVisible, { selector: selectors.signIn, labels: [...signInLabels] })) {
+    throw new Error(
+      `ChatGPT composer did not appear at ${url}: the page shows a sign-in control, so the browser is not signed in. `
+      + "Sign in to ChatGPT in the automation browser profile and retry",
+    );
+  }
+  throw new Error(
+    `ChatGPT composer did not appear at ${url}, and the page shows no sign-in control. The page selectors are most likely `
+    + "out of date: compare them with the page and override `selectors`. If the page is signed out after all, "
+    + "sign in to ChatGPT in the automation browser profile and retry",
+  );
 }
 
 async function click(page: CdpPage, point: Point): Promise<void> {
