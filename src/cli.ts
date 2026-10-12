@@ -23,14 +23,28 @@ import {
   createRunStatusPublisher,
   isProcessAlive,
   readRunStatuses,
+  runSessionId,
   runStatusDirectory,
+  runStatusObserver,
   type RunStatusRecord,
 } from "./run-status.ts";
+import {
+  readRunWatches,
+  runWatch,
+  runWatchMatches,
+  runWatchPath,
+  sameRunWatch,
+  writeRunWatches,
+  type RunWatch,
+} from "./run-watch.ts";
 
 import type { StateValue } from "xstate";
 import type { AgentUpdate, RunOptions } from "./index.ts";
 
 const [command, selector, ...argumentsAfterSelector] = process.argv.slice(2);
+const runsOptions = selector === undefined ? [] : [selector, ...argumentsAfterSelector];
+const watchUsage = "machine watch [<run-id-or-label-start> | --dir <path>]";
+const unwatchUsage = "machine unwatch <run-id-or-label-start> | --dir <path> | --all";
 
 try {
   if (command === "list" && selector === undefined) {
@@ -52,10 +66,17 @@ try {
     console.log(await readFile(machinePath, "utf8"));
   } else if (command === "run" && selector !== undefined) {
     await runMachine(await resolveMachine(selector), argumentsAfterSelector);
-  } else if (command === "runs" && (selector === undefined || selector === "--json") && argumentsAfterSelector.length === 0) {
-    listRuns(selector === "--json");
+  } else if (
+    command === "runs"
+    && runsOptions.every((option, index) => (option === "--json" || option === "--all") && runsOptions.indexOf(option) === index)
+  ) {
+    listRuns(runsOptions.includes("--json"), runsOptions.includes("--all"));
   } else if (command === "respond" && selector !== undefined) {
     await respond([selector, ...argumentsAfterSelector]);
+  } else if (command === "watch") {
+    watch(selector === undefined ? [] : [selector, ...argumentsAfterSelector]);
+  } else if (command === "unwatch" && selector !== undefined) {
+    unwatch([selector, ...argumentsAfterSelector]);
   } else {
     throw new Error([
       "Usage:",
@@ -63,8 +84,10 @@ try {
       "  machine agents",
       "  machine show <name-or-file>",
       "  machine run <name-or-file> [--agent role=preset]... [--input-file <file|->] [--] [input]",
-      "  machine runs [--json]",
+      "  machine runs [--json] [--all]",
       "  machine respond [--question] <run-id> <request-id> [--] <response>",
+      `  ${watchUsage}`,
+      `  ${unwatchUsage}`,
     ].join("\n"));
   }
 } catch (cause) {
@@ -100,30 +123,12 @@ async function runMachine(machinePath: string, args: string[]) {
   const statusDirectory = runStatusDirectory();
   // Machines started by this run's Operations and Agents are its sub-runs.
   process.env.MACHINES_RUN_PARENT = runId;
-  let publishedState: string | undefined;
-  // A runner reports its identity as it starts. For a state entered by a
-  // transition that is before the state is announced, so an identity is held
-  // for the rest of the tick and published with the state it belongs to.
-  let arriving: Extract<AgentUpdate, { type: "identity" }> | undefined;
+  const observed = runStatusObserver((change) => published.update(change));
 
   try {
     const result = await prepared.start({
       onAgentUpdate(update) {
-        if (update.type === "identity") {
-          arriving = update;
-          queueMicrotask(() => {
-            if (arriving !== update) return;
-            arriving = undefined;
-            published.update({ agent: update });
-          });
-        } else if (update.type === "limit" && update.status !== "swapped") {
-          // A swap while every preset is being tried again leaves the wait as it is published.
-          published.update({
-            limit: update.status === "resumed"
-              ? undefined
-              : { text: update.text, ...(update.until === undefined ? {} : { until: update.until }) },
-          });
-        }
+        observed.onAgentUpdate(update);
         status.onAgentUpdate(update);
       },
       // A published run can also be answered through its inbox by `machine respond`.
@@ -146,13 +151,7 @@ async function runMachine(machinePath: string, args: string[]) {
         status.onHumanInput(active);
       },
       onState(state) {
-        const entered = formatState(state);
-        if (entered === publishedState) published.update({ state });
-        else {
-          published.update({ state, agent: arriving });
-          arriving = undefined;
-        }
-        publishedState = entered;
+        observed.onState(state);
         status.onState(state);
       },
     });
@@ -172,18 +171,106 @@ async function runMachine(machinePath: string, args: string[]) {
   }
 }
 
-function listRuns(json: boolean) {
-  const runs = readRunStatuses(requireStatusDirectory())
-    .filter((record) => (record.status === "running" || record.status === "waiting") && isProcessAlive(record.pid))
-    .sort((left, right) => Date.parse(left.startedAt) - Date.parse(right.startedAt));
+function listRuns(json: boolean, all: boolean) {
+  const directory = requireStatusDirectory();
+  const published = publishedRuns(directory);
+  // Without --all, only the runs that can still change or be answered.
+  const runs = all ? published : published.filter(isActiveRun);
   if (json) {
     console.log(JSON.stringify(runs, null, 2));
     return;
   }
-  if (runs.length === 0) console.log("No Machine runs are running or waiting.");
+  if (runs.length === 0) console.log(all ? "No Machine runs are published." : "No Machine runs are running or waiting.");
+  const session = runSessionId();
+  const watches = session === undefined ? [] : readRunWatches(directory, session);
   runs.forEach((record, index) => {
-    printRunListing(record, index > 0);
+    printRunListing(record, index > 0, watches.some((watched) => runWatchMatches(watched, record)));
   });
+}
+
+/** Every record in the directory, including runs that finished or lost their process and are still recorded. */
+function publishedRuns(directory: string) {
+  return readRunStatuses(directory).sort((left, right) => Date.parse(left.startedAt) - Date.parse(right.startedAt));
+}
+
+/** A run that stopped reporting without finishing has lost its process, as on the status line. */
+function runStatus(record: RunStatusRecord) {
+  return record.status !== "completed" && record.status !== "failed" && !isProcessAlive(record.pid) ? "lost" : record.status;
+}
+
+function isActiveRun(record: RunStatusRecord) {
+  const status = runStatus(record);
+  return status === "running" || status === "waiting";
+}
+
+function watch(args: string[]) {
+  const { directory, session } = requireWatchList();
+  const watches = readRunWatches(directory, session);
+  const runs = publishedRuns(directory);
+  if (args.length === 0) {
+    if (watches.length === 0) console.log("This session watches no other runs.");
+    for (const watched of watches) {
+      console.log(describeWatch(watched));
+      printWatchedRuns(watched, runs);
+    }
+    return;
+  }
+  const added = parseWatch(args, watchUsage);
+  if (!watches.some((watched) => sameRunWatch(watched, added))) writeRunWatches(directory, session, [...watches, added]);
+  console.log(`Watching ${describeWatch(added)}`);
+  printWatchedRuns(added, runs);
+}
+
+function unwatch(args: string[]) {
+  const { directory, session } = requireWatchList();
+  if (args[0] === "--all") {
+    if (args.length !== 1) throw new Error(`Usage: ${unwatchUsage}`);
+    writeRunWatches(directory, session, []);
+    console.log("This session watches no other runs.");
+    return;
+  }
+  const removed = parseWatch(args, unwatchUsage);
+  const watches = readRunWatches(directory, session);
+  const kept = watches.filter((watched) => !sameRunWatch(watched, removed));
+  if (kept.length === watches.length) {
+    console.log(`This session was not watching ${describeWatch(removed)}`);
+    return;
+  }
+  writeRunWatches(directory, session, kept);
+  console.log(`No longer watching ${describeWatch(removed)}`);
+}
+
+function parseWatch(args: string[], usage: string): RunWatch {
+  if (args[0] === "--dir") {
+    if (args.length !== 2) throw new Error(`Usage: ${usage}`);
+    return runWatch({ dir: args[1]! });
+  }
+  if (args[0] !== "--" && args[0]?.startsWith("--") === true) throw new Error(`Usage: ${usage}`);
+  return runWatch({ text: (args[0] === "--" ? args.slice(1) : args).join(" ") });
+}
+
+function describeWatch(watched: RunWatch) {
+  return "dir" in watched ? `--dir ${watched.dir}` : watched.text;
+}
+
+function printWatchedRuns(watched: RunWatch, runs: readonly RunStatusRecord[]) {
+  const matched = runs.filter((record) => runWatchMatches(watched, record));
+  if (matched.length === 0) console.log("  no published run matches yet");
+  for (const record of matched) console.log(`  ${runColumns(record).join("\t")}`);
+}
+
+/** The session whose watch list this process changes, and where the list is kept. */
+function requireWatchList() {
+  const directory = requireStatusDirectory();
+  const session = runSessionId();
+  if (session === undefined) {
+    throw new Error(
+      "No session to watch for: set MACHINES_RUN_OWNER to the id of the session whose status line shows the runs.",
+    );
+  }
+  // Refuses a session id that cannot name a file.
+  runWatchPath(directory, session);
+  return { directory, session };
 }
 
 async function respond(args: string[]) {
@@ -311,29 +398,53 @@ function printAgentListing(preset: AgentPresetSummary, separate: boolean) {
   console.log(`  ${dim(preset.source)}`);
 }
 
-function printRunListing(record: RunStatusRecord, separate: boolean) {
+/** Recorded text must not be able to move the cursor or restyle the terminal. */
+function plain(text: string) {
+  return text.replace(/[\u0000-\u001f\u007f-\u009f]+/gu, " ").trim();
+}
+
+/** A run as tab-separated columns: its label follows the four that were always there. */
+function runColumns(record: RunStatusRecord) {
+  const label = record.label === undefined ? "" : plain(record.label);
+  return [record.id, record.machine, runStatus(record), record.state ?? "starting"].map(plain).concat(label === "" ? [] : [label]);
+}
+
+function printRunListing(record: RunStatusRecord, separate: boolean, watched: boolean) {
   const state = record.state ?? "starting";
-  const human = record.status === "waiting" ? record.human : undefined;
-  // Recorded text must not be able to move the cursor or restyle the terminal.
-  const plain = (text: string) => text.replace(/[\u0000-\u001f\u007f-\u009f]+/gu, " ").trim();
-  const details = human === undefined ? (record.limit === undefined ? [] : [plain(record.limit.text)]) : [
+  const recorded = runStatus(record);
+  const human = recorded === "waiting" ? record.human : undefined;
+  // A run that finished or lost its process is no longer waiting for anything.
+  const limit = recorded === "running" || recorded === "waiting" ? record.limit : undefined;
+  const details = human === undefined ? (limit === undefined ? [] : [plain(limit.text)]) : [
     ...human.prompt.split("\n").map(plain).filter((line) => line !== ""),
     ...(human.requestId === undefined ? [] : [`request: ${plain(human.requestId)}`]),
+    ...(record.answeredBy === "host" ? ["answered through its host"] : []),
     ...(human.choices === undefined ? [] : [`choices: ${human.choices.map(plain).join(", ")}`]),
     ...(human.suggestions === undefined ? [] : [`suggestions: ${human.suggestions.map(plain).join(", ")}`]),
     ...(human.discussion === true ? ["discussion: questions allowed"] : []),
   ];
 
   if (!process.stdout.isTTY) {
-    console.log([record.id, record.machine, record.status, state].map(plain).join("\t"));
+    const columns = runColumns(record);
+    // The mark has its own column, after the label's, whether or not the run has a label.
+    console.log((watched ? [...columns, ...(columns.length === 4 ? [""] : []), "watched"] : columns).join("\t"));
     for (const line of details) console.log(`  ${line}`);
     return;
   }
 
   if (separate) console.log();
-  const status = record.status === "waiting" ? yellow("waiting") : cyan("running");
-  console.log(`${bold(plain(record.id))}  ${bold(cyan(plain(record.machine)))} › ${status} · ${plain(state)}`);
-  for (const line of details) console.log(`  ${line.startsWith("request: ") ? dim(line) : line}`);
+  const status = recorded === "waiting"
+    ? yellow(recorded)
+    : recorded === "running" ? cyan(recorded) : recorded === "completed" ? green(recorded) : red(recorded);
+  console.log(
+    `${bold(plain(record.id))}  ${bold(cyan(plain(record.machine)))} › ${status} · ${plain(state)}${
+      watched ? ` · ${dim("watched")}` : ""
+    }`,
+  );
+  if (record.label !== undefined && plain(record.label) !== "") console.log(`  ${plain(record.label)}`);
+  for (const line of details) {
+    console.log(`  ${line.startsWith("request: ") || line === "answered through its host" ? dim(line) : line}`);
+  }
 }
 
 function printMachineHeader(machinePath: string) {

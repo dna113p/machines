@@ -59,7 +59,7 @@ MCP server ────┘       ↑
 | `src/discovery.ts` | Project/global definition locations and precedence |
 | `src/launcher.ts` | Definition metadata, Agent bindings, preflight, single-use launch preparation |
 | `src/discovery-worker.ts` | Fresh metadata imports in disposable workers |
-| `src/host.ts` | One child run, IPC, Human request identity, owned process termination |
+| `src/host.ts` | One child run, IPC, Human request identity, owned process termination, run-status publication for the run |
 | `src/session.ts` | Shared Pi/MCP run lifecycle, snapshots, response handling, retention, shutdown |
 | `src/cli.ts` | Command parsing, terminal progress, source inspection |
 | `pi-extension/index.ts` | Pi tools, widgets, notifications, native input presentation |
@@ -107,8 +107,13 @@ response from either the terminal or a private per-run inbox file written by
 session `respond` path as its tool, and inbox questions through the session's
 `ask`. The inbox is a second way to deliver a response to the owning run, not a
 second owner: the run still validates the request ID and choices, and a response
-to any other request is discarded. See
+to any other request is discarded. A run hosted directly through
+`startMachineHost` publishes its status without an inbox: its host remains the
+only way to answer it, its record says so, and `machine respond` refuses it. See
 [Integrations](integrations.md#answering-a-waiting-run-from-outside).
+
+A session's watch list changes only which published runs its status line shows.
+It gives no ownership of a run and no way to answer one.
 
 Closing a session terminates active and starting hosts. Host termination includes
 ordinary descendants in the host's owned process group on POSIX and process-tree
@@ -167,8 +172,9 @@ Their phase ordering and manual proof gates describe past work.
 
 ## External execution owners
 
-The supported `@dna113p/machines/host` export exposes `startMachineHost`, its
-observations, correlated Human responses, termination, and final state/output.
+The supported `@dna113p/machines/host` export exposes `startMachineHost`, the
+run's id, its observations, correlated Human responses, termination, and final
+state/output.
 External applications can own hosted runs without importing private modules or
 parsing terminal output. Hosted input and optional output are JSON values.
 

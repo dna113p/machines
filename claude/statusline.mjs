@@ -3,7 +3,8 @@
 // Claude Code status line for Machine runs published through
 // MACHINES_RUN_STATUS_DIR (see docs/integrations.md). It runs on every status
 // refresh, so it imports only node: modules and never loads the runtime; the
-// record shape below mirrors RunStatusRecord in src/run-status.ts.
+// record shape below mirrors RunStatusRecord in src/run-status.ts, and the
+// watch list and its matching mirror src/run-watch.ts.
 
 import { readdirSync, readFileSync, realpathSync } from "node:fs";
 import { isAbsolute, join, resolve, sep } from "node:path";
@@ -27,6 +28,7 @@ export function runStatusLines(records, options = {}) {
   const {
     sessionId,
     projectDir,
+    watches = [],
     now = Date.now(),
     columns = defaultColumns,
     color = true,
@@ -38,7 +40,9 @@ export function runStatusLines(records, options = {}) {
   const visible = [];
   for (const record of records) {
     // Sub-runs belong to the run that started them, not to the session.
-    if (!isRecord(record) || record.parent !== undefined || !isVisibleTo(record, sessionId, projectDir)) continue;
+    if (!isRecord(record) || record.parent !== undefined) continue;
+    // A run the session asked to watch is shown whoever owns it and wherever it works.
+    if (!isVisibleTo(record, sessionId, projectDir) && !watches.some((watch) => isWatched(record, watch))) continue;
     const updatedAt = Date.parse(record.updatedAt);
     const recorded = record.status === "running" || record.status === "waiting";
     // A run that stopped reporting without finishing has lost its process.
@@ -91,9 +95,25 @@ export function runStatusLines(records, options = {}) {
 function isVisibleTo(record, sessionId, projectDir) {
   if (record.owner !== undefined) return typeof sessionId === "string" && record.owner === sessionId;
   if (typeof projectDir !== "string" || !isAbsolute(projectDir) || !isAbsolute(record.cwd)) return false;
-  const project = resolve(projectDir);
-  const cwd = resolve(record.cwd);
-  return cwd === project || cwd.startsWith(project.endsWith(sep) ? project : `${project}${sep}`);
+  return isInside(record.cwd, projectDir);
+}
+
+function isInside(path, directory) {
+  const outer = resolve(directory);
+  const inner = resolve(path);
+  return inner === outer || inner.startsWith(outer.endsWith(sep) ? outer : `${outer}${sep}`);
+}
+
+function isWatched(record, watch) {
+  if (watch === null || typeof watch !== "object") return false;
+  const { text, dir } = watch;
+  if (typeof dir === "string" && text === undefined) {
+    return isAbsolute(dir) && isAbsolute(record.cwd) && isInside(record.cwd, dir);
+  }
+  if (typeof text !== "string" || text === "" || dir !== undefined) return false;
+  if (record.id.startsWith(text)) return true;
+  // The label must start with the whole text, not with a longer word that begins like it.
+  return record.label?.startsWith(text) === true && !/^[\p{L}\p{N}_-]/u.test(record.label.slice(text.length));
 }
 
 function isRecord(value) {
@@ -204,6 +224,18 @@ function readRecords(directory) {
   return records;
 }
 
+/** What the session asked to watch with `machine watch`; nothing when it has no readable list. */
+function readWatches(directory, sessionId) {
+  // The id is part of the file name, so it must not be able to leave the directory.
+  if (typeof sessionId !== "string" || !/^[A-Za-z0-9_-][A-Za-z0-9._-]*$/u.test(sessionId)) return [];
+  try {
+    const { watches } = JSON.parse(readFileSync(join(directory, `.watch.${sessionId}.json`), "utf8"));
+    return Array.isArray(watches) ? watches : [];
+  } catch {
+    return [];
+  }
+}
+
 async function main() {
   const directory = process.env.MACHINES_RUN_STATUS_DIR;
   if (directory === undefined || directory === "" || process.stdin.isTTY) return;
@@ -217,6 +249,7 @@ async function main() {
   const columns = /^[0-9]+$/u.test(process.env.COLUMNS ?? "") ? Number(process.env.COLUMNS) : defaultColumns;
   const lines = runStatusLines(readRecords(directory), {
     sessionId: input.session_id,
+    watches: readWatches(directory, input.session_id),
     projectDir: [input.workspace?.project_dir, input.workspace?.current_dir, input.cwd]
       .find((path) => typeof path === "string" && path !== ""),
     columns,

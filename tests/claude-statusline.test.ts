@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -108,6 +108,47 @@ test("a session sees the runs it owns and unowned runs inside its project", () =
   assert.equal(shown({ cwd: "/work" }), false);
   assert.equal(shown({ cwd: "project" }), false);
   assert.equal(shown({ cwd: "/work/project" }, { ...alive, projectDir: undefined as unknown as string }), false);
+});
+
+test("a watched run is shown whoever owns it and wherever it works, once, as any other run is", () => {
+  const theirs = record({
+    id: "1a2b3c4d-0000", owner: "another-session", cwd: "/elsewhere", label: "org-9 → machines: Watch runs", state: "change",
+    startedAt: ago(65_000), stateSince: ago(5_000), updatedAt: ago(1_000),
+    agent: { harness: "claude", model: "claude-opus-5-5" },
+  });
+  const unowned = record({ id: "5e6f7a8b-0000", cwd: "/elsewhere/child", state: "review", updatedAt: ago(2_000) });
+  const mine = record({ id: "9c0d1e2f-0000", owner: "session", cwd: "/elsewhere", label: "org-9: Mine", state: "verify" });
+  const records = [theirs, unowned, mine];
+  const lines = (watches?: readonly unknown[], sessionId = "session") =>
+    runStatusLines(records, { ...alive, sessionId, ...(watches === undefined ? {} : { watches: watches as object[] }) });
+  const own = ["● org-9: Mine", "  ticket › verify · 0s"];
+  const watched = ["● org-9 → machines: Watch runs", "  ticket › change · 5s (1m 5s total) · claude-opus-5-5"];
+
+  // A session that watches nothing sees what it always saw.
+  assert.deepEqual(lines(), own);
+  assert.deepEqual(lines([]), own);
+  assert.deepEqual(lines([{ text: "org-7" }, { dir: "/work/other" }]), own);
+  assert.deepEqual(lines([{ text: "1a2b" }]), [...own, ...watched]);
+  assert.deepEqual(lines([{ dir: "/elsewhere/child" }]), [...own, "● 5e6f7a8b  ticket › review · 0s"]);
+  // A run its session owns, or that several entries name, is still one run.
+  assert.deepEqual(lines([{ text: "org-9" }, { text: "1a2b" }, { text: "9c0d" }, { dir: "/elsewhere" }, { text: "org-9" }]), [
+    ...own, ...watched, "● 5e6f7a8b  ticket › review · 0s",
+  ]);
+  // The list belongs to the session that reads it, not to the runs.
+  assert.deepEqual(lines([{ text: "org-9" }], "third-session"), [...own, ...watched]);
+  assert.deepEqual(lines(undefined, "third-session"), []);
+
+  // A sub-run stays its parent's detail, and what is not a watch names nothing.
+  assert.deepEqual(runStatusLines([{ ...theirs, parent: "outer-run" }], { ...alive, watches: [{ text: "org-9" }, { text: "1a2b" }] }), []);
+  const invalid = [null, 7, "org-9", [], {}, { text: "" }, { text: 9 }, { dir: "elsewhere" }, { dir: 7 }, { text: "org-9", dir: "/elsewhere" }];
+  assert.deepEqual(lines(invalid), own);
+  assert.deepEqual(lines([...invalid, { text: "5e6f" }]), [...own, "● 5e6f7a8b  ticket › review · 0s"]);
+
+  // A run answered through its host shows its request as any waiting run does.
+  const hosted = { ...theirs, status: "waiting", agent: undefined, answeredBy: "host", human: { prompt: "Approve the plan?\nIt changes three files." } };
+  const shown = runStatusLines([hosted], { ...alive, watches: [{ text: "org-9" }] });
+  assert.deepEqual(shown, ["◆ org-9 → machines: Watch runs", "  ticket › input needed · 5s (1m 5s total)", "  Approve the plan?"]);
+  assert.deepEqual(runStatusLines([{ ...hosted, answeredBy: undefined, owner: "session" }], alive), shown);
 });
 
 test("active runs stay visible and finished runs leave after thirty seconds", () => {
@@ -273,6 +314,60 @@ test("the script prints the visible runs for the Claude Code session on stdin", 
     input: stdin, encoding: "utf8", env: { PATH: process.env.PATH, MACHINES_RUN_STATUS_DIR: directory, NO_COLOR: "1" },
   });
   assert.equal(linked.stdout, plain.stdout);
+});
+
+test("the script also shows what its session watches, and a list it cannot read changes nothing", async (context) => {
+  const directory = await temporaryDirectory(context);
+  const started = new Date(Date.now() - 5_000).toISOString();
+  const published = (change: Partial<RunStatusRecord>) => writeFile(
+    join(directory, `${change.id}.json`),
+    JSON.stringify(record({ pid: process.pid, startedAt: started, updatedAt: started, ...change })),
+  );
+  const updated = (secondsAgo: number) => new Date(Date.now() - secondsAgo * 1_000).toISOString();
+  await published({ id: "owned-run", owner: "session", cwd: "/elsewhere", state: "review", updatedAt: updated(2) });
+  await published({
+    id: "foreign-run", owner: "another", cwd: "/work/project", label: "org-9: Watch runs", state: "change", updatedAt: updated(0),
+  });
+  await published({ id: "distant-run", cwd: "/work/other/child", state: "verify", updatedAt: updated(1) });
+  await published({ id: "inner-run", parent: "foreign-run", label: "org-9: A step", cwd: "/work/other" });
+  const show = (sessionId: unknown = "session") => runScript(
+    JSON.stringify({ session_id: sessionId, workspace: { project_dir: "/work/project" } }),
+    { MACHINES_RUN_STATUS_DIR: directory, NO_COLOR: "1" },
+  );
+  const before = show();
+  assert.match(before.stdout, /^● owned-ru  ticket › review · \d+s\n$/u);
+  const unchanged = (written: string) => {
+    const result = show();
+    assert.deepEqual(
+      { status: result.status, stderr: result.stderr, stdout: result.stdout.replace(/\d+s/gu, "0s") },
+      { status: 0, stderr: "", stdout: before.stdout.replace(/\d+s/gu, "0s") },
+      written,
+    );
+  };
+
+  const list = join(directory, ".watch.session.json");
+  for (const text of ["{", "", "null", "[]", '"org-9"', '{"watches":{"text":"org-9"}}', '{"watches":[null,{"text":""},{"dir":"other"}]}']) {
+    await writeFile(list, text);
+    unchanged(text);
+  }
+  await rm(list);
+  await mkdir(list);
+  unchanged("a directory");
+  await rm(list, { recursive: true });
+  // Another session's list, and a session id that would leave the directory, name nothing.
+  const watches = JSON.stringify({ schemaVersion: 1, watches: [{ text: "org-9" }, { dir: "/work/other" }] });
+  await writeFile(join(directory, ".watch.another.json"), watches);
+  await mkdir(join(directory, ".watch.nested"));
+  await writeFile(join(directory, ".watch.nested", "session.json"), watches);
+  unchanged("another session's list");
+  for (const sessionId of ["nested/session", "../escaped", ".hidden", "", 7, null]) {
+    assert.deepEqual({ status: show(sessionId).status, stdout: show(sessionId).stdout }, { status: 0, stdout: "" });
+  }
+
+  await writeFile(list, watches);
+  assert.match(show().stdout, new RegExp([
+    "^● org-9: Watch runs", "  ticket › change · \\d+s", "● distant-  ticket › verify · \\d+s", "● owned-ru  ticket › review · \\d+s", "$",
+  ].join("\n"), "u"));
 });
 
 test("the script is silent and successful when it has nothing valid to show", async (context) => {
