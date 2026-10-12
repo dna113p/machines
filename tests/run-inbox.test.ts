@@ -705,7 +705,9 @@ type Publication = string | { readonly home: string };
 
 function environment(publication: Publication): NodeJS.ProcessEnv {
   const inherited = { ...process.env };
-  for (const key of ["MACHINES_RUN_STATUS_DIR", "MACHINES_RUN_OWNER", "MACHINES_RUN_PARENT", "CLAUDE_CODE_SESSION_ID"]) {
+  for (const key of [
+    "MACHINES_RUN_STATUS_DIR", "MACHINES_RUN_OWNER", "MACHINES_RUN_PARENT", "CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "PI_SESSION_ID",
+  ]) {
     delete inherited[key];
   }
   if (typeof publication !== "string") return { ...inherited, MACHINES_USER_HOME: publication.home };

@@ -63,6 +63,7 @@ try {
     import { startMachineHost } from "@dna113p/machines/host";
     import { createMachinesMcpServer } from "@dna113p/machines/mcp";
     import extension from "@dna113p/machines/pi-extension";
+    import { readRunStatuses, readRunWatches, runSessionId, runStatusDirectory, runsForViewer } from "@dna113p/machines/run-status";
     assert.equal(typeof acpAgent, "function");
     assert.equal(typeof agyAgent, "function");
     assert.equal(typeof claudeAgent, "function");
@@ -123,6 +124,21 @@ try {
     assert.equal(typeof listMachines, "function");
     assert.equal(typeof createMachinesMcpServer, "function");
     assert.equal(typeof extension, "function");
+    // Nothing has published under the empty home: the readers find no runs and no watch list there.
+    const published = runStatusDirectory();
+    assert.equal(published, process.env.MACHINES_USER_HOME + "/.local/state/machines/runs");
+    assert.deepEqual([readRunStatuses(published), readRunWatches(published, "viewer")], [[], []]);
+    assert.equal(runSessionId({ MACHINES_RUN_OWNER: "viewer" }), "viewer");
+    const at = "2026-03-04T05:06:07.000Z";
+    const shown = runsForViewer([
+      { schemaVersion: 2, id: "mine", pid: process.pid, owner: "viewer", machine: "release", path: "/work/release.ts",
+        cwd: "/work", status: "waiting", human: { prompt: "Publish?", requestId: "request" }, startedAt: at, updatedAt: at },
+      { schemaVersion: 2, id: "theirs", pid: process.pid, owner: "another", machine: "release", path: "/work/release.ts",
+        cwd: "/work", status: "running", startedAt: at, updatedAt: at },
+    ], { sessionId: "viewer", projectDir: "/work" }, { now: Date.parse(at) });
+    assert.deepEqual(shown.map((run) => [run.id, run.status, run.shown, run.answer]), [
+      ["mine", "waiting", "owned", { via: "respond", runId: "mine", requestId: "request" }],
+    ]);
     const definition = machine({ initial: "work", states: {
       work: operation(() => ({ type: "completed" }), { completed: "done" }), done: final(),
     }});
@@ -153,6 +169,13 @@ try {
     import { openRouterDecisionAgent, openRouterDecisionProvider, type OpenRouterDecisionAgentOptions, type OpenRouterDecisionProviderOptions } from "@dna113p/machines/openrouter";
     import { layaAgent, layaProvider, type LayaAgentOptions, type LayaProviderOptions } from "@dna113p/machines/laya";
     import { vonAgent, vonProvider, type VonAgentOptions, type VonProviderOptions } from "@dna113p/machines/von";
+    import { readRunStatuses, readRunWatches, runStatusDirectory, runsForViewer, type RunStatusRecord, type RunViewer, type RunWatch, type ViewerRun } from "@dna113p/machines/run-status";
+    const runsDirectory: string | undefined = runStatusDirectory();
+    const runRecords: RunStatusRecord[] = runsDirectory === undefined ? [] : readRunStatuses(runsDirectory);
+    const runWatches: RunWatch[] = runsDirectory === undefined ? [] : readRunWatches(runsDirectory, "viewer");
+    const runViewer: RunViewer = { sessionId: "viewer", projectDir: "/work", watches: runWatches };
+    const viewerRuns: ViewerRun[] = runsForViewer(runRecords, runViewer, { now: Date.now(), all: true });
+    const answered: string[] = viewerRuns.map((run) => run.answer?.via === "respond" ? run.answer.requestId : run.status);
     const layaOptions: LayaProviderOptions = { baseUrl: "http://127.0.0.1:8001", timeoutMs: 5000 };
     const vonOptions: VonProviderOptions = { baseUrl: "http://127.0.0.1:8000", timeoutMs: 5000 };
     const laya: DecisionProvider = layaProvider(layaOptions);

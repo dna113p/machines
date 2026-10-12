@@ -1,6 +1,6 @@
 {
   "name": "@dna113p/machines",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Reusable workflows coordinating agents, local operations, and human decisions.",
   "license": "MIT",
   "repository": {
@@ -36,7 +36,8 @@
     "./host": { "types": "./dist/src/host.d.ts", "import": "./dist/src/host.js" },
     "./launcher": { "types": "./dist/src/launcher.d.ts", "import": "./dist/src/launcher.js" },
     "./mcp": { "types": "./dist/mcp/server.d.ts", "import": "./dist/mcp/server.js" },
-    "./pi-extension": { "types": "./dist/pi-extension/index.d.ts", "import": "./dist/pi-extension/index.js" }
+    "./pi-extension": { "types": "./dist/pi-extension/index.d.ts", "import": "./dist/pi-extension/index.js" },
+    "./run-status": { "types": "./dist/src/run-viewer.d.ts", "import": "./dist/src/run-viewer.js" }
   },
   "files": ["dist", "claude/statusline.mjs", "docs/architecture.md", "docs/authoring.md", "docs/integrations.md", "docs/local-decisions.md", "services/laya/server.py", "skills", "LICENSE", "README.md"],
   "scripts": {

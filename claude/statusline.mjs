@@ -4,8 +4,9 @@
 // docs/integrations.md). It runs on every status refresh, so it imports only
 // node: modules and never loads the runtime; the directory rule and the record
 // shape below mirror runStatusDirectory and RunStatusRecord in
-// src/run-status.ts, and the watch list and its matching mirror
-// src/run-watch.ts.
+// src/run-status.ts, the watch list and its matching mirror src/run-watch.ts,
+// and which runs a session sees, and in what order, mirrors runsForViewer in
+// src/run-viewer.ts, which tests/run-viewer.test.ts checks.
 
 import { readdirSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";

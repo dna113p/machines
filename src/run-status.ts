@@ -325,10 +325,16 @@ export function runStatusObserver(
 
 /**
  * The session a process belongs to: the owner of the runs it starts, and the
- * session whose watch list `machine watch` changes.
+ * session whose watch list `machine watch` changes. `MACHINES_RUN_OWNER` is how
+ * any host names it; the others are what Claude Code, Codex, and Pi give the
+ * commands they start.
  */
 export function runSessionId(environment: NodeJS.ProcessEnv = process.env): string | undefined {
-  return environment.MACHINES_RUN_OWNER || environment.CLAUDE_CODE_SESSION_ID || undefined;
+  return environment.MACHINES_RUN_OWNER
+    || environment.CLAUDE_CODE_SESSION_ID
+    || environment.CODEX_THREAD_ID
+    || environment.PI_SESSION_ID
+    || undefined;
 }
 
 /** Returns the valid records in a directory. Unreadable or malformed files are skipped. */
