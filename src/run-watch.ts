@@ -58,17 +58,24 @@ export function writeRunWatches(directory: string, sessionId: string, watches: r
 }
 
 /** Whether a watch names a run. A sub-run is never watched: it is its parent's detail. */
-export function runWatchMatches(watch: RunWatch, record: RunStatusRecord): boolean {
+export function runWatchMatches(
+  watch: RunWatch,
+  record: Pick<RunStatusRecord, "id" | "label" | "cwd" | "parent">,
+): boolean {
   if (record.parent !== undefined) return false;
-  if ("dir" in watch) {
-    if (!isAbsolute(record.cwd)) return false;
-    const cwd = resolve(record.cwd);
-    return cwd === watch.dir || cwd.startsWith(watch.dir.endsWith(sep) ? watch.dir : `${watch.dir}${sep}`);
-  }
+  if ("dir" in watch) return isWithinDirectory(record.cwd, watch.dir);
   if (record.id.startsWith(watch.text)) return true;
   // The label must start with the whole text, not with a longer word that begins like it.
   const next = record.label?.startsWith(watch.text) ? record.label.slice(watch.text.length) : undefined;
   return next !== undefined && !/^[\p{L}\p{N}_-]/u.test(next);
+}
+
+/** Whether a path is a directory or inside it. Only absolute paths say where they are. */
+export function isWithinDirectory(path: string, directory: string): boolean {
+  if (!isAbsolute(path) || !isAbsolute(directory)) return false;
+  const outer = resolve(directory);
+  const inner = resolve(path);
+  return inner === outer || inner.startsWith(outer.endsWith(sep) ? outer : `${outer}${sep}`);
 }
 
 /** Checks and normalizes what `machine watch` was given. */

@@ -37,6 +37,7 @@ import {
   writeRunWatches,
   type RunWatch,
 } from "./run-watch.ts";
+import { runsForViewer, type ViewerRun } from "./run-viewer.ts";
 
 import type { StateValue } from "xstate";
 import type { AgentUpdate, RunOptions } from "./index.ts";
@@ -45,8 +46,11 @@ const [command, selector, ...argumentsAfterSelector] = process.argv.slice(2);
 const runsOptions = selector === undefined ? [] : [selector, ...argumentsAfterSelector];
 const watchUsage = "machine watch [<run-id-or-label-start> | --dir <path>]";
 const unwatchUsage = "machine unwatch <run-id-or-label-start> | --dir <path> | --all";
+const watchForUsage = "machine watch --for <session> [<run-id-or-label-start> | --dir <path>]";
+const unwatchForUsage = "machine unwatch --for <session> <run-id-or-label-start> | --dir <path> | --all";
 
 try {
+  const listing = command === "runs" ? parseRunsOptions(runsOptions) : undefined;
   if (command === "list" && selector === undefined) {
     const machines = await listMachines({ cwd: process.cwd() });
     if (machines.length === 0) console.log("No Machines found.");
@@ -66,11 +70,9 @@ try {
     console.log(await readFile(machinePath, "utf8"));
   } else if (command === "run" && selector !== undefined) {
     await runMachine(await resolveMachine(selector), argumentsAfterSelector);
-  } else if (
-    command === "runs"
-    && runsOptions.every((option, index) => (option === "--json" || option === "--all") && runsOptions.indexOf(option) === index)
-  ) {
-    listRuns(runsOptions.includes("--json"), runsOptions.includes("--all"));
+  } else if (listing !== undefined) {
+    if (listing.viewer === undefined) listRuns(listing.json, listing.all);
+    else listViewerRuns(listing.json, listing.all, listing.viewer);
   } else if (command === "respond" && selector !== undefined) {
     await respond([selector, ...argumentsAfterSelector]);
   } else if (command === "watch") {
@@ -85,9 +87,12 @@ try {
       "  machine show <name-or-file>",
       "  machine run <name-or-file> [--agent role=preset]... [--input-file <file|->] [--] [input]",
       "  machine runs [--json] [--all]",
+      "  machine runs --for [<session>] [--project <dir>] [--json] [--all]",
       "  machine respond [--question] <run-id> <request-id> [--] <response>",
       `  ${watchUsage}`,
       `  ${unwatchUsage}`,
+      `  ${watchForUsage}`,
+      `  ${unwatchForUsage}`,
     ].join("\n"));
   }
 } catch (cause) {
@@ -188,13 +193,74 @@ function listRuns(json: boolean, all: boolean) {
   });
 }
 
+/** A viewer named with `--for`: a session, or this process's own, and the project directory it works in. */
+interface NamedViewer {
+  readonly session?: string;
+  readonly project?: string;
+}
+
+/** What `machine runs` was asked; undefined when the options are not ones it takes. */
+function parseRunsOptions(args: readonly string[]) {
+  let json = false;
+  let all = false;
+  let forViewer = false;
+  let session: string | undefined;
+  let project: string | undefined;
+  for (let index = 0; index < args.length; index += 1) {
+    const option = args[index];
+    const next = args[index + 1];
+    // What follows an option is its value unless it is another option.
+    const value = next === undefined || next.startsWith("--") ? undefined : next;
+    if (option === "--json" && !json) json = true;
+    else if (option === "--all" && !all) all = true;
+    else if (option === "--for" && !forViewer) {
+      forViewer = true;
+      // Without a session id the viewer is this process's own session.
+      session = value;
+      if (value !== undefined) index += 1;
+    } else if (option === "--project" && project === undefined && value !== undefined) {
+      project = value;
+      index += 1;
+    } else return undefined;
+  }
+  // A project is a viewer's: without --for the listing is of every session and project.
+  if (!forViewer) return project === undefined ? { json, all } : undefined;
+  const viewer: NamedViewer = { ...(session === undefined ? {} : { session }), ...(project === undefined ? {} : { project }) };
+  return { json, all, viewer };
+}
+
+/** The runs one viewer shows, by the rule its status line applies. */
+function listViewerRuns(json: boolean, all: boolean, viewer: NamedViewer) {
+  if (viewer.project === "") throw new Error("Expected a directory after --project");
+  const { directory, session } = requireWatchList(viewer.session);
+  const watches = readRunWatches(directory, session);
+  // As they are read, not by start time: runs updated in the same millisecond
+  // keep that order, here as in the library and on the status line.
+  const runs = runsForViewer(readRunStatuses(directory), {
+    sessionId: session,
+    // Compared absolute, wherever the command ran and however the path was written.
+    ...(viewer.project === undefined ? {} : { projectDir: resolve(viewer.project) }),
+    watches,
+  }, { all });
+  if (json) {
+    console.log(JSON.stringify(runs, null, 2));
+    return;
+  }
+  if (runs.length === 0) console.log(`Session ${session} shows no Machine runs.`);
+  runs.forEach((run, index) => {
+    printRunListing(run, index > 0, watches.some((watched) => runWatchMatches(watched, run)));
+  });
+}
+
 /** Every record in the directory, including runs that finished or lost their process and are still recorded. */
 function publishedRuns(directory: string) {
   return readRunStatuses(directory).sort((left, right) => Date.parse(left.startedAt) - Date.parse(right.startedAt));
 }
 
 /** A run that stopped reporting without finishing has lost its process, as on the status line. */
-function runStatus(record: RunStatusRecord) {
+function runStatus(record: RunStatusRecord | ViewerRun) {
+  // A viewer's run already has the status its process leaves it.
+  if ("shown" in record) return record.status;
   return record.status !== "completed" && record.status !== "failed" && !isProcessAlive(record.pid) ? "lost" : record.status;
 }
 
@@ -203,41 +269,56 @@ function isActiveRun(record: RunStatusRecord) {
   return status === "running" || status === "waiting";
 }
 
-function watch(args: string[]) {
-  const { directory, session } = requireWatchList();
+function watch(given: string[]) {
+  const { named, args, usage, who } = watchSession(given, watchUsage, watchForUsage);
+  const { directory, session } = requireWatchList(named);
   const watches = readRunWatches(directory, session);
   const runs = publishedRuns(directory);
   if (args.length === 0) {
-    if (watches.length === 0) console.log("This session watches no other runs.");
+    if (watches.length === 0) console.log(`${who} watches no other runs.`);
     for (const watched of watches) {
       console.log(describeWatch(watched));
       printWatchedRuns(watched, runs);
     }
     return;
   }
-  const added = parseWatch(args, watchUsage);
+  const added = parseWatch(args, usage);
   if (!watches.some((watched) => sameRunWatch(watched, added))) writeRunWatches(directory, session, [...watches, added]);
   console.log(`Watching ${describeWatch(added)}`);
   printWatchedRuns(added, runs);
 }
 
-function unwatch(args: string[]) {
-  const { directory, session } = requireWatchList();
+function unwatch(given: string[]) {
+  const { named, args, usage, who } = watchSession(given, unwatchUsage, unwatchForUsage);
+  if (args.length === 0) throw new Error(`Usage: ${usage}`);
+  const { directory, session } = requireWatchList(named);
   if (args[0] === "--all") {
-    if (args.length !== 1) throw new Error(`Usage: ${unwatchUsage}`);
+    if (args.length !== 1) throw new Error(`Usage: ${usage}`);
     writeRunWatches(directory, session, []);
-    console.log("This session watches no other runs.");
+    console.log(`${who} watches no other runs.`);
     return;
   }
-  const removed = parseWatch(args, unwatchUsage);
+  const removed = parseWatch(args, usage);
   const watches = readRunWatches(directory, session);
   const kept = watches.filter((watched) => !sameRunWatch(watched, removed));
   if (kept.length === watches.length) {
-    console.log(`This session was not watching ${describeWatch(removed)}`);
+    console.log(`${who} was not watching ${describeWatch(removed)}`);
     return;
   }
   writeRunWatches(directory, session, kept);
   console.log(`No longer watching ${describeWatch(removed)}`);
+}
+
+/**
+ * Takes a leading `--for <session>` from what `machine watch` and
+ * `machine unwatch` were given: the list to change is then that session's and
+ * not this process's own.
+ */
+function watchSession(given: string[], usage: string, forUsage: string) {
+  if (given[0] !== "--for") return { named: undefined, args: given, usage, who: "This session" };
+  const named = given[1];
+  if (named === undefined || named.startsWith("--")) throw new Error(`Usage: ${forUsage}`);
+  return { named, args: given.slice(2), usage: forUsage, who: `Session ${named}` };
 }
 
 function parseWatch(args: string[], usage: string): RunWatch {
@@ -259,10 +340,10 @@ function printWatchedRuns(watched: RunWatch, runs: readonly RunStatusRecord[]) {
   for (const record of matched) console.log(`  ${runColumns(record).join("\t")}`);
 }
 
-/** The session whose watch list this process changes, and where the list is kept. */
-function requireWatchList() {
+/** The session whose watch list is read or changed, this process's own unless one is named, and where the list is kept. */
+function requireWatchList(named?: string) {
   const directory = requireStatusDirectory();
-  const session = runSessionId();
+  const session = named ?? runSessionId();
   if (session === undefined) {
     throw new Error(
       "No session to watch for: set MACHINES_RUN_OWNER to the id of the session whose status line shows the runs.",
@@ -407,12 +488,12 @@ function plain(text: string) {
 }
 
 /** A run as tab-separated columns: its label follows the four that were always there. */
-function runColumns(record: RunStatusRecord) {
+function runColumns(record: RunStatusRecord | ViewerRun) {
   const label = record.label === undefined ? "" : plain(record.label);
   return [record.id, record.machine, runStatus(record), record.state ?? "starting"].map(plain).concat(label === "" ? [] : [label]);
 }
 
-function printRunListing(record: RunStatusRecord, separate: boolean, watched: boolean) {
+function printRunListing(record: RunStatusRecord | ViewerRun, separate: boolean, watched: boolean) {
   const state = record.state ?? "starting";
   const recorded = runStatus(record);
   const human = recorded === "waiting" ? record.human : undefined;

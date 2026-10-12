@@ -414,7 +414,7 @@ test("a published wait survives the swaps of its probes, in a hosted run and in 
   await rm(release);
   const direct = join(root, "direct");
   const inherited = { ...process.env };
-  for (const key of ["MACHINES_RUN_OWNER", "CLAUDE_CODE_SESSION_ID"]) delete inherited[key];
+  for (const key of ["MACHINES_RUN_OWNER", "CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "PI_SESSION_ID"]) delete inherited[key];
   const child = spawn(process.execPath, [resolve("src/cli.ts"), "run", "work"], {
     cwd: root, env: { ...inherited, MACHINES_RUN_STATUS_DIR: direct }, stdio: ["ignore", "ignore", "pipe"],
   });
@@ -1252,7 +1252,7 @@ function runCli(
   machine = fixture,
 ) {
   const inherited = { ...process.env };
-  for (const key of ["MACHINES_RUN_OWNER", "CLAUDE_CODE_SESSION_ID"]) delete inherited[key];
+  for (const key of ["MACHINES_RUN_OWNER", "CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "PI_SESSION_ID"]) delete inherited[key];
   return spawnSync(process.execPath, [resolve("src/cli.ts"), "run", machine, ...args], {
     cwd, encoding: "utf8", env: { ...inherited, MACHINES_RUN_STATUS_DIR: "off", ...environment },
   });

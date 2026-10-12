@@ -209,8 +209,11 @@ directory is created by the first write, as `0700`, and each file is `0600`:
 `status` is `running`, `waiting`, `completed`, or `failed`. `state` is the current
 state as a string (JSON for a nested state). `agent` is present while an Agent
 state has reported its identity, and `error` after a failure. `owner` is
-`MACHINES_RUN_OWNER` when set, otherwise `CLAUDE_CODE_SESSION_ID`, otherwise
-absent. `stateSince` is when the current state was entered. `label` is the first
+`MACHINES_RUN_OWNER` when set, otherwise the session id the coding agent gives
+the commands it starts (`CLAUDE_CODE_SESSION_ID`, then `CODEX_THREAD_ID`, then
+`PI_SESSION_ID`), otherwise absent; see
+[how a host names its session](#drawing-your-own-widgets). `stateSince` is when
+the current state was entered. `label` is the first
 line of `MACHINES_RUN_LABEL` (at most 160 characters) when a launcher sets it to
 say what the run is for, such as a ticket id and title; it is the launcher's
 choice to publish that text. `machine run` exports its run id as
@@ -326,7 +329,8 @@ waiting run its prompt, request id, and choices (tab-separated when its
 output is not a terminal). A run's label follows as a fifth column when it has
 one, and a sixth says `watched` for a run this session
 [watches](#watching-other-runs). It lists the running and waiting runs of every
-session and project. `--all`, with or without `--json`, lists every published
+session and project; `--for` narrows it to
+[what one viewer shows](#drawing-your-own-widgets). `--all`, with or without `--json`, lists every published
 run: also the ones whose records remain after they finished, as `completed` or
 `failed`, or after their process disappeared, as `lost` (in JSON such a record
 keeps the status it last published). A run answered through its host shows
@@ -445,8 +449,8 @@ to change the 120-column truncation.
 A session can pull in runs it did not start: a ticket that a daemon runs, or a
 run started by another session or under another project. Nothing is configured.
 The session is identified as a run's `owner` is, by `MACHINES_RUN_OWNER` and
-otherwise `CLAUDE_CODE_SESSION_ID`, so an agent inside Claude Code only runs the
-command.
+otherwise by the session id its coding agent gives it, so an agent inside Claude
+Code, Codex, or Pi only runs the command.
 
 ```bash
 machine runs                   # running and waiting runs, with their labels
@@ -455,6 +459,7 @@ machine watch org-9            # runs whose id or label starts with org-9
 machine watch --dir ../other   # runs working in that directory or below it
 machine watch                  # what this session watches, and the published runs each entry matches now
 machine unwatch org-9          # also: unwatch --dir <path>, unwatch --all
+machine watch --for <session> org-9   # the same commands for another session's list
 ```
 
 - `machine watch <text>` names every top-level run whose id starts with the
@@ -468,6 +473,10 @@ machine unwatch org-9          # also: unwatch --dir <path>, unwatch --all
   before its run exists. `machine watch` lists a matched run for as long as its
   record remains, with the status `machine runs --all` gives it, so it also
   says how a watched run ended.
+- `--for <session>`, first, makes `machine watch` and `machine unwatch` read
+  and change the list of the session it names instead of this process's own.
+  A program that draws [its own widgets](#drawing-your-own-widgets) for a
+  viewer manages that viewer's list this way, without setting a variable.
 
 A watched run is shown even when another session owns it or it works outside
 the project. Everything else is as for any run: sub-runs stay hidden, a run is
@@ -486,7 +495,122 @@ session id that is not safe as a file name is refused. Removing the last entry
 removes the file, and writing a list or starting a run removes other sessions'
 lists that have not changed for 30 days. A missing, unreadable, or malformed list watches
 nothing; it is never an error on the status line. The commands fail with a
-message when publication is off or when no variable names the session.
+message when publication is off or when nothing names the session.
+
+### Drawing your own widgets
+
+Any application can show Machine runs in its own way from what is already
+published: an extension for Codex or Pi, a web app, an editor panel. The Claude
+Code status line above is one such consumer. Nothing is configured and nothing
+new runs; there are three ways to read the same directory:
+
+| Read with | You get |
+| --- | --- |
+| `machine runs --for <session> --json` | The runs one viewer shows, each ready to draw |
+| `@dna113p/machines/run-status` | The same rule and the readers, in your own process |
+| The files | The [records](#run-status-for-host-status-lines) and [watch lists](#watching-other-runs) themselves; the rule is then yours to apply |
+
+A viewer is one surface that shows runs: a session of a coding agent, a browser
+tab, a status line. It is named by a session id and may have a project
+directory. The rule that decides what it shows is the status line's:
+
+- only top-level runs: a run started from inside another Machine is never shown;
+- the runs its session owns, unowned runs working in its project directory or
+  below it, and the runs its session [watches](#watching-other-runs), whoever
+  owns them;
+- a run recorded as running or waiting whose process is gone is `lost`;
+- a finished or lost run stays for 30 seconds and then drops out;
+- each run once, the ones that can still change first, then the most recently
+  updated. Runs updated in the same millisecond keep the order they were read
+  in from the directory, for the command, the library, and the status line
+  alike.
+
+Both ways below take a snapshot. Read again to refresh, as the status line does
+every few seconds, and read where the runs' processes can be seen, or every run
+looks `lost`.
+
+```bash
+machine runs --for "$SESSION" --project "$PWD" --json   # what that viewer shows
+machine runs --for --json                               # for this process's own session
+machine runs --for "$SESSION" --all                     # as text, and with older finished and lost runs
+machine watch --for "$SESSION" org-9                    # change what that viewer watches
+```
+
+`--for` takes the viewer's session id; with no id after it, the viewer is this
+process's own session, and the command fails when nothing names one.
+`--project` is the viewer's project directory, compared as an absolute path;
+without it only owned and watched runs are selected. `--all` also keeps the
+finished and lost runs that the 30 seconds would have dropped, for as long as
+their records remain. Without `--json` the runs are printed in the columns of
+`machine runs`. Without `--for`, `machine runs` is unchanged: every session's
+running and waiting runs, as plain records.
+
+Each item is the published record with three additions:
+
+```json
+{
+  "schemaVersion": 2, "id": "1a2b3c4d-…", "pid": 4242, "owner": "<session id>",
+  "machine": "release", "path": "/work/.machines/release.ts", "cwd": "/work",
+  "status": "waiting", "state": "approve",
+  "human": { "prompt": "Publish version 0.4.0?", "requestId": "9f8e7d6c-…", "choices": ["publish", "hold"] },
+  "startedAt": "2026-03-04T05:06:07.000Z", "updatedAt": "2026-03-04T05:08:12.000Z",
+  "shown": "owned",
+  "answer": { "via": "respond", "runId": "1a2b3c4d-…", "requestId": "9f8e7d6c-…" }
+}
+```
+
+- `status` is the effective one: what the record says, or `lost`.
+- `shown` says why the viewer shows the run: `owned`, `project`, or `watched`,
+  the first of them that holds.
+- `answer` is present while the run waits on a Human request that something
+  can answer. `"via": "respond"` carries the two ids for
+  `machine respond <runId> <requestId> <response>`; `"via": "host"` means only
+  the program hosting the run can answer it, so a widget shows the prompt and
+  offers no input. `human` still has the prompt, choices, and suggestions.
+
+Nothing is added for presentation: no colour, layout, or shortening, and no
+limit on how many runs are returned. Recorded text is the run's own, so escape
+it for your surface as the status line strips control characters.
+
+The library gives the same answer without starting a process:
+
+```ts
+import {
+  readRunStatuses, readRunWatches, runStatusDirectory, runsForViewer,
+} from "@dna113p/machines/run-status";
+
+const directory = runStatusDirectory(); // undefined while publication is off
+const runs = directory === undefined ? [] : runsForViewer(readRunStatuses(directory), {
+  sessionId,
+  projectDir: "/work/project",
+  watches: readRunWatches(directory, sessionId),
+});
+for (const run of runs) draw(run.label ?? run.id, run.status, run.shown, run.answer);
+```
+
+`runsForViewer(records, viewer, options)` is pure apart from probing whether
+each process is alive; `options` takes `now`, `all`, and an `isAlive` of your
+own. The module also exports `runSessionId`, the types of a record, a watch, a
+viewer, and an item, and `settledRunVisibleMilliseconds`. It only reads:
+publishing stays with the runtime, and a viewer's watch list is changed with
+`machine watch --for`.
+
+**Naming the session.** A viewer shows the runs whose `owner` is its session
+id, so the host and the runs it starts must agree on that id. Any host can set
+`MACHINES_RUN_OWNER` in the environment of the commands it starts and pass the
+same value to `--for`; the id may use letters, digits, `.`, `_`, and `-`. Where
+it is not set, the id is the one the coding agent already gives its commands:
+
+| Host | Variable | Given to |
+| --- | --- | --- |
+| Any | `MACHINES_RUN_OWNER` | Whatever the host starts with it set; takes precedence |
+| Claude Code | `CLAUDE_CODE_SESSION_ID` | The commands a session runs; also the `session_id` its status line receives |
+| Codex | `CODEX_THREAD_ID` | The commands a thread runs |
+| Pi | `PI_SESSION_ID` | The commands its `bash` and `powershell` tools run, not `!` commands typed by the user |
+
+The first one that is set names the session, in that order. A run started from
+inside one of these agents is therefore owned by that session: it is shown
+there, and in another session only when that session watches it.
 
 ## Troubleshooting
 

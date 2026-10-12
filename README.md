@@ -201,6 +201,7 @@ answered from outside its own terminal:
 
 ```bash
 machine runs [--json] [--all]                      # running and waiting runs; --all adds finished and lost ones
+machine runs --for [<session>] [--project <dir>] [--json] [--all]   # the runs one viewer shows
 machine respond <run-id> <request-id> <response>   # answer a waiting run
 machine watch [<run-id-or-label-start> | --dir <path>]     # show other runs on this session's status line
 machine unwatch <run-id-or-label-start> | --dir <path> | --all
@@ -215,6 +216,10 @@ Runs hosted through `startMachineHost` publish too and are answered through thei
 host. A session shows the runs it started; `machine watch` adds runs it did not,
 such as a ticket a daemon runs. See
 [watching other runs](docs/integrations.md#watching-other-runs).
+`machine runs --for` and the `@dna113p/machines/run-status` export answer which
+runs one session shows, so any application can
+[draw its own widgets](docs/integrations.md#drawing-your-own-widgets); `watch`
+and `unwatch` take `--for <session>` first to manage that session's list.
 
 ## Execution model and limitations
 

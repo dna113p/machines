@@ -61,6 +61,8 @@ MCP server ────┘       ↑
 | `src/discovery-worker.ts` | Fresh metadata imports in disposable workers |
 | `src/host.ts` | One child run, IPC, Human request identity, owned process termination, run-status publication for the run |
 | `src/session.ts` | Shared Pi/MCP run lifecycle, snapshots, response handling, retention, shutdown |
+| `src/run-status.ts`, `src/run-watch.ts` | The run-status directory rule, one record per published run, session identity, and each session's watch list |
+| `src/run-viewer.ts` | Which published runs one viewer shows; exported with the readers as `@dna113p/machines/run-status` |
 | `src/cli.ts` | Command parsing, terminal progress, source inspection |
 | `pi-extension/index.ts` | Pi tools, widgets, notifications, native input presentation |
 | `mcp/server.ts` | MCP schemas, tool results, and the optional HTML resource |
@@ -119,6 +121,14 @@ only way to answer it, its record says so, and `machine respond` refuses it. See
 
 A session's watch list changes only which published runs its status line shows.
 It gives no ownership of a run and no way to answer one.
+
+Which runs a viewer shows is one rule, `runsForViewer` in `src/run-viewer.ts`:
+`machine runs --for` prints its answer, and `@dna113p/machines/run-status`
+exports it with the readers, so that an application draws its own widgets
+without a second copy. It selects and orders; presentation stays with whatever
+draws. The standalone status line cannot load it and carries a tested copy, as
+it does of the directory rule. See
+[Integrations](integrations.md#drawing-your-own-widgets).
 
 Closing a session terminates active and starting hosts. Host termination includes
 ordinary descendants in the host's owned process group on POSIX and process-tree
