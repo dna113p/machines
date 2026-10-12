@@ -54,6 +54,12 @@ export async function respondToRun(options: RunResponse): Promise<void> {
     : undefined);
   const record = published();
   if (record === undefined) throw new Error(`Machine run "${runId}" is not published in ${directory}`);
+  // Such a run reads no inbox: a response left there would only look delivered.
+  if (record.answeredBy === "host") {
+    throw new Error(
+      `Machine run "${runId}" is answered through the program hosting it, not by machine respond: answer it there`,
+    );
+  }
   const request = pendingRequest(record);
   if (request === undefined) throw new Error(`Machine run "${runId}" is not waiting for Human input`);
   if (request.requestId === undefined) {

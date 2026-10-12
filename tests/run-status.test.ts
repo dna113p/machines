@@ -5,7 +5,9 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test, type TestContext } from "node:test";
 
+import { runStatusLines } from "../claude/statusline.mjs";
 import { MachineSession as McpSession } from "../mcp/server.ts";
+import { startMachineHost, type HostedHumanRequest } from "../src/host.ts";
 import { respondToRun } from "../src/run-inbox.ts";
 import {
   createRunStatusPublisher,
@@ -14,6 +16,8 @@ import {
   runInboxPath,
   type RunStatusRecord,
 } from "../src/run-status.ts";
+import { readRunWatches } from "../src/run-watch.ts";
+import { MachineSession } from "../src/session.ts";
 
 const run = { machine: "ticket", path: "/work/.machines/ticket.ts", cwd: "/work" };
 const fixture = resolve("tests/fixtures/run-status.machine.ts");
@@ -392,7 +396,9 @@ test("creating a publisher prunes settled records older than one hour", async (c
 
 test("reading skips unreadable and malformed files", async (context) => {
   const directory = await temporaryDirectory(context);
-  await writeRecord(directory, { id: "valid", owner: "session", state: "review", agent: { harness: "claude" } });
+  await writeRecord(directory, {
+    id: "valid", owner: "session", state: "review", agent: { harness: "claude" }, answeredBy: "host",
+  });
   await writeRecord(directory, { id: "valid-1", schemaVersion: 1, status: "waiting", human: { prompt: "Approve?" } });
   await writeRecord(directory, {
     id: "valid-2", status: "waiting",
@@ -420,6 +426,7 @@ test("reading skips unreadable and malformed files", async (context) => {
     { human: { prompt: "Approve?", suggestions: [7] } },
     { human: { prompt: "Approve?", discussion: "yes" } },
     { deliveries: "delivery-1" },
+    { answeredBy: "inbox" },
     { owner: 7 },
     { limit: "soon" },
     { limit: { until: "2026-10-10T21:00:00Z" } },
@@ -634,6 +641,317 @@ test("an MCP-hosted run publishes a discussion request and takes a question thro
   assert.doesNotMatch(text, /Why three\?|"human"/u);
   assert.deepEqual(await readdir(directory), [`${id}.json`]);
 });
+
+test("a hosted run publishes what machine run does, from its first state to its outcome", async (context) => {
+  const root = await temporaryDirectory(context);
+  const directory = join(root, "status");
+  const release = join(root, "release");
+  await mkdir(join(root, ".machines"));
+  await writeFile(join(root, ".machines", "agents.ts"), [
+    'import { existsSync } from "node:fs";',
+    "export default function agents() {",
+    '  return { default: { description: "Says who it is, then holds its turn.", runner: async (_request, report) => {',
+    '    report?.({ type: "identity", harness: "fixture", model: "tiny", thinking: "low" });',
+    `    while (!existsSync(${JSON.stringify(release)})) await new Promise((resolve) => setTimeout(resolve, 10));`,
+    '    return { type: "completed" };',
+    "  } } };",
+    "}",
+  ].join("\n"));
+  // The Agent state is entered by a transition, so its identity is reported before the state is.
+  await writeFile(join(root, ".machines", "work.ts"), [
+    'export const description = "Prepares, runs one Agent, and asks for approval.";',
+    "export default function work({ agent, final, human, machine, operation }) {",
+    '  return machine({ initial: "prepare", states: {',
+    '    prepare: operation(() => ({ type: "prepared" }), { prepared: "work" }),',
+    '    work: agent("Do the work.", { completed: "review" }),',
+    '    review: human("Approve the work?\\nIt changes three files.", { submitted: "done" }, { choices: ["approve", "deny"] }),',
+    "    done: final(),",
+    "  } });",
+    "}",
+  ].join("\n"));
+  publishFrom(context, {
+    MACHINES_RUN_STATUS_DIR: directory, MACHINES_RUN_LABEL: "org-9 → machines: Watch runs\nsecond line",
+    MACHINES_RUN_OWNER: "session-9",
+  });
+  const human = deferred<HostedHumanRequest>();
+  const hosted = await startMachineHost({
+    cwd: root, home: join(root, "home"), machine: "work", onHumanRequest: human.resolve,
+  });
+  context.after(() => hosted.terminate());
+  const published = () => readRunStatuses(directory)[0];
+  const identity = { harness: "fixture", model: "tiny", thinking: "low" };
+
+  await eventually(() => assert.deepEqual(published()?.agent, identity));
+  const { id, startedAt, updatedAt, stateSince, ...running } = published()!;
+  assert.equal(id, hosted.id);
+  assert.deepEqual(running, {
+    schemaVersion: 2, pid: process.pid, owner: "session-9", label: "org-9 → machines: Watch runs",
+    machine: "work", path: hosted.path, cwd: root, status: "running", state: "work", agent: identity, answeredBy: "host",
+  });
+  assert.ok(Date.parse(stateSince!) >= Date.parse(startedAt) && Date.parse(updatedAt) >= Date.parse(stateSince!));
+  assert.deepEqual(await readdir(directory), [`${id}.json`]);
+  assert.equal((await stat(join(directory, `${id}.json`))).mode & 0o777, 0o600);
+
+  await writeFile(release, "");
+  const request = await human.promise;
+  await eventually(() => assert.equal(published()?.status, "waiting"));
+  assert.deepEqual(
+    { state: published()!.state, agent: published()!.agent, human: published()!.human },
+    // The request id is the host's to use, so the record does not offer it.
+    { state: "review", agent: undefined, human: { prompt: "Approve the work?\nIt changes three files.", choices: ["approve", "deny"] } },
+  );
+
+  // Nothing reads an inbox for this run, so a response is refused instead of being left in one.
+  const refused = /Machine run "[^"]+" is answered through the program hosting it, not by machine respond/u;
+  await assert.rejects(respondToRun({ directory, runId: id, requestId: request.requestId, response: "approve" }), refused);
+  const responded = spawnSync(process.execPath, [resolve("src/cli.ts"), "respond", id, request.requestId, "approve"], {
+    encoding: "utf8", env: { ...process.env, MACHINES_RUN_STATUS_DIR: directory },
+  });
+  assert.equal(responded.status, 1);
+  assert.match(responded.stderr, refused);
+  assert.equal(published()!.status, "waiting");
+  assert.deepEqual(await readdir(directory), [`${id}.json`]);
+  const listed = spawnSync(process.execPath, [resolve("src/cli.ts"), "runs"], {
+    encoding: "utf8", env: { ...process.env, MACHINES_RUN_STATUS_DIR: directory },
+  });
+  assert.equal(listed.stdout, [
+    `${id}\twork\twaiting\treview\torg-9 → machines: Watch runs`,
+    "  Approve the work?", "  It changes three files.", "  answered through its host", "  choices: approve, deny", "",
+  ].join("\n"), listed.stderr);
+
+  await hosted.respond("approve", request.requestId);
+  assert.deepEqual(await hosted.result, { state: "done" });
+  // Like machine run, it leaves its outcome behind for readers, and later runs prune it.
+  const { updatedAt: finishedAt, ...completed } = published()!;
+  assert.deepEqual(completed, {
+    schemaVersion: 2, id, pid: process.pid, owner: "session-9", label: "org-9 → machines: Watch runs",
+    machine: "work", path: hosted.path, cwd: root, status: "completed", state: "done", answeredBy: "host", startedAt,
+  });
+  assert.ok(Date.parse(finishedAt) >= Date.parse(updatedAt));
+  assert.deepEqual(await readdir(directory), [`${id}.json`]);
+});
+
+test("a hosted run's label and owner options replace the environment's, and every ending is recorded", async (context) => {
+  const directory = await temporaryDirectory(context);
+  publishFrom(context, {
+    MACHINES_RUN_STATUS_DIR: directory, MACHINES_RUN_LABEL: "from the environment", MACHINES_RUN_OWNER: "environment-owner",
+  });
+  const hostFixture = resolve("tests/fixtures/host.machine.ts");
+  const only = () => {
+    const records = readRunStatuses(directory);
+    assert.equal(records.length, 1);
+    return records[0]!;
+  };
+  const clear = async () => { for (const name of await readdir(directory)) await rm(join(directory, name)); };
+
+  const failing = await startMachineHost({
+    machine: hostFixture, input: "fail", label: `\n  org-9: ${"x".repeat(300)}\nsecond line`, owner: "session-9",
+  });
+  await assert.rejects(failing.result, /host fixture failed/u);
+  assert.deepEqual(
+    { label: only().label, owner: only().owner, status: only().status, state: only().state, error: only().error },
+    {
+      label: `org-9: ${"x".repeat(153)}`, owner: "session-9", status: "failed", state: "work",
+      error: 'Operation failed in state "work": host fixture failed',
+    },
+  );
+  assert.deepEqual({ machine: only().machine, path: only().path, cwd: only().cwd, pid: only().pid }, {
+    machine: "host.machine", path: hostFixture, cwd: process.cwd(), pid: process.pid,
+  });
+
+  // An empty option says the run has none, whatever the environment names.
+  await clear();
+  const human = deferred<HostedHumanRequest>();
+  const terminated = await startMachineHost({ machine: hostFixture, label: "", owner: "", onHumanRequest: human.resolve });
+  await human.promise;
+  await eventually(() => assert.equal(only().status, "waiting"));
+  assert.deepEqual({ label: only().label, owner: only().owner }, { label: undefined, owner: undefined });
+  terminated.terminate();
+  await assert.rejects(terminated.result, /terminated/u);
+  assert.deepEqual(
+    { status: only().status, human: only().human, error: only().error },
+    { status: "failed", human: undefined, error: "Machine host was terminated" },
+  );
+
+  // The hosted process cannot record its own death; the host that outlives it does.
+  await clear();
+  const exited = await startMachineHost({ machine: hostFixture, input: "exit" });
+  await assert.rejects(exited.result, /exited before completion/u);
+  assert.deepEqual(
+    { label: only().label, owner: only().owner, status: only().status, error: only().error },
+    {
+      label: "from the environment", owner: "environment-owner", status: "failed",
+      error: "Machine host exited before completion (code 17)",
+    },
+  );
+});
+
+test("a hosted run publishes a wait for a usage limit", async (context) => {
+  const directory = await temporaryDirectory(context);
+  publishFrom(context, { MACHINES_RUN_STATUS_DIR: directory });
+  const hosted = await startMachineHost({
+    cwd: resolve("tests/fixtures/agent-limit-project"), home: resolve("tests/fixtures/empty-home"),
+    machine: "work", agents: { default: "waits" },
+  });
+  context.after(() => hosted.terminate());
+
+  await eventually(() => assert.ok(readRunStatuses(directory)[0]?.limit !== undefined));
+  const record = readRunStatuses(directory)[0]!;
+  assert.deepEqual({ status: record.status, state: record.state }, { status: "running", state: "work" });
+  assert.match(record.limit!.text, /^waits \(role default\) reached its usage limit; waiting for the reset at \d{4}-.*Z$/u);
+  assert.ok(Date.parse(record.limit!.until!) > Date.now());
+  hosted.terminate();
+  assert.deepEqual(
+    { status: readRunStatuses(directory)[0]!.status, limit: readRunStatuses(directory)[0]!.limit },
+    { status: "failed", limit: undefined },
+  );
+});
+
+test("a hosted run is the parent of the runs it starts, and publishes nothing while publication is off", async (context) => {
+  const root = await temporaryDirectory(context);
+  const directory = join(root, "status");
+  await mkdir(join(root, ".machines"));
+  await mkdir(join(root, "home"));
+  await writeFile(join(root, ".machines", "inner.ts"), [
+    'export const description = "Finishes at once.";',
+    "export default function inner({ final, machine, operation }) {",
+    '  return machine({ initial: "work", states: { work: operation(() => ({ type: "worked" }), { worked: "done" }), done: final() } });',
+    "}",
+  ].join("\n"));
+  await writeFile(join(root, ".machines", "outer.ts"), [
+    'import { spawnSync } from "node:child_process";',
+    'export const description = "Starts another Machine from an Operation, and outputs the run that one belongs to.";',
+    "export default function outer({ final, machine, operation }, input) {",
+    '  return machine({ initial: "start", output: () => process.env.MACHINES_RUN_PARENT ?? null, states: {',
+    "    start: operation(() => {",
+    '      if (input !== "nested") return { type: "started" };',
+    `      const started = spawnSync(process.execPath, [${JSON.stringify(resolve("src/cli.ts"))}, "run", "inner"], { encoding: "utf8" });`,
+    "      if (started.status !== 0) throw new Error(started.stderr);",
+    '      return { type: "started" };',
+    '    }, { started: "done" }),',
+    "    done: final(),",
+    "  } });",
+    "}",
+  ].join("\n"));
+  const start = async (input: string) => {
+    const hosted = await startMachineHost({
+      cwd: root, home: join(root, "home"), machine: "outer", input, label: "org-9: Watch runs", owner: "session-9",
+    });
+    return hosted.result;
+  };
+
+  // Off: the options alone publish nothing, and the hosted process is told of no run.
+  assert.equal(process.env.MACHINES_RUN_STATUS_DIR, undefined);
+  assert.deepEqual(await start("alone"), { state: "done", output: null });
+  publishFrom(context, { MACHINES_RUN_STATUS_DIR: "" });
+  assert.deepEqual(await start("alone"), { state: "done", output: null });
+  assert.deepEqual((await readdir(root)).sort(), [".machines", "home"]);
+
+  // On: the run itself belongs to whatever run started its host, and its own id is what it hands down.
+  publishFrom(context, {
+    MACHINES_RUN_STATUS_DIR: directory, MACHINES_RUN_PARENT: "enclosing-run", MACHINES_USER_HOME: join(root, "home"),
+  });
+  const { output } = await start("nested");
+  const records = Object.fromEntries(readRunStatuses(directory).map((record) => [record.machine, record]));
+  assert.deepEqual(Object.keys(records).sort(), ["inner", "outer"]);
+  assert.deepEqual(
+    { id: records.outer!.id, parent: records.outer!.parent, status: records.outer!.status, answeredBy: records.outer!.answeredBy },
+    { id: output, parent: "enclosing-run", status: "completed", answeredBy: "host" },
+  );
+  assert.deepEqual(
+    { parent: records.inner!.parent, status: records.inner!.status, answeredBy: records.inner!.answeredBy },
+    { parent: records.outer!.id, status: "completed", answeredBy: undefined },
+  );
+  assert.equal(process.env.MACHINES_RUN_PARENT, "enclosing-run");
+
+  // A caller that publishes the record itself, as the MCP server does, still has its run's id handed down.
+  await rm(directory, { recursive: true });
+  const unpublished = await startMachineHost({
+    cwd: root, home: join(root, "home"), machine: "outer", input: "nested", publishRunStatus: false,
+  });
+  assert.deepEqual(await unpublished.result, { state: "done", output: unpublished.id });
+  assert.deepEqual(
+    readRunStatuses(directory).map((record) => ({ machine: record.machine, parent: record.parent })),
+    [{ machine: "inner", parent: unpublished.id }],
+  );
+});
+
+test("a session's run is published under the id the session gives it, which another session can watch", async (context) => {
+  const directory = join(await temporaryDirectory(context), "status");
+  publishFrom(context, { MACHINES_RUN_STATUS_DIR: directory });
+  const session = new MachineSession();
+  context.after(() => session.close());
+  const run = await session.start({
+    machine: resolve("tests/fixtures/host-sequential.machine.ts"), label: "org-9: Watch runs", owner: "session-9",
+  });
+  const waiting = async (after?: string) => {
+    await eventually(() => {
+      const [current] = session.status(run.id);
+      assert.ok(current?.human !== undefined && current.human.requestId !== after);
+      assert.equal(readRunStatuses(directory)[0]?.status, "waiting");
+    });
+    return session.status(run.id)[0]!.human!.requestId;
+  };
+
+  const first = await waiting();
+  const [published] = readRunStatuses(directory);
+  assert.deepEqual(
+    {
+      id: published!.id, pid: published!.pid, owner: published!.owner, label: published!.label, state: published!.state,
+      human: published!.human, answeredBy: published!.answeredBy,
+    },
+    {
+      id: run.id, pid: process.pid, owner: "session-9", label: "org-9: Watch runs", state: "first",
+      human: { prompt: "Continue?" }, answeredBy: "host",
+    },
+  );
+  assert.deepEqual(await readdir(directory), [`${run.id}.json`]);
+
+  // The id a session reports for its run is the one to watch it by.
+  const watcher = { PATH: process.env.PATH, MACHINES_RUN_STATUS_DIR: directory, MACHINES_RUN_OWNER: "watcher" };
+  const lines = () => runStatusLines(readRunStatuses(directory), {
+    sessionId: "watcher", projectDir: "/elsewhere", watches: readRunWatches(directory, "watcher"), color: false,
+  });
+  assert.deepEqual(lines(), []);
+  const watched = spawnSync(process.execPath, [resolve("src/cli.ts"), "watch", run.id], { encoding: "utf8", env: watcher });
+  assert.equal(
+    watched.stdout,
+    `Watching ${run.id}\n  ${run.id}\thost-sequential.machine\twaiting\tfirst\torg-9: Watch runs\n`,
+    watched.stderr,
+  );
+  assert.equal(lines()[0], "◆ org-9: Watch runs");
+  assert.equal(lines().at(-1), "  Continue?");
+
+  // It stays that one record while the session answers it, to its outcome.
+  await session.respond({ runId: run.id, requestId: first, response: "yes" });
+  await session.respond({ runId: run.id, requestId: await waiting(first), response: "yes" });
+  await eventually(() => assert.equal(session.status(run.id)[0]?.status, "completed"));
+  assert.deepEqual(
+    readRunStatuses(directory).map((record) => ({ id: record.id, status: record.status, state: record.state })),
+    [{ id: run.id, status: "completed", state: "done" }],
+  );
+  assert.deepEqual((await readdir(directory)).sort(), [".watch.watcher.json", `${run.id}.json`]);
+});
+
+/** Sets what this process, as a host, publishes from, and restores it after the test. */
+function publishFrom(context: TestContext, environment: Readonly<Record<string, string>>): void {
+  const previous = Object.fromEntries(Object.keys(environment).map((key) => [key, process.env[key]]));
+  Object.assign(process.env, environment);
+  context.after(() => {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+}
+
+function deferred<T>() {
+  let resolvePromise!: (value: T) => void;
+  const promise = new Promise<T>((resolve) => {
+    resolvePromise = resolve;
+  });
+  return { promise, resolve: resolvePromise };
+}
 
 function runCli(
   args: readonly string[],

@@ -173,9 +173,9 @@ a command, such as Claude Code's status line, reads published run status instead
 Publication is opt-in: set `MACHINES_RUN_STATUS_DIR` to an absolute directory.
 When it is unset nothing is written.
 
-`machine run` and the MCP server then keep one file per run,
-`<dir>/<runId>.json`, replaced atomically on each change (directory `0700`, file
-`0600`):
+`machine run`, the MCP server, and every run hosted through `startMachineHost`
+then keep one file per run, `<dir>/<runId>.json`, replaced atomically on each
+change (directory `0700`, file `0600`):
 
 ```json
 {
@@ -197,6 +197,26 @@ say what the run is for, such as a ticket id and title; it is the launcher's
 choice to publish that text. `machine run` exports its run id as
 `MACHINES_RUN_PARENT`, so a Machine started by one of its Operations or Agents
 records that id as `parent`; the status line shows only top-level runs.
+
+A run hosted through `startMachineHost` from `@dna113p/machines/host` publishes
+the same record when the variable is set in the hosting process, for example a
+daemon that runs tickets, or Pi with the extension loaded. Two options replace the environment for that one run:
+`label`, shortened as `MACHINES_RUN_LABEL` is, and `owner`. When an option is
+absent the environment rule above applies; an empty one publishes the run
+without that field. The run exports its id as `MACHINES_RUN_PARENT` to its
+Operations and Agents, as `machine run` does. The host publishes, not the hosted
+process, so `pid` is the host's: a hosted process that is terminated or exits is
+recorded as `failed` with the reason, and a run whose host is gone shows as
+`lost`. The value `startMachineHost` resolves to carries the run's `id`, which
+is the id of its record; a session built on it, such as Pi's, reports that same
+id for the run, so it is the id to give `machine watch`.
+
+Such a record carries `"answeredBy": "host"`. Its Human requests are answered
+only through the host's own `respond` and `ask`: the run reads no inbox, its
+`human` has no `requestId`, and `machine respond` refuses it. The field is absent
+from every other record and did not exist in earlier version 2 records. A caller
+that publishes its own record for the run, as the MCP server does so that its
+runs keep their inbox, passes `publishRunStatus: false`.
 
 While an Agent state waits for a [usage limit](authoring.md#usage-limits) to
 reset, the record stays `running` and carries the wait in `limit`:
@@ -253,13 +273,21 @@ whatever answers it.
 ```bash
 machine runs                 # running and waiting runs
 machine runs --json          # the same runs as their records
+machine runs --all           # every published run, also finished and lost ones still recorded
 machine respond <run-id> <request-id> <response>
 machine respond --question <run-id> <request-id> <text>
 ```
 
 `machine runs` prints each run's id, Machine, status, and state, and for a
-waiting run its prompt, request id, and choices (tab-separated when its output
-is not a terminal):
+waiting run its prompt, request id, and choices (tab-separated when its
+output is not a terminal). A run's label follows as a fifth column when it has
+one, and a sixth says `watched` for a run this session
+[watches](#watching-other-runs). It lists the running and waiting runs of every
+session and project. `--all`, with or without `--json`, lists every published
+run: also the ones whose records remain after they finished, as `completed` or
+`failed`, or after their process disappeared, as `lost` (in JSON such a record
+keeps the status it last published). A run answered through its host shows
+`answered through its host` in place of a request id:
 
 ```text
 1a2b3c4d-…	release	waiting	approve
@@ -269,9 +297,9 @@ is not a terminal):
 ```
 
 `machine respond` checks the response against the current record before it
-delivers anything. It fails with a nonzero exit when the run is unknown, is not
-waiting, is waiting on a different request id, or restricts `choices` to values
-that do not include the response. `--question` sends a discussion question
+delivers anything. It fails with a nonzero exit when the run is unknown, is
+answered through its host, is not waiting, is waiting on a different request id,
+or restricts `choices` to values that do not include the response. `--question` sends a discussion question
 instead of an answer and is refused unless the request has `discussion: true`.
 Words after the request id are joined into one response; put `--` before a
 response that starts with a dash.
@@ -309,6 +337,8 @@ A published run started without terminal input, for example by a coordinating
 agent or a script, waits for `machine respond` instead of failing, and prints
 the exact command to its standard error. With publication off it fails at its
 first Human state with "Terminal input closed before a response", as before.
+Runs hosted in any other program through `startMachineHost` are answered only
+through that program.
 Runs hosted by the MCP server take a response from their own `machine_respond`
 tool or from the inbox. That tool is answer-only, so a question to a hosted
 request that allows discussion goes through the inbox with
@@ -350,12 +380,61 @@ prints one to three lines per run and nothing when there is nothing to show:
   Publish version 0.4.0?
 ```
 
-A session sees the runs it owns; runs without an owner appear in sessions whose
-project directory contains the run's working directory. Finished runs stay for
+A session sees the runs it owns and the runs it
+[watches](#watching-other-runs); runs without an owner also appear in sessions
+whose project directory contains the run's working directory. Finished runs stay for
 30 seconds. A run whose process disappeared without finishing is shown as `lost`
 for the same time, so the status line must run where it can see that process.
 Set `NO_COLOR` (to any value, even an empty one) for plain text and `COLUMNS`
 to change the 120-column truncation.
+
+### Watching other runs
+
+A session can pull in runs it did not start: a ticket that a daemon runs, or a
+run started by another session or under another project. Nothing is configured.
+The session is identified as a run's `owner` is, by `MACHINES_RUN_OWNER` and
+otherwise `CLAUDE_CODE_SESSION_ID`, so an agent inside Claude Code only runs the
+command.
+
+```bash
+machine runs                   # running and waiting runs, with their labels
+machine runs --all             # every published run, also finished and lost ones
+machine watch org-9            # runs whose id or label starts with org-9
+machine watch --dir ../other   # runs working in that directory or below it
+machine watch                  # what this session watches, and the published runs each entry matches now
+machine unwatch org-9          # also: unwatch --dir <path>, unwatch --all
+```
+
+- `machine watch <text>` names every top-level run whose id starts with the
+  text, or whose label starts with it as a whole leading part: the label ends
+  there or goes on with something other than a letter, a digit, `-`, or `_`.
+  `org-9` matches the labels `org-9 → machines: …` and `org-9: …`, not
+  `org-90 …`. Matching is case-sensitive, and the text is one non-empty line.
+- `machine watch --dir <path>` names every top-level run whose working
+  directory is that path or inside it. The path is kept absolute.
+- An entry keeps matching runs that start later, so a ticket can be watched
+  before its run exists. `machine watch` lists a matched run for as long as its
+  record remains, with the status `machine runs --all` gives it, so it also
+  says how a watched run ended.
+
+A watched run is shown even when another session owns it or it works outside
+the project. Everything else is as for any run: sub-runs stay hidden, a run is
+listed once however many entries name it, and at most five runs are shown.
+
+The list is one file per session beside the records,
+`<dir>/.watch.<session id>.json` (`0600`, replaced atomically), which the
+status line reads itself with the `session_id` Claude Code gives it:
+
+```json
+{ "schemaVersion": 1, "watches": [{ "text": "org-9" }, { "dir": "/work/other" }] }
+```
+
+Record readers skip it, as they skip every name that starts with a dot. A
+session id that is not safe as a file name is refused. Removing the last entry
+removes the file, and writing a list removes other sessions' lists that have
+not changed for 30 days. A missing, unreadable, or malformed list watches
+nothing; it is never an error on the status line. The commands fail with a
+message when publication is off or when no variable names the session.
 
 ## Troubleshooting
 

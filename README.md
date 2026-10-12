@@ -176,10 +176,10 @@ npm ci
 npm pack
 ```
 
-Then install the generated `dna113p-machines-0.3.0.tgz` into a project:
+Then install the generated `dna113p-machines-0.3.1.tgz` into a project:
 
 ```bash
-npm install /absolute/path/to/machines/dna113p-machines-0.3.0.tgz
+npm install /absolute/path/to/machines/dna113p-machines-0.3.1.tgz
 npx machine list
 ```
 
@@ -198,8 +198,10 @@ read. A published run that is waiting for a Human can then be answered from
 outside its own terminal:
 
 ```bash
-machine runs [--json]                              # running and waiting runs
+machine runs [--json] [--all]                      # running and waiting runs; --all adds finished and lost ones
 machine respond <run-id> <request-id> <response>   # answer a waiting run
+machine watch [<run-id-or-label-start> | --dir <path>]     # show other runs on this session's status line
+machine unwatch <run-id-or-label-start> | --dir <path> | --all
 ```
 
 `machine runs` shows each waiting run's prompt, request id, and choices. A run
@@ -207,6 +209,10 @@ started without a terminal, for example by a coordinating agent or a script,
 waits for `machine respond` instead of failing. Anything running as the same user
 can answer a waiting run, including an approval; see
 [answering a waiting run from outside](docs/integrations.md#answering-a-waiting-run-from-outside).
+Runs hosted through `startMachineHost` publish too and are answered through their
+host. A session shows the runs it started; `machine watch` adds runs it did not,
+such as a ticket a daemon runs. See
+[watching other runs](docs/integrations.md#watching-other-runs).
 
 ## Execution model and limitations
 

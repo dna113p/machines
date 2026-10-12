@@ -3,6 +3,8 @@ import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync
 import { basename, join, resolve } from "node:path";
 import type { StateValue } from "xstate";
 
+import type { AgentUpdate } from "./index.ts";
+
 /** One published run, stored as `<MACHINES_RUN_STATUS_DIR>/<id>.json`. */
 export interface RunStatusRecord {
   /** Version 1 records carry only `human.prompt`. */
@@ -25,6 +27,11 @@ export interface RunStatusRecord {
   /** Present while the current Agent state waits for a usage limit to reset; `status` stays `running`. */
   readonly limit?: RunStatusLimit;
   readonly human?: RunStatusHuman;
+  /**
+   * `host` when the program hosting the run answers its Human requests itself:
+   * the run has no inbox, and `machine respond` refuses it. Absent otherwise.
+   */
+  readonly answeredBy?: "host";
   /** Names the inbox responses the run took lately, so that each sender can tell; never a response. */
   readonly deliveries?: readonly string[];
   readonly error?: string;
@@ -60,6 +67,11 @@ export interface RunStatusRun {
   readonly path: string;
   readonly cwd: string;
   readonly startedAt?: string;
+  /** Replaces the owner the environment names; an empty one publishes the run unowned. */
+  readonly owner?: string;
+  /** Replaces `MACHINES_RUN_LABEL`, and is shortened as it is. */
+  readonly label?: string;
+  readonly answeredBy?: "host";
 }
 
 /** A present key replaces its field; a present key holding `undefined` clears it. */
@@ -121,9 +133,9 @@ export function createRunStatusPublisher(
   const id = run.id ?? randomUUID();
   if (directory === undefined || !isFileSafeId(id)) return disabled;
 
-  const owner = environment.MACHINES_RUN_OWNER || environment.CLAUDE_CODE_SESSION_ID || undefined;
+  const owner = (run.owner ?? runSessionId(environment)) || undefined;
   const parent = environment.MACHINES_RUN_PARENT || undefined;
-  const label = formatLabel(environment.MACHINES_RUN_LABEL);
+  const label = formatLabel(run.label ?? environment.MACHINES_RUN_LABEL);
   const startedAt = run.startedAt ?? new Date().toISOString();
   let status: RunStatusRecord["status"] = "running";
   let state: string | undefined;
@@ -151,6 +163,7 @@ export function createRunStatusPublisher(
       ...(agent === undefined ? {} : { agent }),
       ...(limit === undefined ? {} : { limit }),
       ...(human === undefined ? {} : { human }),
+      ...(run.answeredBy === undefined ? {} : { answeredBy: run.answeredBy }),
       ...(deliveries.length === 0 ? {} : { deliveries: deliveries.map((delivery) => delivery.id) }),
       ...(error === undefined ? {} : { error }),
       startedAt,
@@ -226,6 +239,56 @@ export function createRunStatusPublisher(
   };
 }
 
+/**
+ * Turns what a run reports as it executes into the changes to its record, for
+ * `machine run` and for a hosted run alike.
+ */
+export function runStatusObserver(
+  update: (change: RunStatusChange) => void,
+): { onAgentUpdate(update: AgentUpdate): void; onState(state: StateValue): void } {
+  let publishedState: string | undefined;
+  // A runner reports its identity as it starts. For a state entered by a
+  // transition that is before the state is announced, so an identity is held
+  // for the rest of the tick and published with the state it belongs to.
+  let arriving: Extract<AgentUpdate, { type: "identity" }> | undefined;
+  return {
+    onAgentUpdate(agent) {
+      if (agent.type === "identity") {
+        arriving = agent;
+        queueMicrotask(() => {
+          if (arriving !== agent) return;
+          arriving = undefined;
+          update({ agent });
+        });
+      } else if (agent.type === "limit" && agent.status !== "swapped") {
+        // A swap while every preset is being tried again leaves the wait as it is published.
+        update({
+          limit: agent.status === "resumed"
+            ? undefined
+            : { text: agent.text, ...(agent.until === undefined ? {} : { until: agent.until }) },
+        });
+      }
+    },
+    onState(state) {
+      const entered = formatState(state);
+      if (entered === publishedState) update({ state });
+      else {
+        update({ state, agent: arriving });
+        arriving = undefined;
+      }
+      publishedState = entered;
+    },
+  };
+}
+
+/**
+ * The session a process belongs to: the owner of the runs it starts, and the
+ * session whose watch list `machine watch` changes.
+ */
+export function runSessionId(environment: NodeJS.ProcessEnv = process.env): string | undefined {
+  return environment.MACHINES_RUN_OWNER || environment.CLAUDE_CODE_SESSION_ID || undefined;
+}
+
 /** Returns the valid records in a directory. Unreadable or malformed files are skipped. */
 export function readRunStatuses(directory: string): RunStatusRecord[] {
   return readRecordFiles(directory).map(({ record }) => record);
@@ -298,6 +361,7 @@ function isRunStatusRecord(value: unknown): value is RunStatusRecord {
       && (human.discussion === undefined || typeof human.discussion === "boolean")))
     && (limit === undefined || (limit !== null && typeof limit === "object" && typeof limit.text === "string"
       && isOptionalString(limit.until)))
+    && (record.answeredBy === undefined || record.answeredBy === "host")
     && isOptionalStrings(record.deliveries)
     && isOptionalString(record.error)
     && isTimestamp(record.startedAt)

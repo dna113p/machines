@@ -1,4 +1,6 @@
 import { execFileSync, fork, type ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import * as v from "valibot";
@@ -10,6 +12,12 @@ import {
   prepareMachineRun,
   type PrepareMachineRunOptions,
 } from "./launcher.ts";
+import {
+  createRunStatusPublisher,
+  runStatusDirectory,
+  runStatusObserver,
+  type RunStatusPublisher,
+} from "./run-status.ts";
 
 export interface HostedHumanRequest extends HumanRequest {
   readonly requestId: string;
@@ -17,6 +25,12 @@ export interface HostedHumanRequest extends HumanRequest {
 
 export interface MachineHostOptions extends PrepareMachineRunOptions {
   readonly signal?: AbortSignal;
+  /** What the run is for, in its published run status. `MACHINES_RUN_LABEL` applies when absent. */
+  readonly label?: string;
+  /** The session that owns the run in its published run status. The environment's owner applies when absent. */
+  readonly owner?: string;
+  /** Set to false by a caller that publishes the run's status itself, as the MCP server does. */
+  readonly publishRunStatus?: boolean;
   readonly onAgentUpdate?: (update: AgentUpdate) => void;
   readonly onHumanRequest?: (request: HostedHumanRequest) => void;
   readonly onState?: (state: StateValue) => void;
@@ -28,6 +42,8 @@ export interface MachineHostResult {
 }
 
 export interface MachineHostRun {
+  /** Names the run. Its published run status, when there is one, is recorded under this id. */
+  readonly id: string;
   readonly name: string;
   readonly description: string;
   readonly path: string;
@@ -47,13 +63,14 @@ const humanRequestSchema = v.strictObject({
   suggestions: v.optional(v.array(v.string())),
 });
 
+const agentIdentity = {
+  harness: v.string(),
+  model: v.optional(v.string()),
+  thinking: v.optional(v.string()),
+};
+
 const agentUpdateSchema = v.variant("type", [
-  v.strictObject({
-    type: v.literal("identity"),
-    harness: v.string(),
-    model: v.optional(v.string()),
-    thinking: v.optional(v.string()),
-  }),
+  v.strictObject({ type: v.literal("identity"), ...agentIdentity }),
   v.strictObject({
     type: v.literal("output"),
     text: v.string(),
@@ -87,6 +104,10 @@ const parentMessageSchema = v.variant("type", [
     agents: v.optional(v.record(v.string(), v.string())),
     cwd: v.string(),
     home: v.optional(v.string()),
+    // Present while run status is published, by the host or by its caller, under this id.
+    runId: v.optional(v.string()),
+    // The host publishes the record itself and needs each change to it.
+    reportStatus: v.optional(v.boolean()),
   }),
   v.strictObject({
     type: v.literal("ask"),
@@ -110,6 +131,15 @@ const childMessageSchema = v.variant("type", [
   }),
   v.strictObject({ type: v.literal("state"), state: stateValueSchema }),
   v.strictObject({ type: v.literal("agentUpdate"), update: agentUpdateSchema }),
+  v.strictObject({
+    type: v.literal("status"),
+    // A change to the published record. Null clears a field: IPC drops a key that holds undefined.
+    change: v.strictObject({
+      state: v.optional(stateValueSchema),
+      agent: v.optional(v.nullable(v.object(agentIdentity))),
+      limit: v.optional(v.nullable(v.strictObject({ text: v.string(), until: v.optional(v.string()) }))),
+    }),
+  }),
   v.strictObject({
     type: v.literal("humanRequest"),
     requestId: v.string(),
@@ -138,6 +168,16 @@ export function startMachineHost(
     }
   }
   const cwd = options.cwd ?? process.cwd();
+  // Run status is published here, by the host, and not by the hosted child.
+  // Only the host sees every ending: it stops the child with SIGKILL, and a
+  // child that crashed cannot record its own death. The record therefore
+  // carries this process's pid. While the host lives it settles the record
+  // itself; when the host dies the child stops with it (see "disconnect"
+  // below), so a reader that finds the pid gone rightly shows the run as lost.
+  const id = randomUUID();
+  const publication = runStatusDirectory() !== undefined;
+  const publishes = publication && options.publishRunStatus !== false;
+  let published: RunStatusPublisher | undefined;
   const child = fork(fileURLToPath(import.meta.url), [childArgument], {
     cwd,
     execArgv: [],
@@ -179,6 +219,7 @@ export function startMachineHost(
       const wasStarting = phase === "starting";
       phase = "failed";
       pendingHuman = undefined;
+      published?.finish({ error: error.message });
       rejectResult(error);
       if (wasStarting) rejectStarted(error);
       dispose();
@@ -202,7 +243,20 @@ export function startMachineHost(
           return;
         }
         phase = "running";
+        if (publishes) {
+          published = createRunStatusPublisher({
+            id,
+            machine: message.name,
+            path: message.path,
+            cwd: resolvePath(cwd),
+            ...(options.label === undefined ? {} : { label: options.label }),
+            ...(options.owner === undefined ? {} : { owner: options.owner }),
+            // Responses reach this run through `respond` and `ask` below, never through an inbox.
+            answeredBy: "host",
+          });
+        }
         resolveStarted({
+          id,
           name: message.name,
           description: message.description,
           path: message.path,
@@ -225,6 +279,7 @@ export function startMachineHost(
             }
             // Claim before yielding: no second caller can send this request again.
             pendingHuman = undefined;
+            published?.update({ status: "running", human: undefined });
             try {
               await sendChild(child, { type: "respond", requestId, response });
             } catch (cause) {
@@ -241,6 +296,7 @@ export function startMachineHost(
               throw new Error("Question must contain 1–8000 characters");
             }
             pendingHuman = undefined;
+            published?.update({ status: "running", human: undefined });
             try { await sendChild(child, { type: "ask", requestId, question }); }
             catch (cause) { fail(asError(cause)); throw cause; }
           },
@@ -256,6 +312,13 @@ export function startMachineHost(
         observe(() => options.onState?.(message.state as StateValue));
       } else if (message.type === "agentUpdate") {
         observe(() => options.onAgentUpdate?.(message.update as AgentUpdate));
+      } else if (message.type === "status") {
+        const { state, agent, limit } = message.change;
+        published?.update({
+          ...(state === undefined ? {} : { state: state as StateValue }),
+          ...(agent === undefined ? {} : { agent: agent ?? undefined }),
+          ...(limit === undefined ? {} : { limit: limit ?? undefined }),
+        });
       } else if (message.type === "humanRequest") {
         if (phase !== "running" || pendingHuman !== undefined) {
           fail(new Error("Machine host sent an unexpected Human request"));
@@ -265,6 +328,8 @@ export function startMachineHost(
           requestId: message.requestId,
           request: message.request,
         };
+        // Published without its request id, which only this host can use.
+        published?.update({ status: "waiting", human: message.request });
         observe(() => options.onHumanRequest?.({ ...message.request, requestId: message.requestId }));
       } else if (message.type === "completed") {
         if (phase !== "running") {
@@ -273,6 +338,7 @@ export function startMachineHost(
         }
         phase = "completed";
         pendingHuman = undefined;
+        published?.finish({ state: message.state as StateValue });
         dispose();
         resolveResult({
           state: message.state as StateValue,
@@ -304,6 +370,9 @@ export function startMachineHost(
         ...(options.input === undefined ? {} : { input: options.input }),
         ...(options.agents === undefined ? {} : { agents: options.agents }),
         ...(options.home === undefined ? {} : { home: options.home }),
+        // A caller that publishes the record itself still publishes it under this id.
+        ...(publication ? { runId: id } : {}),
+        ...(publishes ? { reportStatus: true } : {}),
       };
       void sendChild(child, launch).catch((cause: unknown) => fail(asError(cause)));
     });
@@ -376,7 +445,8 @@ function runChildHost(): void {
 
   async function launch(message: Extract<ParentMessage, { type: "launch" }>) {
     try {
-      const prepared = await prepareMachineRun(message);
+      const { runId, reportStatus, ...launched } = message;
+      const prepared = await prepareMachineRun(launched);
       send({
         type: "started",
         name: prepared.name,
@@ -384,9 +454,27 @@ function runChildHost(): void {
         path: prepared.path,
         agentRoles: prepared.agentRoles,
       });
+      // Machines started by this run's Operations and Agents are its sub-runs.
+      if (runId !== undefined) process.env.MACHINES_RUN_PARENT = runId;
+      // Only this process can tell which state an Agent identity belongs to, so
+      // it works out each change to the record and the host publishes it.
+      const observed = reportStatus !== true ? undefined : runStatusObserver((change) => send({
+        type: "status",
+        change: {
+          ...(change.state === undefined ? {} : { state: change.state }),
+          ...("agent" in change ? { agent: change.agent ?? null } : {}),
+          ...("limit" in change ? { limit: change.limit ?? null } : {}),
+        },
+      }));
       const result = await prepared.start({
-        onAgentUpdate: (update) => send({ type: "agentUpdate", update }),
-        onState: (state) => send({ type: "state", state }),
+        onAgentUpdate(update) {
+          send({ type: "agentUpdate", update });
+          observed?.onAgentUpdate(update);
+        },
+        onState(state) {
+          send({ type: "state", state });
+          observed?.onState(state);
+        },
         human: (request) => new Promise((resolve) => {
           if (pendingHuman !== undefined) {
             throw new Error("Machine host cannot wait for two Human responses at once");

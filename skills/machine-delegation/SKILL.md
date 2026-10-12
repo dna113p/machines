@@ -103,6 +103,11 @@ polling continuously. Interpret the current snapshot:
 Preserve existing user authorization when answering Human requests, and surface a
 new decision when the request requires one. A desire to finish is not an answer.
 
+To follow a run this session did not start, such as a ticket a daemon runs, use
+`machine watch <ticket-or-run-id>` where run status is published (`machine runs`
+lists what can be watched; `--all` adds runs that already ended). Watching only
+shows the run on this session's status line: it neither owns nor answers it.
+
 The CLI fallback is `machine run <name> [--agent role=preset] -- <input>` in the
 target workspace. It waits for completion and uses terminal Human input; retain
 the shell session if running it asynchronously. It does not return an MCP run ID.

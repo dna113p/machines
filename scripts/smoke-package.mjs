@@ -13,6 +13,10 @@ const npm = process.platform === "win32" ? "npm.cmd" : "npm";
 const userHome = join(temporary, "empty-home");
 await mkdir(userHome);
 const childEnvironment = { ...process.env, MACHINES_USER_HOME: userHome };
+// Hosted runs publish run status when asked to; a developer's own directory must not receive this one's.
+for (const name of ["MACHINES_RUN_STATUS_DIR", "MACHINES_RUN_OWNER", "MACHINES_RUN_PARENT", "MACHINES_RUN_LABEL"]) {
+  delete childEnvironment[name];
+}
 try {
   const packed = JSON.parse(execFileSync(npm, ["pack", "--ignore-scripts", "--json", "--pack-destination", temporary], {
     cwd: root, encoding: "utf8",

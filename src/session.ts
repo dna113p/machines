@@ -1,8 +1,7 @@
-import { randomUUID } from "node:crypto";
 import type { StateValue } from "xstate";
 
 import type { JsonValue } from "./json.ts";
-import { startMachineHost, type HostedHumanRequest, type MachineHostRun } from "./host.ts";
+import { startMachineHost, type HostedHumanRequest, type MachineHostOptions, type MachineHostRun } from "./host.ts";
 import type { AgentUpdate } from "./index.ts";
 import type { PrepareMachineRunOptions } from "./launcher.ts";
 
@@ -59,14 +58,17 @@ export class MachineSession {
     return () => this.#listeners.delete(listener);
   }
 
-  async start(options: PrepareMachineRunOptions): Promise<RunSnapshot> {
+  async start(
+    options: PrepareMachineRunOptions & Pick<MachineHostOptions, "label" | "owner" | "publishRunStatus">,
+  ): Promise<RunSnapshot> {
     if (this.#closed) throw new Error("Machine session is closed");
     const cancellation = new AbortController();
     this.#starting.add(cancellation);
-    const id = randomUUID();
     const startedAt = Date.now();
+    // The run is known by its host's id, which is also the id of its published run status.
+    let started: RunRecord | undefined;
     const update = (type: SessionEvent["type"], change: (run: RunRecord) => void) => {
-      const run = this.#runs.get(id);
+      const run = started === undefined ? undefined : this.#runs.get(started.id);
       if (run === undefined || !isActive(run.status)) return;
       change(run);
       run.updatedAt = Date.now();
@@ -108,14 +110,15 @@ export class MachineSession {
       throw new Error("Machine session is closed");
     }
     const run: RunRecord = {
-      id,
+      id: host.id,
       cwd: options.cwd ?? process.cwd(),
       host,
       startedAt,
       updatedAt: Date.now(),
       status: "running",
     };
-    this.#runs.set(id, run);
+    started = run;
+    this.#runs.set(run.id, run);
     void host.result.then(
       (result) => this.#finish(run, result),
       (cause: unknown) => this.#finish(run, { error: errorMessage(cause) }),
