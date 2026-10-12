@@ -13,7 +13,8 @@ const npm = process.platform === "win32" ? "npm.cmd" : "npm";
 const userHome = join(temporary, "empty-home");
 await mkdir(userHome);
 const childEnvironment = { ...process.env, MACHINES_USER_HOME: userHome };
-// Hosted runs publish run status when asked to; a developer's own directory must not receive this one's.
+// Runs publish run status unless told not to. With no directory named they publish under the Machines home
+// above, so a developer's own directory, named or standard, receives none of these.
 for (const name of ["MACHINES_RUN_STATUS_DIR", "MACHINES_RUN_OWNER", "MACHINES_RUN_PARENT", "MACHINES_RUN_LABEL"]) {
   delete childEnvironment[name];
 }

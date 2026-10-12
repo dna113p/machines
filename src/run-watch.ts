@@ -1,7 +1,7 @@
 import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, resolve, sep } from "node:path";
 
-import { isFileSafeId, type RunStatusRecord } from "./run-status.ts";
+import { isFileSafeId, watchListName, watchRetentionMilliseconds, type RunStatusRecord } from "./run-status.ts";
 
 /**
  * One thing a session asked to see on its status line besides its own runs:
@@ -9,8 +9,6 @@ import { isFileSafeId, type RunStatusRecord } from "./run-status.ts";
  */
 export type RunWatch = { readonly text: string } | { readonly dir: string };
 
-const forgottenAfterMilliseconds = 30 * 24 * 60 * 60 * 1_000;
-const watchFile = /^\.watch\..+\.json$/u;
 let temporaryFiles = 0;
 
 /**
@@ -98,14 +96,17 @@ function pickWatch(value: unknown): RunWatch | undefined {
   return undefined;
 }
 
-/** Sessions end without saying so; a list nobody has changed for a month belongs to one that did. */
+/**
+ * Sessions end without saying so; a list nobody has changed for a month belongs
+ * to one that did. A run that starts prunes them by the same rule.
+ */
 function pruneRunWatches(directory: string, kept: string): void {
   const now = Date.now();
   for (const name of readdirSync(directory)) {
     const file = join(directory, name);
-    if (!watchFile.test(name) || file === kept) continue;
+    if (!watchListName.test(name) || file === kept) continue;
     try {
-      if (now - statSync(file).mtimeMs > forgottenAfterMilliseconds) rmSync(file, { force: true });
+      if (now - statSync(file).mtimeMs > watchRetentionMilliseconds) rmSync(file, { force: true });
     } catch {
       // Another session may have pruned it first.
     }

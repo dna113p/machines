@@ -21,7 +21,7 @@ import { MachineSession as RunSession, type RunSnapshot } from "../src/session.t
 export type { RunSnapshot } from "../src/session.ts";
 import { listAgentPresets, listMachines } from "../src/launcher.ts";
 import { watchRunInbox } from "../src/run-inbox.ts";
-import { createRunStatusPublisher, runStatusDirectory, type RunStatusPublisher } from "../src/run-status.ts";
+import { createRunStatusPublisher, type RunStatusPublisher } from "../src/run-status.ts";
 import { machineCoordinatorGuidelines, machineDiscoveryDescription, machineSupervisionGuidelines } from "../src/coordinator-guidance.ts";
 
 const widgetUri = "ui://machines/run-v1.html";
@@ -243,7 +243,7 @@ export class MachineSession {
       this.#published.set(run.id, publisher);
     }
     const human = run.status === "waiting" ? run.human : undefined;
-    this.#watchInbox(run.id, human);
+    this.#watchInbox(run.id, human, publisher.directory);
     if (run.status === "running" || run.status === "waiting") {
       publisher.update({
         status: run.status, state: run.state, agent: run.agent, limit: run.limit, human, delivery: this.#taking,
@@ -255,12 +255,11 @@ export class MachineSession {
   }
 
   /** A published request can also be answered, or asked about, through the run's inbox by `machine respond`. */
-  #watchInbox(runId: string, request: RunSnapshot["human"]): void {
+  #watchInbox(runId: string, request: RunSnapshot["human"], directory: string | undefined): void {
     const watched = this.#inboxes.get(runId);
     if (watched?.requestId === request?.requestId) return;
     watched?.stop();
     this.#inboxes.delete(runId);
-    const directory = runStatusDirectory();
     if (request === undefined || directory === undefined) return;
     const stop = watchRunInbox(directory, runId, request, (response, delivery) => {
       // The session leaves the request before either call returns. A tool call

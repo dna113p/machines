@@ -114,17 +114,61 @@ test("a session adds, lists, and removes what it watches", async (context) => {
   assert.equal(machine(directory, session, "unwatch", "--all").status, 0);
 });
 
+test("with nothing set, a session's watch list and the runs it lists are in the standard directory of its home", async (context) => {
+  const home = join(await temporaryDirectory(context), "home");
+  const directory = join(home, ".local", "state", "machines", "runs");
+  const unset = { ...session, MACHINES_USER_HOME: home };
+
+  // Reading creates nothing, and a directory that is not there yet holds no runs.
+  assert.equal(machine(undefined, unset, "watch").stdout, "This session watches no other runs.\n");
+  const none = machine(undefined, unset, "runs");
+  assert.deepEqual({ status: none.status, stdout: none.stdout }, { status: 0, stdout: "No Machine runs are running or waiting.\n" }, none.stderr);
+  assert.equal(machine(undefined, unset, "unwatch", "org-9").stdout, "This session was not watching org-9\n");
+  await assert.rejects(stat(home), /ENOENT/u);
+
+  assert.equal(machine(undefined, unset, "watch", "org-9").stdout, "Watching org-9\n  no published run matches yet\n");
+  assert.equal((await stat(directory)).mode & 0o777, 0o700);
+  assert.equal((await stat(runWatchPath(directory, "session"))).mode & 0o777, 0o600);
+  assert.deepEqual(readRunWatches(directory, "session"), [{ text: "org-9" }]);
+
+  await writeRecord(directory, { id: "1a2b3c4d-run", label: "org-9: Watch runs", owner: "another-session" });
+  // The listing reads the watch list from there too, and marks the run this session watches.
+  assert.equal(machine(undefined, unset, "runs").stdout, "1a2b3c4d-run\tticket\trunning\tstarting\torg-9: Watch runs\twatched\n");
+  assert.equal(
+    machine(undefined, unset, "watch").stdout,
+    "org-9\n  1a2b3c4d-run\tticket\trunning\tstarting\torg-9: Watch runs\n",
+  );
+  const respond = machine(undefined, unset, "respond", "1a2b3c4d-run", "request", "approve");
+  assert.equal(respond.stderr, 'Machine run "1a2b3c4d-run" is not waiting for Human input\n');
+
+  assert.equal(machine(undefined, unset, "unwatch", "--all").stdout, "This session watches no other runs.\n");
+  assert.deepEqual(await readdir(directory), ["1a2b3c4d-run.json"]);
+});
+
 test("watching says why it cannot be done", async (context) => {
   const root = await temporaryDirectory(context);
   const directory = join(root, "status");
   const refused = (environment: Readonly<Record<string, string>>, ...args: string[]) => {
-    const result = machine(args[0] === "off" ? "" : directory, environment, ...(args[0] === "off" ? args.slice(1) : args));
+    const off = args[0] === "off" || args[0] === "" || args[0] === "homeless";
+    const result = machine(
+      !off ? directory : args[0] === "homeless" ? undefined : args[0],
+      args[0] === "homeless" ? { ...environment, MACHINES_USER_HOME: "relative/home" } : environment,
+      ...(off ? args.slice(1) : args),
+    );
     assert.deepEqual({ status: result.status, stdout: result.stdout }, { status: 1, stdout: "" }, args.join(" "));
     return result.stderr;
   };
 
   for (const args of [["watch"], ["watch", "org-9"], ["unwatch", "org-9"], ["unwatch", "--all"]]) {
-    assert.match(refused(session, "off", ...args), /^Run status publication is off: set MACHINES_RUN_STATUS_DIR /u);
+    // The switch is named as it is: unsetting the variable turns publication on.
+    for (const off of ["off", ""]) {
+      assert.equal(
+        refused(session, off, ...args),
+        "Run status publication is off: unset MACHINES_RUN_STATUS_DIR to use the standard directory, or set it to the directory the runs publish to.\n",
+      );
+    }
+    // Unset, only a home that cannot hold the standard directory leaves it off.
+    assert.match(refused(session, "homeless", ...args), /^Run status publication is off: there is no absolute home directory .* Set MACHINES_RUN_STATUS_DIR to /u);
     assert.match(refused({}, ...args), /^No session to watch for: set MACHINES_RUN_OWNER /u);
     // The session id becomes part of a file name.
     for (const id of ["../escaped", "nested/session", ".hidden"]) {
@@ -256,7 +300,8 @@ test("a watch list that cannot be read watches nothing, and writing one forgets 
   assert.deepEqual(readRunWatches(directory, "dormant"), [{ text: "org-1" }]);
 });
 
-function machine(directory: string, environment: Readonly<Record<string, string>>, ...args: string[]) {
+/** Runs one `machine` command with publication in `directory`; undefined leaves the variable unset. */
+function machine(directory: string | undefined, environment: Readonly<Record<string, string>>, ...args: string[]) {
   return spawnSync(process.execPath, [resolve("src/cli.ts"), ...args], {
     encoding: "utf8", env: { PATH: process.env.PATH, MACHINES_RUN_STATUS_DIR: directory, ...environment },
   });

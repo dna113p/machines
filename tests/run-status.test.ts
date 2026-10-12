@@ -1,11 +1,13 @@
+import "./environment.ts";
+
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdtemp, mkdir, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test, type TestContext } from "node:test";
 
-import { runStatusLines } from "../claude/statusline.mjs";
+import { runStatusDirectory as statusLineDirectory, runStatusLines } from "../claude/statusline.mjs";
 import { MachineSession as McpSession } from "../mcp/server.ts";
 import { startMachineHost, type HostedHumanRequest } from "../src/host.ts";
 import { respondToRun } from "../src/run-inbox.ts";
@@ -14,6 +16,7 @@ import {
   readRunStatuses,
   runDeliveryPath,
   runInboxPath,
+  runStatusDirectory,
   type RunStatusRecord,
 } from "../src/run-status.ts";
 import { readRunWatches } from "../src/run-watch.ts";
@@ -21,20 +24,113 @@ import { MachineSession } from "../src/session.ts";
 
 const run = { machine: "ticket", path: "/work/.machines/ticket.ts", cwd: "/work" };
 const fixture = resolve("tests/fixtures/run-status.machine.ts");
+/** Where a run publishes when nothing says where, under the home it is given. */
+const standardDirectory = (home: string) => join(home, ".local", "state", "machines", "runs");
 
-test("run status is disabled unless MACHINES_RUN_STATUS_DIR names a directory", async (context) => {
-  const cwd = await temporaryDirectory(context);
-  for (const environment of [{}, { MACHINES_RUN_STATUS_DIR: "" }, { MACHINES_RUN_OWNER: "owner" }]) {
-    const publisher = createRunStatusPublisher(run, environment);
-    publisher.update({ state: "work" });
-    publisher.finish({ state: "done" });
+test("the directory is the user's own unless MACHINES_RUN_STATUS_DIR moves it or turns publication off", (context) => {
+  const cases: ReadonlyArray<readonly [NodeJS.ProcessEnv, string | undefined]> = [
+    [{}, standardDirectory(homedir())],
+    [{ XDG_STATE_HOME: "/xdg/state" }, "/xdg/state/machines/runs"],
+    [{ XDG_STATE_HOME: "/xdg/state/" }, "/xdg/state/machines/runs"],
+    // Only an absolute XDG_STATE_HOME names a directory.
+    [{ XDG_STATE_HOME: "relative/state" }, standardDirectory(homedir())],
+    [{ XDG_STATE_HOME: "" }, standardDirectory(homedir())],
+    // A Machines home of its own keeps its runs, whatever is said of the real home.
+    [{ MACHINES_USER_HOME: "/machines/home" }, standardDirectory("/machines/home")],
+    [{ MACHINES_USER_HOME: "/machines/home", XDG_STATE_HOME: "/xdg/state" }, standardDirectory("/machines/home")],
+    // A home the runtime refuses publishes nowhere, and never in the real one.
+    [{ MACHINES_USER_HOME: "relative/home" }, undefined],
+    [{ MACHINES_USER_HOME: "", XDG_STATE_HOME: "/xdg/state" }, undefined],
+    [{ MACHINES_RUN_STATUS_DIR: "off" }, undefined],
+    [{ MACHINES_RUN_STATUS_DIR: "off", MACHINES_USER_HOME: "/machines/home", XDG_STATE_HOME: "/xdg/state" }, undefined],
+    [{ MACHINES_RUN_STATUS_DIR: "" }, undefined],
+    [{ MACHINES_RUN_STATUS_DIR: "", XDG_STATE_HOME: "/xdg/state" }, undefined],
+    [{ MACHINES_RUN_STATUS_DIR: "/explicit/runs" }, "/explicit/runs"],
+    [{ MACHINES_RUN_STATUS_DIR: "/explicit/runs", MACHINES_USER_HOME: "/machines/home", XDG_STATE_HOME: "/xdg/state" }, "/explicit/runs"],
+    [{ MACHINES_RUN_STATUS_DIR: "relative/runs" }, resolve("relative/runs")],
+    [{ MACHINES_RUN_STATUS_DIR: "./off" }, resolve("off")],
+  ];
+  for (const [environment, expected] of cases) {
+    assert.equal(runStatusDirectory(environment), expected, JSON.stringify(environment));
+    // The status line cannot load the runtime, so it has the rule a second time.
+    assert.equal(statusLineDirectory(environment), expected, `status line: ${JSON.stringify(environment)}`);
   }
-  const input = join(cwd, "input.json");
-  await writeFile(input, JSON.stringify({ observed: join(cwd, "observed.json"), secret: "unpublished" }));
-  const result = runCli(["--input-file", input], cwd, {});
-  assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(JSON.parse(await readFile(join(cwd, "observed.json"), "utf8")), []);
-  assert.deepEqual((await readdir(cwd)).sort(), ["input.json", "observed.json"]);
+
+  // Neither falls back to the working directory when the process has no absolute home.
+  const home = process.env.HOME;
+  context.after(() => {
+    if (home === undefined) delete process.env.HOME;
+    else process.env.HOME = home;
+  });
+  process.env.HOME = "relative/home";
+  for (const environment of [{}, { XDG_STATE_HOME: "relative/state" }]) {
+    assert.equal(runStatusDirectory(environment), undefined);
+    assert.equal(statusLineDirectory(environment), undefined);
+  }
+  assert.equal(runStatusDirectory({ XDG_STATE_HOME: "/xdg/state" }), "/xdg/state/machines/runs");
+  assert.equal(statusLineDirectory({ XDG_STATE_HOME: "/xdg/state" }), "/xdg/state/machines/runs");
+});
+
+test("run status is off when MACHINES_RUN_STATUS_DIR is off or empty", async (context) => {
+  const cwd = await temporaryDirectory(context);
+  const home = join(cwd, "home");
+  for (const off of ["off", ""]) {
+    for (const environment of [{ MACHINES_USER_HOME: home }, { MACHINES_USER_HOME: home, MACHINES_RUN_OWNER: "owner" }]) {
+      const publisher = createRunStatusPublisher(run, { ...environment, MACHINES_RUN_STATUS_DIR: off });
+      assert.equal(publisher.directory, undefined);
+      publisher.update({ state: "work" });
+      publisher.finish({ state: "done" });
+    }
+    const input = join(cwd, "input.json");
+    await writeFile(input, JSON.stringify({ observed: join(cwd, "observed.json"), secret: "unpublished" }));
+    const result = runCli(["--input-file", input], cwd, { MACHINES_RUN_STATUS_DIR: off, MACHINES_USER_HOME: home });
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(await readFile(join(cwd, "observed.json"), "utf8")), []);
+    // Not even the home it would publish under by default is created.
+    assert.deepEqual((await readdir(cwd)).sort(), ["input.json", "observed.json"]);
+  }
+});
+
+test("machine run with nothing set publishes in the standard directory of its home", async (context) => {
+  const root = await temporaryDirectory(context);
+  const input = join(root, "input.json");
+  const observed = join(root, "observed.json");
+  await writeFile(input, JSON.stringify({ observed, secret: "never-published-value" }));
+  const unset = { MACHINES_RUN_STATUS_DIR: undefined, MACHINES_USER_HOME: undefined, XDG_STATE_HOME: undefined };
+  const homes: ReadonlyArray<readonly [string, Readonly<Record<string, string | undefined>>, string]> = [
+    ["the process's home", { ...unset, HOME: join(root, "home") }, standardDirectory(join(root, "home"))],
+    ["XDG_STATE_HOME", { ...unset, HOME: join(root, "unused"), XDG_STATE_HOME: join(root, "xdg") }, join(root, "xdg", "machines", "runs")],
+    [
+      "the Machines home",
+      { ...unset, HOME: join(root, "unused"), XDG_STATE_HOME: join(root, "unused"), MACHINES_USER_HOME: join(root, "machines-home") },
+      standardDirectory(join(root, "machines-home")),
+    ],
+  ];
+  for (const [name, environment, directory] of homes) {
+    const result = runCli(["--input-file", input], root, environment);
+    assert.equal(result.status, 0, `${name}: ${result.stderr}`);
+    assert.equal((await stat(directory)).mode & 0o777, 0o700, name);
+    const [record, ...others] = readRunStatuses(directory);
+    assert.deepEqual(others, [], name);
+    assert.deepEqual(
+      { machine: record!.machine, cwd: record!.cwd, status: record!.status, state: record!.state },
+      { machine: "run-status.machine", cwd: root, status: "completed", state: "done" },
+      name,
+    );
+    assert.deepEqual(await readdir(directory), [`${record!.id}.json`], name);
+    assert.equal((await stat(join(directory, `${record!.id}.json`))).mode & 0o777, 0o600, name);
+    // The run saw its own record there while it was running.
+    const during = JSON.parse(await readFile(observed, "utf8")) as RunStatusRecord[];
+    assert.deepEqual(during.map(({ id, status }) => ({ id, status })), [{ id: record!.id, status: "running" }], name);
+  }
+  assert.deepEqual((await readdir(root)).sort(), ["home", "input.json", "machines-home", "observed.json", "xdg"]);
+
+  // The same command with the switch off leaves all of it as it was.
+  const before = await readdir(standardDirectory(join(root, "home")));
+  const off = runCli(["--input-file", input], root, { ...homes[0]![1], MACHINES_RUN_STATUS_DIR: "off" });
+  assert.equal(off.status, 0, off.stderr);
+  assert.deepEqual(JSON.parse(await readFile(observed, "utf8")), []);
+  assert.deepEqual(await readdir(standardDirectory(join(root, "home"))), before);
 });
 
 test("a publisher writes one private record that identifies the run and its process", async (context) => {
@@ -343,11 +439,62 @@ test("an unusable directory never fails the run it describes", async (context) =
   const root = await temporaryDirectory(context);
   await writeFile(join(root, "file"), "not a directory");
   const publisher = createRunStatusPublisher(run, { MACHINES_RUN_STATUS_DIR: join(root, "file", "status") });
+  // It is a run that is not published, as with publication off.
+  assert.equal(publisher.directory, undefined);
   publisher.update({ state: "work" });
-  publisher.finish({ error: "failed" });
   assert.deepEqual(await readdir(root), ["file"]);
+  // Nor is the directory tried again at each change: the run stays unpublished throughout.
+  await rm(join(root, "file"));
+  publisher.update({ state: "review" });
+  publisher.finish({ error: "failed" });
+  assert.deepEqual(await readdir(root), []);
   assert.deepEqual(readRunStatuses(join(root, "file", "status")), []);
   assert.deepEqual(readRunStatuses(join(root, "missing")), []);
+
+  const published = createRunStatusPublisher(run, { MACHINES_RUN_STATUS_DIR: join(root, "status") });
+  assert.equal(published.directory, join(root, "status"));
+});
+
+test("a run whose directory cannot be created runs exactly as one with publication off", async (context) => {
+  const root = await temporaryDirectory(context);
+  const home = join(root, "home");
+  await mkdir(home);
+  // The home is there, and the standard directory cannot be made inside it.
+  await writeFile(join(home, ".local"), "not a directory");
+  await writeFile(join(root, "file"), "not a directory");
+  const input = join(root, "input.json");
+  const observed = join(root, "observed.json");
+  const unusable = [
+    { MACHINES_RUN_STATUS_DIR: undefined, MACHINES_USER_HOME: home },
+    { MACHINES_RUN_STATUS_DIR: join(root, "file", "status"), MACHINES_USER_HOME: home },
+  ];
+  for (const fail of [false, true]) {
+    await writeFile(input, JSON.stringify({ observed, secret: "the output", fail }));
+    const off = runCli(["--input-file", input], root, { MACHINES_RUN_STATUS_DIR: "off", MACHINES_USER_HOME: home });
+    assert.equal(off.status, fail ? 1 : 0, off.stderr);
+    for (const environment of unusable) {
+      await rm(observed);
+      const result = runCli(["--input-file", input], root, environment);
+      // The same outcome and output, and nothing said about the directory at any state.
+      assert.deepEqual(
+        { status: result.status, stdout: result.stdout, stderr: result.stderr },
+        { status: off.status, stdout: off.stdout, stderr: off.stderr },
+        JSON.stringify(environment),
+      );
+      assert.deepEqual(JSON.parse(await readFile(observed, "utf8")), []);
+    }
+  }
+  assert.deepEqual((await readdir(root)).sort(), ["file", "home", "input.json", "observed.json"]);
+  assert.deepEqual(await readdir(home), [".local"]);
+
+  // A host asked to publish there completes its run all the same.
+  publishFrom(context, unusable[0]!);
+  const hosted = await startMachineHost({
+    publishRunStatus: true, cwd: root, home: resolve("tests/fixtures/empty-home"), machine: fixture,
+    input: { observed, secret: "the output" },
+  });
+  assert.deepEqual(await hosted.result, { state: "done", output: "the output" });
+  assert.deepEqual(await readdir(home), [".local"]);
 });
 
 test("creating a publisher prunes settled records older than one hour", async (context) => {
@@ -391,6 +538,92 @@ test("creating a publisher prunes settled records older than one hour", async (c
     "old-waiting.json",
     "recent-completed.json",
     "recent-lost.json",
+  ]);
+});
+
+test("creating a publisher removes what stopped processes and ended sessions left, and nothing else", async (context) => {
+  const directory = await temporaryDirectory(context);
+  const minute = 60 * 1_000;
+  const day = 24 * 60 * minute;
+  const aged = async (name: string, age: number) => {
+    await writeFile(join(directory, name), "{}");
+    const then = new Date(Date.now() - age);
+    await utimes(join(directory, name), then, then);
+  };
+  // A write or a response that its process never finished has no record to be pruned with.
+  await aged(".gone.4242.1.tmp", 61 * minute);
+  await aged(".watch.session.4242.1.tmp", 61 * minute);
+  await aged(".gone.8b5f0b0e-3c0a-4f57-9a55-0d6a2f6f6f01.inbox.sent", 61 * minute);
+  await aged(".gone.8b5f0b0e-3c0a-4f57-9a55-0d6a2f6f6f02.inbox.taken", 61 * minute);
+  await aged(".recent.4242.1.tmp", 59 * minute);
+  await aged(".recent.8b5f0b0e-3c0a-4f57-9a55-0d6a2f6f6f01.inbox.sent", 59 * minute);
+  // A watch list outlives its session by a month, whether or not anyone watches anything again.
+  await aged(".watch.forgotten.json", 31 * day);
+  await aged(".watch.dormant.json", 29 * day);
+  // An inbox goes with its record. One whose run was pruned without it has none, and waits no longer.
+  await aged("orphan.inbox", 61 * minute);
+  await aged("orphan.other.inbox", 61 * minute);
+  await aged("recent-orphan.inbox", 59 * minute);
+  // Files Machines did not name are left alone, however old, and so is an inbox beside a file of its run's name.
+  for (const name of [".notes.tmp", ".hidden", "notes.txt", "malformed.json", "malformed.inbox", ".orphan.inbox", ".watch.txt"]) {
+    await aged(name, 31 * day);
+  }
+  await mkdir(join(directory, ".directory.4242.1.tmp"));
+  await mkdir(join(directory, "directory.inbox"));
+  await utimes(join(directory, "directory.inbox"), new Date(Date.now() - 31 * day), new Date(Date.now() - 31 * day));
+
+  createRunStatusPublisher({ ...run, id: "new" }, { MACHINES_RUN_STATUS_DIR: directory });
+
+  assert.deepEqual((await readdir(directory)).sort(), [
+    ".directory.4242.1.tmp",
+    ".hidden",
+    ".notes.tmp",
+    ".orphan.inbox",
+    ".recent.4242.1.tmp",
+    ".recent.8b5f0b0e-3c0a-4f57-9a55-0d6a2f6f6f01.inbox.sent",
+    ".watch.dormant.json",
+    ".watch.txt",
+    "directory.inbox",
+    "malformed.inbox",
+    "malformed.json",
+    "new.json",
+    "notes.txt",
+    "recent-orphan.inbox",
+  ]);
+});
+
+test("a settled record is pruned although a file of its run cannot be removed, and what that leaves is pruned later", async (context) => {
+  const directory = await temporaryDirectory(context);
+  const old = new Date(Date.now() - 61 * 60 * 1_000);
+  const delivery = "8b5f0b0e-3c0a-4f57-9a55-0d6a2f6f6f01";
+  // Something that is not a file stands where each of the run's other files would be.
+  for (const id of ["blocked-inbox", "blocked-name"]) await writeRecord(directory, { id, status: "completed", updatedAt: old.toISOString() });
+  await mkdir(runInboxPath(directory, "blocked-inbox"));
+  await writeFile(runDeliveryPath(directory, "blocked-inbox", delivery), "{}");
+  await mkdir(runDeliveryPath(directory, "blocked-name", delivery));
+  await writeFile(runInboxPath(directory, "blocked-name"), "{}");
+
+  createRunStatusPublisher({ ...run, id: "first" }, { MACHINES_RUN_STATUS_DIR: directory });
+
+  // Neither record is kept for good by what could not be removed, and everything that could be has gone.
+  assert.deepEqual((await readdir(directory)).sort(), [
+    `.blocked-name.${delivery}.inbox.sent`,
+    "blocked-inbox.inbox",
+    "first.json",
+  ]);
+
+  // A publisher stopped after a record went, and before its inbox, leaves the inbox for a later one.
+  await rm(runInboxPath(directory, "blocked-inbox"), { recursive: true });
+  await writeFile(runInboxPath(directory, "blocked-inbox"), "{}");
+  createRunStatusPublisher({ ...run, id: "second" }, { MACHINES_RUN_STATUS_DIR: directory });
+  assert.equal((await readdir(directory)).includes("blocked-inbox.inbox"), true);
+  await utimes(runInboxPath(directory, "blocked-inbox"), old, old);
+  createRunStatusPublisher({ ...run, id: "third" }, { MACHINES_RUN_STATUS_DIR: directory });
+  assert.deepEqual((await readdir(directory)).sort(), [
+    `.blocked-name.${delivery}.inbox.sent`,
+    "first.json",
+    "second.json",
+    "third.json",
   ]);
 });
 
@@ -786,6 +1019,39 @@ test("a hosted run's label and owner options replace the environment's, and ever
   );
 });
 
+test("a host asked to publish, with nothing set, publishes in the standard directory of its home", async (context) => {
+  const root = await temporaryDirectory(context);
+  const home = join(root, "home");
+  const directory = standardDirectory(home);
+  publishFrom(context, { MACHINES_RUN_STATUS_DIR: undefined, MACHINES_USER_HOME: home, XDG_STATE_HOME: join(root, "unused") });
+  const start = async (publishRunStatus: boolean) => {
+    const hosted = await startMachineHost({
+      publishRunStatus, cwd: root, home: resolve("tests/fixtures/empty-home"), machine: fixture,
+      input: { observed: join(root, "observed.json"), secret: "never-published-value" },
+    });
+    return hosted.result;
+  };
+
+  // An embedding program still has to ask: the default alone publishes nothing for it.
+  assert.deepEqual(await start(false), { state: "done", output: "never-published-value" });
+  assert.deepEqual(await readdir(root), ["observed.json"]);
+
+  assert.deepEqual(await start(true), { state: "done", output: "never-published-value" });
+  assert.equal((await stat(directory)).mode & 0o777, 0o700);
+  const records = readRunStatuses(directory);
+  assert.deepEqual(
+    records.map(({ pid, machine, cwd, status, state, answeredBy }) => ({ pid, machine, cwd, status, state, answeredBy })),
+    [{ pid: process.pid, machine: "run-status.machine", cwd: root, status: "completed", state: "done", answeredBy: "host" }],
+  );
+  assert.deepEqual(await readdir(directory), [`${records[0]!.id}.json`]);
+  assert.equal((await stat(join(directory, `${records[0]!.id}.json`))).mode & 0o777, 0o600);
+  assert.deepEqual((await readdir(root)).sort(), ["home", "observed.json"]);
+
+  publishFrom(context, { MACHINES_RUN_STATUS_DIR: "off" });
+  assert.deepEqual(await start(true), { state: "done", output: "never-published-value" });
+  assert.deepEqual(await readdir(directory), [`${records[0]!.id}.json`]);
+});
+
 test("a hosted run publishes a wait for a usage limit", async (context) => {
   const directory = await temporaryDirectory(context);
   publishFrom(context, { MACHINES_RUN_STATUS_DIR: directory });
@@ -841,11 +1107,12 @@ test("a hosted run is the parent of the runs it starts, and publishes nothing wh
   };
 
   // Off: the options alone publish nothing, and the hosted process is told of no run.
-  assert.equal(process.env.MACHINES_RUN_STATUS_DIR, undefined);
-  assert.deepEqual(await start("alone"), { state: "done", output: null });
-  publishFrom(context, { MACHINES_RUN_STATUS_DIR: "" });
-  assert.deepEqual(await start("alone"), { state: "done", output: null });
+  for (const off of ["off", ""]) {
+    publishFrom(context, { MACHINES_RUN_STATUS_DIR: off });
+    assert.deepEqual(await start("alone"), { state: "done", output: null });
+  }
   assert.deepEqual((await readdir(root)).sort(), [".machines", "home"]);
+  assert.deepEqual(await readdir(join(root, "home")), []);
 
   // On: the run itself belongs to whatever run started its host, and its own id is what it hands down.
   publishFrom(context, {
@@ -942,16 +1209,31 @@ test("a session's run is published under the id the session gives it, which anot
   assert.deepEqual((await readdir(directory)).sort(), [".watch.watcher.json", `${run.id}.json`]);
 });
 
-/** Sets what this process, as a host, publishes from, and restores it after the test. */
-function publishFrom(context: TestContext, environment: Readonly<Record<string, string>>): void {
-  const previous = Object.fromEntries(Object.keys(environment).map((key) => [key, process.env[key]]));
-  Object.assign(process.env, environment);
-  context.after(() => {
-    for (const [key, value] of Object.entries(previous)) {
+const publishedFrom = new WeakMap<TestContext, Map<string, string | undefined>>();
+
+/**
+ * Sets what this process, as a host, publishes from; an undefined value unsets
+ * its variable. After the test each variable is as it was before the test's
+ * first call, however many times the test changed it.
+ */
+function publishFrom(context: TestContext, environment: Readonly<Record<string, string | undefined>>): void {
+  const assign = (values: Iterable<readonly [string, string | undefined]>) => {
+    for (const [key, value] of values) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
     }
-  });
+  };
+  let original = publishedFrom.get(context);
+  if (original === undefined) {
+    const before = new Map<string, string | undefined>();
+    original = before;
+    publishedFrom.set(context, before);
+    context.after(() => assign(before));
+  }
+  for (const key of Object.keys(environment)) {
+    if (!original.has(key)) original.set(key, process.env[key]);
+  }
+  assign(Object.entries(environment));
 }
 
 function deferred<T>() {
@@ -962,16 +1244,17 @@ function deferred<T>() {
   return { promise, resolve: resolvePromise };
 }
 
+/** Runs `machine run` with publication off unless `environment` says where; an undefined value unsets its variable. */
 function runCli(
   args: readonly string[],
   cwd: string,
-  environment: Readonly<Record<string, string>>,
+  environment: Readonly<Record<string, string | undefined>>,
   machine = fixture,
 ) {
   const inherited = { ...process.env };
-  for (const key of ["MACHINES_RUN_STATUS_DIR", "MACHINES_RUN_OWNER", "CLAUDE_CODE_SESSION_ID"]) delete inherited[key];
+  for (const key of ["MACHINES_RUN_OWNER", "CLAUDE_CODE_SESSION_ID"]) delete inherited[key];
   return spawnSync(process.execPath, [resolve("src/cli.ts"), "run", machine, ...args], {
-    cwd, encoding: "utf8", env: { ...inherited, ...environment },
+    cwd, encoding: "utf8", env: { ...inherited, MACHINES_RUN_STATUS_DIR: "off", ...environment },
   });
 }
 

@@ -100,7 +100,12 @@ and that request. Claiming a request before asynchronous delivery prevents two
 answers from being accepted, and the identity prevents a stale card or dialog from
 answering a later prompt. Restricted choices are validated for every interface.
 
-`machine run` asks on its own terminal. With run-status publication on it also
+`machine run` asks on its own terminal. Run-status publication is on unless
+`MACHINES_RUN_STATUS_DIR` turns it off, in a private per-user directory that
+every reader and writer finds by one rule (`runStatusDirectory`; the standalone
+status line carries a tested copy). It is presentation and never changes a run:
+a run that cannot write its first record is simply not published. With
+publication on, `machine run` also
 publishes the pending request and its request ID, and takes the first valid
 response from either the terminal or a private per-run inbox file written by
 `machine respond`; the MCP session takes inbox responses through the same

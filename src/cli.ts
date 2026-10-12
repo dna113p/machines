@@ -120,7 +120,7 @@ async function runMachine(machinePath: string, args: string[]) {
   const status = createRunStatus(machinePath);
   const runId = randomUUID();
   const published = createRunStatusPublisher({ id: runId, machine: prepared.name, path: prepared.path, cwd: process.cwd() });
-  const statusDirectory = runStatusDirectory();
+  const statusDirectory = published.directory;
   // Machines started by this run's Operations and Agents are its sub-runs.
   process.env.MACHINES_RUN_PARENT = runId;
   const observed = runStatusObserver((change) => published.update(change));
@@ -293,7 +293,10 @@ async function respond(args: string[]) {
 function requireStatusDirectory() {
   const directory = runStatusDirectory();
   if (directory === undefined) {
-    throw new Error("Run status publication is off: set MACHINES_RUN_STATUS_DIR to the directory the runs publish to.");
+    // Unset, the variable leaves publication on, so only a home that cannot hold the standard directory turns it off.
+    throw new Error(process.env.MACHINES_RUN_STATUS_DIR === undefined
+      ? "Run status publication is off: there is no absolute home directory to keep the standard directory in. Set MACHINES_RUN_STATUS_DIR to the directory the runs publish to."
+      : "Run status publication is off: unset MACHINES_RUN_STATUS_DIR to use the standard directory, or set it to the directory the runs publish to.");
   }
   return directory;
 }

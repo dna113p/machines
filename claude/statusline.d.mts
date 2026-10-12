@@ -13,6 +13,9 @@ export interface RunStatusLineOptions {
   readonly isAlive?: (pid: number) => boolean;
 }
 
+/** The directory runs publish to, or undefined while publication is off: `runStatusDirectory` in src/run-status.ts. */
+export function runStatusDirectory(environment?: NodeJS.ProcessEnv): string | undefined;
+
 /** Records that are not valid RunStatusRecords are skipped. */
 export function runStatusLines(
   records: readonly (RunStatusRecord | object)[],
