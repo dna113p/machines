@@ -176,10 +176,10 @@ npm ci
 npm pack
 ```
 
-Then install the generated `dna113p-machines-0.3.0.tgz` into a project:
+Then install the generated `dna113p-machines-0.3.1.tgz` into a project:
 
 ```bash
-npm install /absolute/path/to/machines/dna113p-machines-0.3.0.tgz
+npm install /absolute/path/to/machines/dna113p-machines-0.3.1.tgz
 npx machine list
 ```
 
