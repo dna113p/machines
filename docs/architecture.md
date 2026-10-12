@@ -108,7 +108,7 @@ session `respond` path as its tool, and inbox questions through the session's
 `ask`. The inbox is a second way to deliver a response to the owning run, not a
 second owner: the run still validates the request ID and choices, and a response
 to any other request is discarded. A run hosted directly through
-`startMachineHost` publishes its status without an inbox: its host remains the
+`startMachineHost` publishes its status only when its host asks, and without an inbox: its host remains the
 only way to answer it, its record says so, and `machine respond` refuses it. See
 [Integrations](integrations.md#answering-a-waiting-run-from-outside).
 

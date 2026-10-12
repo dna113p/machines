@@ -29,8 +29,13 @@ export interface MachineHostOptions extends PrepareMachineRunOptions {
   readonly label?: string;
   /** The session that owns the run in its published run status. The environment's owner applies when absent. */
   readonly owner?: string;
-  /** Set to false by a caller that publishes the run's status itself, as the MCP server does. */
-  readonly publishRunStatus?: boolean;
+  /**
+   * Asks for the run's status to be published where run-status publication is on.
+   * `true`: this host publishes it. `"caller"`: the caller publishes it itself,
+   * under the run's id, as the MCP server does. Absent: nothing about the run is
+   * published or handed down, and the caller presents the run in its own way.
+   */
+  readonly publishRunStatus?: boolean | "caller";
   readonly onAgentUpdate?: (update: AgentUpdate) => void;
   readonly onHumanRequest?: (request: HostedHumanRequest) => void;
   readonly onState?: (state: StateValue) => void;
@@ -176,7 +181,9 @@ export function startMachineHost(
   // below), so a reader that finds the pid gone rightly shows the run as lost.
   const id = randomUUID();
   const publication = runStatusDirectory() !== undefined;
-  const publishes = publication && options.publishRunStatus !== false;
+  // An embedding program has to ask: its environment alone must not make its runs appear elsewhere.
+  const publishes = publication && options.publishRunStatus === true;
+  const recorded = publishes || (publication && options.publishRunStatus === "caller");
   let published: RunStatusPublisher | undefined;
   const child = fork(fileURLToPath(import.meta.url), [childArgument], {
     cwd,
@@ -371,7 +378,7 @@ export function startMachineHost(
         ...(options.agents === undefined ? {} : { agents: options.agents }),
         ...(options.home === undefined ? {} : { home: options.home }),
         // A caller that publishes the record itself still publishes it under this id.
-        ...(publication ? { runId: id } : {}),
+        ...(recorded ? { runId: id } : {}),
         ...(publishes ? { reportStatus: true } : {}),
       };
       void sendChild(child, launch).catch((cause: unknown) => fail(asError(cause)));
