@@ -2,30 +2,33 @@ name: Publish to npm
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
   workflow_dispatch:
 
 permissions:
   contents: read
-  id-token: write
 
+# One release at a time: a branch push and its tag push must not both publish the same version.
 concurrency:
-  group: npm-publish-${{ github.ref }}
+  group: npm-publish
   cancel-in-progress: false
 
 jobs:
-  publish:
+  release:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      needed: ${{ steps.version.outputs.needed }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
           node-version: 24
-          registry-url: https://registry.npmjs.org
           package-manager-cache: false
-      - run: npm install --global npm@11.17.0
       - name: Validate release version
         if: github.ref_type == 'tag'
         env:
@@ -38,6 +41,37 @@ jobs:
             throw new Error('Release tag must match the stable package.json version (vX.Y.Z).');
           }
           NODE
+      - name: Compare the package version with npm
+        id: version
+        run: |
+          node --input-type=module <<'NODE'
+          import { execFileSync } from 'node:child_process';
+          import { appendFileSync, readFileSync } from 'node:fs';
+          const { name, version } = JSON.parse(readFileSync('package.json', 'utf8'));
+          // A lookup that fails stops the run: it must not be read as a version npm lacks.
+          const published = [JSON.parse(execFileSync('npm', ['view', name, 'versions', '--json'], { encoding: 'utf8' }))].flat();
+          const needed = /^\d+\.\d+\.\d+$/.test(version) && !published.includes(version);
+          console.log(needed ? `${name}@${version} is not on npm yet.` : `${name}@${version} is on npm already or is not a stable version; nothing to publish.`);
+          appendFileSync(process.env.GITHUB_OUTPUT, `version=${version}\nneeded=${needed}\n`);
+          NODE
+
+  publish:
+    needs: release
+    # A manual run checks and dry-runs whatever the version; a push publishes only a version npm lacks.
+    if: github.event_name == 'workflow_dispatch' || needs.release.outputs.needed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - run: npm install --global npm@11.17.0
       - run: npm ci
       - run: npm run check
       - run: npm run build
@@ -47,5 +81,25 @@ jobs:
       - name: Check publication contents
         run: npm publish --dry-run --offline
       - name: Publish release
-        if: github.event_name == 'push' && github.ref_type == 'tag'
+        if: github.event_name == 'push'
         run: npm publish
+
+  tag:
+    needs: [release, publish]
+    # A version published from main gets its tag here. A tag made with the workflow's own token starts no second run.
+    if: github.event_name == 'push' && github.ref_type == 'branch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Tag the published commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$VERSION" >/dev/null 2>&1; then
+            echo "Tag v$VERSION already exists."
+          else
+            gh api "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/tags/v$VERSION" -f "sha=$GITHUB_SHA"
+          fi
