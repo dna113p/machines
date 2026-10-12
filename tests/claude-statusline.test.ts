@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -370,6 +370,35 @@ test("the script also shows what its session watches, and a list it cannot read 
   ].join("\n"), "u"));
 });
 
+test("with nothing set, the script reads the standard directory of its home", async (context) => {
+  const root = await temporaryDirectory(context);
+  const stdin = JSON.stringify({ session_id: "session", cwd: "/work/project" });
+  const unset = { MACHINES_RUN_STATUS_DIR: undefined, NO_COLOR: "1" };
+  const homes: ReadonlyArray<readonly [string, Readonly<Record<string, string | undefined>>, string]> = [
+    ["the process's home", { ...unset, HOME: join(root, "home") }, join(root, "home", ".local", "state", "machines", "runs")],
+    ["XDG_STATE_HOME", { ...unset, HOME: join(root, "unused"), XDG_STATE_HOME: join(root, "xdg") }, join(root, "xdg", "machines", "runs")],
+    [
+      "the Machines home",
+      { ...unset, HOME: join(root, "unused"), XDG_STATE_HOME: join(root, "unused"), MACHINES_USER_HOME: join(root, "machines-home") },
+      join(root, "machines-home", ".local", "state", "machines", "runs"),
+    ],
+  ];
+  for (const [name, environment, directory] of homes) {
+    // Before any run has published there, the directory is missing: no runs, and no error.
+    const missing = runScript(stdin, environment);
+    assert.deepEqual({ status: missing.status, stdout: missing.stdout, stderr: missing.stderr }, { status: 0, stdout: "", stderr: "" }, name);
+    await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, "run.json"), JSON.stringify(record({ id: `${name} run`, owner: "session", pid: process.pid })));
+    await writeFile(join(directory, ".watch.session.json"), JSON.stringify({ watches: [] }));
+    const shown = runScript(stdin, environment);
+    assert.match(shown.stdout, new RegExp(`^● ${name.slice(0, 8)}  ticket › starting · `, "u"), `${name}: ${shown.stderr}`);
+    // The switch turns the reader off as it turns the writers off.
+    for (const off of ["off", ""]) assert.equal(runScript(stdin, { ...environment, MACHINES_RUN_STATUS_DIR: off }).stdout, "", name);
+  }
+  // Reading makes nothing.
+  assert.deepEqual((await readdir(root)).sort(), ["home", "machines-home", "xdg"]);
+});
+
 test("the script is silent and successful when it has nothing valid to show", async (context) => {
   const directory = await temporaryDirectory(context);
   await writeFile(join(directory, "run.json"), JSON.stringify(record({ owner: "session", pid: process.pid })));
@@ -378,8 +407,9 @@ test("the script is silent and successful when it has nothing valid to show", as
   assert.notEqual(visible.stdout, "");
 
   for (const [input, environment] of [
-    [stdin, {}],
+    [stdin, { MACHINES_RUN_STATUS_DIR: "off" }],
     [stdin, { MACHINES_RUN_STATUS_DIR: "" }],
+    [stdin, { MACHINES_RUN_STATUS_DIR: undefined, MACHINES_USER_HOME: "relative/home" }],
     [stdin, { MACHINES_RUN_STATUS_DIR: join(directory, "missing") }],
     [stdin, { MACHINES_RUN_STATUS_DIR: join(directory, "run.json") }],
     ["", { MACHINES_RUN_STATUS_DIR: directory }],
@@ -424,9 +454,10 @@ function ago(milliseconds: number): string {
   return new Date(now - milliseconds).toISOString();
 }
 
-function runScript(input: string, environment: Readonly<Record<string, string>>) {
+/** Runs the script with publication off unless `environment` says where; an undefined value unsets its variable. */
+function runScript(input: string, environment: Readonly<Record<string, string | undefined>>) {
   return spawnSync(process.execPath, [script], {
-    input, encoding: "utf8", env: { PATH: process.env.PATH, ...environment },
+    input, encoding: "utf8", env: { PATH: process.env.PATH, MACHINES_RUN_STATUS_DIR: "off", ...environment },
   });
 }
 

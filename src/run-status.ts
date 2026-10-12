@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { basename, join, resolve } from "node:path";
+import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { basename, isAbsolute, join, resolve } from "node:path";
 import type { StateValue } from "xstate";
 
+import { machinesUserHome } from "./discovery.ts";
 import type { AgentUpdate } from "./index.ts";
 
-/** One published run, stored as `<MACHINES_RUN_STATUS_DIR>/<id>.json`. */
+/** One published run, stored as `<id>.json` in the run-status directory. */
 export interface RunStatusRecord {
   /** Version 1 records carry only `human.prompt`. */
   readonly schemaVersion: 1 | 2;
@@ -91,6 +92,11 @@ export type RunStatusOutcome =
   | { readonly error: string };
 
 export interface RunStatusPublisher {
+  /**
+   * Where the run is published. Undefined when it is not: publication is off,
+   * or the directory could not take the run's first record.
+   */
+  readonly directory: string | undefined;
   update(change: RunStatusChange): void;
   finish(outcome: RunStatusOutcome): void;
 }
@@ -98,13 +104,43 @@ export interface RunStatusPublisher {
 const staleAfterMilliseconds = 60 * 60 * 1_000;
 /** How long a record goes on naming a response its run took: longer than a sender waits to hear of it. */
 export const deliveryRetentionMilliseconds = 60_000;
-const disabled: RunStatusPublisher = { update() {}, finish() {} };
+/** How long a session's watch list is kept after its last change: sessions end without saying so. */
+export const watchRetentionMilliseconds = 30 * 24 * 60 * 60 * 1_000;
+/** The name of a session's watch list, which `src/run-watch.ts` keeps beside the records. */
+export const watchListName = /^\.watch\..+\.json$/u;
+// A record being written, and the second names of a response: each lasts moments unless its process was stopped.
+const leftoverName = /^\.[A-Za-z0-9._-]+\.(?:\d+\.\d+\.tmp|[A-Za-z0-9_-]+\.inbox\.(?:sent|taken))$/u;
+// A run's inbox, which goes with its record: one without a record belongs to a run that was pruned.
+const inboxName = /^[A-Za-z0-9_-][A-Za-z0-9._-]*\.inbox$/u;
+const disabled: RunStatusPublisher = { directory: undefined, update() {}, finish() {} };
 let temporaryFiles = 0;
 
-/** The directory runs publish to, or undefined while publication is off. */
+/**
+ * The directory runs publish to, or undefined while publication is off.
+ * `MACHINES_RUN_STATUS_DIR` moves it, and turns publication off when it is
+ * `off` or empty. Unset, it is the user's own state directory, so every
+ * process of one user agrees on it without being told.
+ *
+ * `claude/statusline.mjs` cannot load this module and carries a copy of the
+ * rule; tests/run-status.test.ts keeps the two in step.
+ */
 export function runStatusDirectory(environment: NodeJS.ProcessEnv = process.env): string | undefined {
   const configured = environment.MACHINES_RUN_STATUS_DIR;
-  return configured === undefined || configured === "" ? undefined : resolve(configured);
+  if (configured === "" || configured === "off") return undefined;
+  if (configured !== undefined) return resolve(configured);
+  // XDG_STATE_HOME describes the real home. A process given another Machines
+  // home keeps its runs under that one, and out of the real one.
+  const state = environment.XDG_STATE_HOME;
+  if (environment.MACHINES_USER_HOME === undefined && state !== undefined && isAbsolute(state)) {
+    return join(state, "machines", "runs");
+  }
+  try {
+    const home = machinesUserHome(environment);
+    return isAbsolute(home) ? join(home, ".local", "state", "machines", "runs") : undefined;
+  } catch {
+    // Without a usable home there is nowhere standard to publish.
+    return undefined;
+  }
 }
 
 /** The one pending outside response for a run, kept beside its record. */
@@ -121,9 +157,10 @@ export function runDeliveryPath(directory: string, id: string, delivery: string)
 }
 
 /**
- * Publishes one run for hosts that can only read files, such as a status line.
- * Opt-in through MACHINES_RUN_STATUS_DIR. Publication is presentation: it never
- * throws, and it records neither Machine input nor output.
+ * Publishes one run for hosts that can only read files, such as a status line,
+ * in `runStatusDirectory`. Publication is presentation: it never throws, and it
+ * records neither Machine input nor output. A run whose first record cannot be
+ * written, as in a read-only home, is not published at all.
  */
 export function createRunStatusPublisher(
   run: RunStatusRun,
@@ -146,7 +183,7 @@ export function createRunStatusPublisher(
   let deliveries: ReadonlyArray<{ readonly id: string; readonly takenAt: number }> = [];
   let error: string | undefined;
 
-  const publish = () => {
+  const publish = (): boolean => {
     const record: RunStatusRecord = {
       schemaVersion: 2,
       id,
@@ -180,8 +217,10 @@ export function createRunStatusPublisher(
         rmSync(temporary, { force: true });
         throw cause;
       }
+      return true;
     } catch {
       // A status line is never worth a run: an unwritable directory is ignored.
+      return false;
     }
   };
 
@@ -190,9 +229,12 @@ export function createRunStatusPublisher(
   } catch {
     // Pruning is best effort for the same reason.
   }
-  publish();
+  // A directory that cannot take the first record is not tried again at every
+  // change, and the run goes on exactly as one that publication is off for.
+  if (!publish()) return disabled;
 
   return {
+    directory,
     update(change) {
       if (status === "completed" || status === "failed") return;
       const nextState = "state" in change ? formatState(change.state) : state;
@@ -296,21 +338,51 @@ export function readRunStatuses(directory: string): RunStatusRecord[] {
 
 function pruneRunStatuses(directory: string): void {
   const now = Date.now();
+  const remove = (file: string): void => {
+    try {
+      rmSync(file, { force: true });
+    } catch {
+      // Not a file, or not ours to remove: nothing else waits on it.
+    }
+  };
   for (const { file, record } of readRecordFiles(directory)) {
     const settled = record.status === "completed" || record.status === "failed" || !isProcessAlive(record.pid);
     if (!settled || now - Date.parse(record.updatedAt) <= staleAfterMilliseconds) continue;
+    // A response nobody collected goes with the run it was meant for, under each
+    // of its names. The record goes last: a publisher stopped part way leaves it
+    // for the next one to prune whole.
+    const id = basename(file, ".json");
+    remove(runInboxPath(directory, id));
+    for (const name of listNames(directory)) {
+      if (!name.startsWith(`.${id}.`)) continue;
+      if (/^[^.]+\.inbox\.(?:sent|taken)$/u.test(name.slice(id.length + 2))) remove(join(directory, name));
+    }
+    remove(file);
+  }
+  // What a stopped process left half done has no record to go with, nor has an
+  // inbox whose run was pruned without it, and a session that ended never
+  // removes its watch list. Other files are not ours.
+  const names = new Set(listNames(directory));
+  for (const name of names) {
+    const orphaned = inboxName.test(name) && !names.has(`${basename(name, ".inbox")}.json`);
+    const kept = leftoverName.test(name) || orphaned
+      ? staleAfterMilliseconds
+      : watchListName.test(name) ? watchRetentionMilliseconds : undefined;
+    if (kept === undefined) continue;
+    const file = join(directory, name);
     try {
-      rmSync(file, { force: true });
-      // A response nobody collected goes with the run it was meant for, under each of its names.
-      const id = basename(file, ".json");
-      rmSync(runInboxPath(directory, id), { force: true });
-      for (const name of readdirSync(directory)) {
-        if (!name.startsWith(`.${id}.`)) continue;
-        if (/^[^.]+\.inbox\.(?:sent|taken)$/u.test(name.slice(id.length + 2))) rmSync(join(directory, name), { force: true });
-      }
+      if (now - statSync(file).mtimeMs > kept) rmSync(file, { force: true });
     } catch {
       // Another publisher may have pruned it first.
     }
+  }
+}
+
+function listNames(directory: string): string[] {
+  try {
+    return readdirSync(directory);
+  } catch {
+    return [];
   }
 }
 

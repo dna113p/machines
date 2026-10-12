@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout } from "node:timers/promises";
 
@@ -46,6 +46,8 @@ export default ({ machine, human, final }) => machine({
     });
     assert.equal(responded.isError, undefined, JSON.stringify(responded));
     assert.equal((await waitFor("completed")).state, "done");
+    // With nothing set the server publishes run status, and under the home it was given: never the developer's.
+    assert.deepEqual(await readdir(join(userHome, ".local", "state", "machines", "runs")), [`${runId}.json`]);
 
     async function waitFor(status) {
       const deadline = Date.now() + 10_000;

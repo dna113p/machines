@@ -16,7 +16,7 @@ import {
 } from "./run-status.ts";
 import { TerminalInputClosed, terminalHuman } from "./terminal-human.ts";
 
-/** The content of `<MACHINES_RUN_STATUS_DIR>/<id>.inbox`: one response to one request. */
+/** The content of `<id>.inbox` in the run-status directory: one response to one request. */
 interface InboxMessage {
   /**
    * Tells one delivery from another that carries the same response. A response

@@ -193,9 +193,11 @@ installation script is required for the direct MCP setup.
 Hosts that only run a status-line command, such as Claude Code, can show running
 Machines through [run status publication](docs/integrations.md#run-status-for-host-status-lines).
 
-Publication is opt-in: set `MACHINES_RUN_STATUS_DIR` to a directory only you can
-read. A published run that is waiting for a Human can then be answered from
-outside its own terminal:
+Publication is on by default, in a private per-user directory
+(`~/.local/state/machines/runs`, or under `XDG_STATE_HOME`), so nothing has to be
+configured. Set `MACHINES_RUN_STATUS_DIR` to `off` to turn it off, or to a
+directory to move it. A published run that is waiting for a Human can be
+answered from outside its own terminal:
 
 ```bash
 machine runs [--json] [--all]                      # running and waiting runs; --all adds finished and lost ones

@@ -170,12 +170,31 @@ Pi exit, session replacement, and reload terminate its session-owned runs.
 
 Pi and MCP Apps clients render run snapshots in-process. A host that can only run
 a command, such as Claude Code's status line, reads published run status instead.
-Publication is opt-in: set `MACHINES_RUN_STATUS_DIR` to an absolute directory.
-When it is unset nothing is written.
+Publication is on by default and needs no setup: every process of one user
+publishes to and reads from the same private directory, so a run started
+anywhere, by a coding agent, a terminal, or a daemon, is on the status line, in
+`machine runs`, and within reach of `machine respond`.
 
-`machine run`, the MCP server, and every run hosted through `startMachineHost`
-then keep one file per run, `<dir>/<runId>.json`, replaced atomically on each
-change (directory `0700`, file `0600`):
+One variable refines it:
+
+| `MACHINES_RUN_STATUS_DIR` | Run status |
+| --- | --- |
+| unset | Published in `$XDG_STATE_HOME/machines/runs` when `XDG_STATE_HOME` is an absolute path, otherwise in `~/.local/state/machines/runs` |
+| `off`, or empty | Off: nothing is written, and the commands that read run status say so |
+| a directory | Published there instead; a relative path is resolved against the working directory |
+
+To move the directory, give the same absolute path to every process that starts
+runs or reads them: the coding agent, a daemon that hosts runs, and the status
+line. The same holds for `XDG_STATE_HOME`: a service that does not inherit the
+one your shell sets uses `~/.local/state`. A process given its own Machines home
+through `MACHINES_USER_HOME` publishes under that home, in
+`<home>/.local/state/machines/runs`, whatever `XDG_STATE_HOME` says, so an
+isolated catalog also keeps its runs out of your own directory. Where no
+absolute home can be found, publication is off.
+
+`machine run`, the MCP server, and a host that asks for it (below) keep one file
+per run, `<dir>/<runId>.json`, replaced atomically on each change. The
+directory is created by the first write, as `0700`, and each file is `0600`:
 
 ```json
 {
@@ -199,11 +218,11 @@ choice to publish that text. `machine run` exports its run id as
 records that id as `parent`; the status line shows only top-level runs.
 
 A run hosted through `startMachineHost` from `@dna113p/machines/host` publishes
-the same record when its host asks with `publishRunStatus: true` and the
-variable is set in the hosting process, as a daemon that runs tickets does. A
+the same record when its host asks with `publishRunStatus: true` and
+publication is on in the hosting process, as a daemon that runs tickets does. A
 host that does not ask publishes nothing, whatever its environment says: a
 program that presents its runs itself, such as Pi with the extension loaded, is
-not changed by the variable. Two options replace the environment for that one run:
+not changed by publication being on. Two options replace the environment for that one run:
 `label`, shortened as `MACHINES_RUN_LABEL` is, and `owner`. When an option is
 absent the environment rule above applies; an empty one publishes the run
 without that field. The run exports its id as `MACHINES_RUN_PARENT` to its
@@ -262,17 +281,37 @@ after it, and never contains the response.
 
 Machine input, Machine output, and Human responses are never recorded. A Human
 prompt and its choices are written to the `0600` file while the request is
-waiting, so choose a directory only you can read. Publication cannot change a
-run: a missing or unwritable directory is ignored. Starting a run prunes records
-that finished, or whose process is gone, more than an hour ago.
+waiting. The standard directory is private to you; one you name instead should
+be a directory only you can read and write.
+
+Publication cannot change a run. Where the directory cannot be created or
+written, as in a read-only home, a sandbox, or a container, a run goes on
+exactly as one with publication off: it is not published, nothing is reported,
+and the directory is not tried again at each state. Reading a directory that
+does not exist yet finds no runs; it is not an error.
+
+The directory does not grow without bound. Each run that starts removes:
+
+- the record of a run that finished, or whose process is gone, more than an hour
+  ago, with its inbox and any response left for it;
+- what an interrupted write or delivery left behind more than an hour ago;
+- an inbox with no record beside it, left when a run was pruned without it,
+  more than an hour after it was last written;
+- a [watch list](#watching-other-runs) that has not changed for 30 days.
+
+A running or waiting run keeps its record for as long as its process lives.
+Files Machines did not name are never removed, and nothing is removed while no
+run starts. A record whose process id now belongs to another process counts as
+running until that process ends.
 
 ### Answering a waiting run from outside
 
 With publication on, a waiting run can be seen and answered by any process
 running as the same user: a terminal, a coordinating agent, a script, or a
 presentation surface. They all read the same request, and the first valid
-response wins. Set the same `MACHINES_RUN_STATUS_DIR` for the run and for
-whatever answers it.
+response wins. With the standard directory there is nothing to set; if you move
+it, set the same `MACHINES_RUN_STATUS_DIR` for the run and for whatever answers
+it. With publication off these commands fail and say how to turn it on.
 
 ```bash
 machine runs                 # running and waiting runs
@@ -330,17 +369,25 @@ waits, it holds the same file under a second name of its own,
 response and the sender removes it to take the response back, so exactly one of
 them succeeds and neither can act on a response that arrived later. A response
 that was taken back stays in the inbox, emptied, until the run next reads its
-inbox or finishes, and a new response is refused until then. **Anything that can write to the directory as you can answer a waiting
-run**, including approvals, so do not point `MACHINES_RUN_STATUS_DIR` at a
-shared directory.
+inbox or finishes, and a new response is refused until then.
+
+**Anything that can write to the directory as you can answer a waiting run**,
+including approvals. That is why the standard directory is a private per-user
+one, created `0700`: no other user can read a request or leave a response. It
+is also all that protects a waiting run, so do not loosen its permissions and do
+not point `MACHINES_RUN_STATUS_DIR` at a shared directory. Set it to `off`
+where no process of yours should be able to answer a run from outside it.
 
 `machine run` still asks on its own terminal, and whichever of the terminal and
 the inbox gives the first valid response is used. Terminal input outside a
 request's `choices` is reported and asked for again instead of failing the run.
 A published run started without terminal input, for example by a coordinating
 agent or a script, waits for `machine respond` instead of failing, and prints
-the exact command to its standard error. With publication off it fails at its
-first Human state with "Terminal input closed before a response", as before.
+the exact command to its standard error. With publication on by default this is
+what a script or a CI job gets as well. With publication off, or where the run
+could not be published, it fails at its first Human state with "Terminal input
+closed before a response": set `MACHINES_RUN_STATUS_DIR=off` for a run that
+should fail there instead of waiting.
 Runs hosted in any other program through `startMachineHost` are answered only
 through that program.
 Runs hosted by the MCP server take a response from their own `machine_respond`
@@ -348,12 +395,13 @@ tool or from the inbox. That tool is answer-only, so a question to a hosted
 request that allows discussion goes through the inbox with
 `machine respond --question`.
 
-For Claude Code, set the variable in the `env` of its settings so the runs it
-launches publish there, and call the dependency-free renderer from `statusLine`:
+For Claude Code, call the dependency-free renderer from `statusLine`. That is
+the whole setup: the runs Claude Code launches, a daemon that hosts runs as the
+same user, and the status line all use the standard directory, so there is no
+`env` block to add and no path to repeat anywhere.
 
 ```json
 {
-  "env": { "MACHINES_RUN_STATUS_DIR": "/home/you/.cache/machines/run-status" },
   "statusLine": {
     "type": "command",
     "command": "node /path/to/machines/claude/statusline.mjs",
@@ -435,8 +483,8 @@ status line reads itself with the `session_id` Claude Code gives it:
 
 Record readers skip it, as they skip every name that starts with a dot. A
 session id that is not safe as a file name is refused. Removing the last entry
-removes the file, and writing a list removes other sessions' lists that have
-not changed for 30 days. A missing, unreadable, or malformed list watches
+removes the file, and writing a list or starting a run removes other sessions'
+lists that have not changed for 30 days. A missing, unreadable, or malformed list watches
 nothing; it is never an error on the status line. The commands fail with a
 message when publication is off or when no variable names the session.
 
@@ -446,6 +494,8 @@ For an isolated global catalog, set `MACHINES_USER_HOME` to an absolute director
 Machines reads global definitions and presets from that directory's `.machines/`.
 Explicit programmatic `home` options take precedence. This is useful for tests or
 separate workflow collections without changing the operating-system home directory.
+A process with that variable also publishes its
+[run status](#run-status-for-host-status-lines) under that directory.
 
 - **Node cannot load TypeScript from a dependency:** install the built tarball;
   source exports are for checkout development. Keep workflow definitions outside

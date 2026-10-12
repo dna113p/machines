@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 
-// Claude Code status line for Machine runs published through
-// MACHINES_RUN_STATUS_DIR (see docs/integrations.md). It runs on every status
-// refresh, so it imports only node: modules and never loads the runtime; the
-// record shape below mirrors RunStatusRecord in src/run-status.ts, and the
-// watch list and its matching mirror src/run-watch.ts.
+// Claude Code status line for published Machine runs (see
+// docs/integrations.md). It runs on every status refresh, so it imports only
+// node: modules and never loads the runtime; the directory rule and the record
+// shape below mirror runStatusDirectory and RunStatusRecord in
+// src/run-status.ts, and the watch list and its matching mirror
+// src/run-watch.ts.
 
 import { readdirSync, readFileSync, realpathSync } from "node:fs";
+import { homedir } from "node:os";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -19,6 +21,29 @@ const ansiSequence = /\x1b\[[0-9;]*m/uy;
 const zeroWidth = /[\p{Mn}\p{Me}\p{Cf}\u1160-\u11ff]/u;
 // East Asian Wide and Fullwidth characters, and emoji drawn as pictures, take two columns.
 const wide = /[\u1100-\u115f\u2e80-\u303e\u3041-\ua4cf\ua960-\ua97f\uac00-\ud7a3\uf900-\ufaff\ufe10-\ufe19\ufe30-\ufe6f\uff00-\uff60\uffe0-\uffe6\u{20000}-\u{3fffd}\p{Emoji_Presentation}]/u;
+
+/**
+ * The directory runs publish to, or undefined while publication is off: the
+ * same answer as runStatusDirectory in src/run-status.ts for the same
+ * environment, which tests/run-status.test.ts checks.
+ */
+export function runStatusDirectory(environment = process.env) {
+  const configured = environment.MACHINES_RUN_STATUS_DIR;
+  if (configured === "" || configured === "off") return undefined;
+  if (configured !== undefined) return resolve(configured);
+  // XDG_STATE_HOME describes the real home. A process given another Machines
+  // home keeps its runs under that one, and out of the real one.
+  const state = environment.XDG_STATE_HOME;
+  const machinesHome = environment.MACHINES_USER_HOME;
+  if (machinesHome === undefined && state !== undefined && isAbsolute(state)) return join(state, "machines", "runs");
+  try {
+    const home = machinesHome ?? homedir();
+    return isAbsolute(home) ? join(home, ".local", "state", "machines", "runs") : undefined;
+  } catch {
+    // Without a usable home there is nowhere standard to publish.
+    return undefined;
+  }
+}
 
 /**
  * Builds the status lines for the runs one Claude Code session should see.
@@ -237,8 +262,8 @@ function readWatches(directory, sessionId) {
 }
 
 async function main() {
-  const directory = process.env.MACHINES_RUN_STATUS_DIR;
-  if (directory === undefined || directory === "" || process.stdin.isTTY) return;
+  const directory = runStatusDirectory();
+  if (directory === undefined || process.stdin.isTTY) return;
 
   let text = "";
   process.stdin.setEncoding("utf8");

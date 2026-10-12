@@ -1,7 +1,9 @@
+import "./environment.ts";
+
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import fs, { existsSync, linkSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -22,6 +24,7 @@ import {
 const cli = resolve("src/cli.ts");
 const fixture = resolve("tests/fixtures/human-inbox.machine.ts");
 const prompt = "Approve the plan?\nIt changes three files.";
+const publicationOff = /^Run status publication is off: unset MACHINES_RUN_STATUS_DIR to use the standard directory, or set it /u;
 
 test("a waiting run publishes what is needed to show and to answer its request", async (context) => {
   const expected = {
@@ -139,7 +142,7 @@ test("a response that cannot be delivered is refused and delivers nothing", asyn
   ));
   await refuse([record.id, requestId, "maybe"], /^Expected one of: approve, deny\n$/u);
   await refuse([record.id, requestId], /^Usage: machine respond /u);
-  await refuse([record.id, requestId, "approve"], /^Run status publication is off: set MACHINES_RUN_STATUS_DIR /u, "");
+  await refuse([record.id, requestId, "approve"], publicationOff, "");
 
   // Written past those checks, a response the request does not allow is still discarded.
   await writeFile(runInboxPath(directory, record.id), JSON.stringify({ requestId, response: "maybe" }));
@@ -427,14 +430,51 @@ test("terminal input outside the choices does not answer the request, which keep
 test("with publication off, a run without terminal input fails as before", async (context) => {
   const root = await temporaryDirectory(context);
   await writeFile(join(root, "file"), "not a directory");
+  // A home whose standard directory cannot be made.
+  const home = join(root, "home");
+  await mkdir(home);
+  await writeFile(join(home, ".local"), "not a directory");
+  const off = await startRun(context, "", "choices").exited;
   // Nobody can see a request that could not be published, so it is not waited on either.
-  for (const directory of ["", join(root, "file", "status")]) {
+  for (const directory of ["", join(root, "file", "status"), { home }]) {
     const exited = await startRun(context, directory, "choices").exited;
     assert.equal(exited.code, 1);
     assert.match(exited.stderr, /Human failed in state "ask": Terminal input closed before a response/u);
     assert.doesNotMatch(exited.stderr, /machine respond/u);
+    // A directory that cannot be written is publication off, to the letter.
+    assert.deepEqual({ stdout: exited.stdout, stderr: exited.stderr }, { stdout: off.stdout, stderr: off.stderr });
   }
-  assert.deepEqual(await readdir(root), ["file"]);
+  assert.deepEqual((await readdir(root)).sort(), ["file", "home"]);
+  assert.deepEqual(await readdir(home), [".local"]);
+});
+
+test("with nothing set, a waiting run is listed and answered in the standard directory of its home", async (context) => {
+  const home = join(await temporaryDirectory(context), "home");
+  const directory = join(home, ".local", "state", "machines", "runs");
+  const run = startRun(context, { home }, "choices");
+  const record = await waitingRecord(directory);
+  assert.equal((await stat(directory)).mode & 0o777, 0o700);
+
+  const listed = machine({ home }, "runs");
+  assert.equal(listed.stdout.split("\t")[0], record.id, listed.stderr);
+  // With the switch off, the same commands say so, and say how to turn it on again.
+  for (const args of [["runs"], ["respond", record.id, record.human!.requestId!, "approve"]]) {
+    const off = machine("", ...args);
+    assert.deepEqual({ status: off.status, stdout: off.stdout }, { status: 1, stdout: "" });
+    assert.equal(
+      off.stderr,
+      "Run status publication is off: unset MACHINES_RUN_STATUS_DIR to use the standard directory, or set it to the directory the runs publish to.\n",
+    );
+  }
+  assert.equal((await waitingRecord(directory)).human!.requestId, record.human!.requestId);
+
+  const answered = machine({ home }, "respond", record.id, record.human!.requestId!, "approve");
+  assert.deepEqual(
+    { status: answered.status, stdout: answered.stdout, stderr: answered.stderr },
+    { status: 0, stdout: `Machine run ${record.id} took the response.\n`, stderr: "" },
+  );
+  assert.equal((await run.exited).code, 0);
+  assert.deepEqual(await readdir(directory), [`${record.id}.json`]);
 });
 
 test("machine runs lists the running and waiting runs as text and as JSON", async (context) => {
@@ -494,7 +534,7 @@ test("machine runs lists the running and waiting runs as text and as JSON", asyn
   for (const args of [["runs"], ["runs", "--json"]]) {
     const off = machine("", ...args);
     assert.deepEqual({ status: off.status, stdout: off.stdout }, { status: 1, stdout: "" });
-    assert.match(off.stderr, /^Run status publication is off: set MACHINES_RUN_STATUS_DIR /u);
+    assert.match(off.stderr, publicationOff);
   }
   assert.match(machine(directory, "runs", "--verbose").stderr, /machine runs \[--json\]/u);
 
@@ -660,21 +700,25 @@ test("the terminal picker leaves the terminal as it found it when its question i
   assert.doesNotMatch(stdout, /✔/u);
 });
 
-function environment(directory: string): NodeJS.ProcessEnv {
+/** Where a command publishes: a directory, nowhere when it is empty, or with nothing set under a home of its own. */
+type Publication = string | { readonly home: string };
+
+function environment(publication: Publication): NodeJS.ProcessEnv {
   const inherited = { ...process.env };
   for (const key of ["MACHINES_RUN_STATUS_DIR", "MACHINES_RUN_OWNER", "MACHINES_RUN_PARENT", "CLAUDE_CODE_SESSION_ID"]) {
     delete inherited[key];
   }
-  return directory === "" ? inherited : { ...inherited, MACHINES_RUN_STATUS_DIR: directory };
+  if (typeof publication !== "string") return { ...inherited, MACHINES_USER_HOME: publication.home };
+  return { ...inherited, MACHINES_RUN_STATUS_DIR: publication === "" ? "off" : publication };
 }
 
 /** Runs one `machine` command with publication in `directory`, or off when it is empty. */
-function machine(directory: string, ...args: readonly string[]) {
+function machine(directory: Publication, ...args: readonly string[]) {
   return spawnSync(process.execPath, [cli, ...args], { encoding: "utf8", env: environment(directory) });
 }
 
 /** Starts the fixture Machine with no terminal input unless `stdin` is a pipe. */
-function startRun(context: TestContext, directory: string, kind: string, stdin: "ignore" | "pipe" = "ignore") {
+function startRun(context: TestContext, directory: Publication, kind: string, stdin: "ignore" | "pipe" = "ignore") {
   const child = spawn(process.execPath, [cli, "run", fixture, kind], {
     env: environment(directory), stdio: [stdin, "pipe", "pipe"],
   });

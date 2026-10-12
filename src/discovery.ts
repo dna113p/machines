@@ -3,8 +3,8 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 
 /** Select a separate global catalog without changing the process's real home. */
-export function machinesUserHome(): string {
-  const override = process.env.MACHINES_USER_HOME;
+export function machinesUserHome(environment: NodeJS.ProcessEnv = process.env): string {
+  const override = environment.MACHINES_USER_HOME;
   if (override === undefined) return homedir();
   if (!isAbsolute(override)) throw new Error("MACHINES_USER_HOME must be an absolute path");
   return override;

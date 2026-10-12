@@ -1,7 +1,7 @@
 import { writeFileSync } from "node:fs";
 
 import type { MachinePrimitives } from "../../src/index.ts";
-import { readRunStatuses } from "../../src/run-status.ts";
+import { readRunStatuses, runStatusDirectory } from "../../src/run-status.ts";
 
 export const description = "Records what is published while its Operation runs, then finishes or fails.";
 
@@ -14,7 +14,7 @@ export default function runStatusMachine(
     output: () => input.secret,
     states: {
       observe: operation(() => {
-        writeFileSync(input.observed, JSON.stringify(readRunStatuses(process.env.MACHINES_RUN_STATUS_DIR ?? "")));
+        writeFileSync(input.observed, JSON.stringify(readRunStatuses(runStatusDirectory() ?? "")));
         if (input.fail === true) throw new Error("run-status fixture failed");
         return { type: "observed" };
       }, { observed: "done" }),

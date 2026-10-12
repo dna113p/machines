@@ -1,6 +1,8 @@
-// Preloaded by `npm test`. Run-status publication is opt-in per run, so a
-// developer's own MACHINES_RUN_STATUS_DIR must not make the suite write there.
-delete process.env.MACHINES_RUN_STATUS_DIR;
+// Preloaded by `npm test`, and imported by the tests that start runs so that one
+// of them run alone is covered too. Run-status publication is on unless it is
+// turned off, so the suite turns it off: a test publishes where it says to,
+// never in the developer's own directory.
+process.env.MACHINES_RUN_STATUS_DIR = "off";
 delete process.env.MACHINES_RUN_OWNER;
 delete process.env.MACHINES_RUN_PARENT;
 delete process.env.MACHINES_RUN_LABEL;
