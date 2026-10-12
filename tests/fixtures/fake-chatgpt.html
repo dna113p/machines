@@ -1,24 +1,42 @@
 <!doctype html>
-<html>
+<html data-markup="current">
 <head><meta charset="utf-8"><title>Fake ChatGPT</title></head>
 <body>
 <main id="thread"></main>
-<form id="composer-form">
-  <button type="button" data-testid="composer-plus-btn">+</button>
-  <div id="menu" hidden>
-    <div role="menuitem" id="developer">Developer mode</div>
-    <div role="menuitemcheckbox" id="connector" hidden>rig-bridge</div>
-  </div>
-  <div id="prompt-textarea" contenteditable="true"></div>
-  <button type="button" data-testid="send-button" disabled>Send</button>
-</form>
+<!-- The composer today: no ids or test ids, controls told apart by aria-label, Send present only while there is text. -->
+<template id="current">
+  <form>
+    <button type="button" aria-label="Add files and more">+</button>
+    <div class="menu" hidden>
+      <button type="button" data-list-navigation-item>Add photos &amp; files</button>
+      <button type="button" data-list-navigation-item class="connector">Use rig-bridge</button>
+    </div>
+    <div class="ProseMirror" contenteditable="true" role="textbox" aria-label="Ask ChatGPT"></div>
+    <button type="button" aria-label="Send">&uarr;</button>
+  </form>
+</template>
+<!-- The composer as it was before, which some accounts may still be served. -->
+<template id="earlier">
+  <form>
+    <button type="button" data-testid="composer-plus-btn">+</button>
+    <div class="menu" hidden>
+      <div role="menuitem" class="developer">Developer mode</div>
+      <div role="menuitemcheckbox" class="connector" hidden>rig-bridge</div>
+    </div>
+    <div id="prompt-textarea" contenteditable="true"></div>
+    <button type="button" data-testid="send-button" disabled>Send</button>
+  </form>
+</template>
 <script>
-  // Mimics the parts of chatgpt.com that the runner depends on.
+  // Mimics the parts of chatgpt.com that the runner depends on. The test picks the markup.
   const scenario = new URLSearchParams(location.search).get("scenario") ?? "normal";
-  const composer = document.getElementById("prompt-textarea");
-  const send = document.querySelector('[data-testid="send-button"]');
+  const earlier = document.documentElement.dataset.markup === "earlier";
+  document.body.append(document.getElementById(earlier ? "earlier" : "current").content.cloneNode(true));
+  const form = document.querySelector("form");
+  const composer = form.querySelector("[contenteditable]");
+  const send = form.querySelector('[data-testid="send-button"], [aria-label="Send"]');
   const thread = document.getElementById("thread");
-  const menu = document.getElementById("menu");
+  const menu = form.querySelector(".menu");
   let connector = false;
 
   const paragraph = line => {
@@ -26,15 +44,23 @@
     element.textContent = line;
     return element;
   };
+  // Today's page adds and removes the send button; the earlier page kept it and disabled it.
+  const sendReady = () => earlier ? !send.disabled : send.isConnected;
+  const setSend = ready => {
+    if (earlier) send.disabled = !ready;
+    else if (ready) form.append(send);
+    else send.remove();
+  };
   const refresh = () => {
     const empty = composer.innerText.trim() === "";
-    if (["slow-send", "delayed-draft", "delayed-busy"].includes(scenario) && !empty && send.disabled) {
-      // The send button takes a second to enable once text is entered.
-      setTimeout(() => { send.disabled = composer.innerText.trim() === ""; }, 1000);
+    if (["slow-send", "delayed-draft", "delayed-busy"].includes(scenario) && !empty && !sendReady()) {
+      // The send button takes a second to become ready once text is entered.
+      setTimeout(() => { setSend(composer.innerText.trim() !== ""); }, 1000);
       return;
     }
-    send.disabled = empty;
+    setSend(!empty);
   };
+  setSend(false);
   composer.addEventListener("input", refresh);
   // ChatGPT restores unsent text saved for a conversation, at load or a moment later.
   if (scenario === "draft") {
@@ -55,36 +81,59 @@
     });
   }
   // Radix menus open on pointerdown, so synthetic element.click() is not enough.
-  document.querySelector('[data-testid="composer-plus-btn"]').addEventListener("pointerdown", () => { menu.hidden = false; });
-  document.getElementById("developer").addEventListener("click", () => { document.getElementById("connector").hidden = false; });
-  document.getElementById("connector").addEventListener("click", () => { connector = true; });
+  form.querySelector("button").addEventListener("pointerdown", () => { menu.hidden = false; });
+  // The earlier menu kept connectors in a submenu; today's lists them directly.
+  menu.querySelector(".developer")?.addEventListener("click", () => { menu.querySelector(".connector").hidden = false; });
+  menu.querySelector(".connector").addEventListener("click", () => { connector = true; });
   document.addEventListener("keydown", event => { if (event.key === "Escape") menu.hidden = true; });
 
   const stop = () => {
     const button = document.createElement("button");
-    button.dataset.testid = "stop-button";
-    button.textContent = "Stop";
-    document.getElementById("composer-form").append(button);
+    if (earlier) {
+      button.dataset.testid = "stop-button";
+      button.textContent = "Stop";
+    } else {
+      button.setAttribute("aria-label", "Stop");
+      button.textContent = "■";
+    }
+    form.append(button);
     return button;
   };
-  const reply = lines => {
-    const message = document.createElement("div");
-    message.dataset.messageAuthorRole = "assistant";
+  // Today's page marks each message as a search unit whose key ends in its author.
+  let units = 0;
+  const message = (author, lines) => {
+    const element = document.createElement("div");
     const markdown = document.createElement("div");
-    markdown.className = "markdown";
+    if (earlier) {
+      element.dataset.messageAuthorRole = author;
+      markdown.className = "markdown";
+    } else {
+      element.dataset.chatgptSearchUnitKey = `${units++}:${author}`;
+      markdown.dataset.markdownTextStyle = `${author}-message`;
+    }
     markdown.replaceChildren(...lines.map(paragraph));
-    message.append(markdown);
-    thread.append(message);
+    element.append(markdown);
+    thread.append(element);
   };
+  const reply = lines => message("assistant", lines);
   const later = ms => new Promise(resolve => setTimeout(resolve, ms));
-  // Lets the test server see what the page was asked to do.
+  // Lets the test see what the page was asked to do.
   const tell = (kind, text = "") => fetch("/page-events", { method: "POST", body: JSON.stringify({ kind, text }) }).catch(() => {});
+  const address = path => {
+    history.pushState({}, "", path);
+    tell("address", location.pathname);
+  };
 
   // An existing conversation already shows an earlier assistant reply.
   const existing = location.pathname.startsWith("/c/");
   if (existing) reply(["Earlier assistant reply."]);
   if (scenario === "busy") stop();
   if (scenario === "moved") history.replaceState({}, "", "/");
+  if (scenario === "signed-out") {
+    const login = document.createElement("button");
+    login.textContent = "Log in";
+    form.replaceWith(login);
+  }
 
   send.addEventListener("click", async () => {
     const prompt = composer.innerText;
@@ -92,8 +141,13 @@
     if (scenario === "stuck") return;
     composer.replaceChildren();
     refresh();
-    if (!existing) history.pushState({}, "", "/c/fake-conversation");
-    const event = JSON.stringify({ type: "completed", connector, prompt });
+    message("user", prompt.split("\n"));
+    // A new chat is shown under a temporary identifier until ChatGPT has saved it.
+    const temporary = ["temporary-address", "no-lasting-address", "written-address"].includes(scenario);
+    if (!existing) address(temporary ? "/c/local-chatgpt%3A570c498e-7d4a-48a1-8e7a-d7367e869bf0" : "/c/fake-conversation");
+    // The assistant can put the address it was shown, the temporary one, in its own event.
+    const written = scenario === "written-address" ? { conversation: location.href } : {};
+    const event = JSON.stringify({ type: "completed", connector, prompt, ...written });
     let generating = stop();
     await later(300);
     if (scenario === "approve") {
@@ -112,6 +166,8 @@
     thread.lastElementChild.remove();
     generating.remove();
     reply(scenario === "no-event" || scenario === "handoff-no-event" ? ["Finished without event line."] : ["Finished the task.", `MACHINES_EVENT ${event}`]);
+    // The lasting address can arrive as late as the end of the reply.
+    if (scenario === "temporary-address") address("/c/fake-conversation");
   });
 </script>
 </body>

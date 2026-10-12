@@ -500,12 +500,20 @@ One-time setup:
 
 1. Run rig-bridge and expose it to ChatGPT (its README covers the service and the
    Secure MCP Tunnel). In ChatGPT, enable Developer mode and add the server as an
-   app named `rig-bridge`, or set `connector` to the name you chose.
+   app named `rig-bridge`, or set `connector` (`CHATGPT_WEB_CONNECTOR`) to the
+   name the app has in your ChatGPT. The runner finds the app by that name in
+   the text of the composer's `+` menu, where an app named `dnatop` is listed
+   as "Use dnatop", so a name that is not in the menu is not enabled.
 2. Run any `chatgpt-web` Agent once. With no DevTools endpoint at
    `http://127.0.0.1:9222`, the runner launches a Chromium-family browser with a
    dedicated profile at `~/.local/state/machines/chatgpt-web-profile`. Sign in to
    ChatGPT in that window. The first run fails if the composer never appears;
    later runs reuse the login.
+
+When the composer does not appear, the error gives the likely cause. A page that
+shows a sign-in control is not signed in: sign in and retry. A page without one
+is most likely signed in but no longer matches the runner's selectors: compare
+them with the page and override `selectors`.
 
 ```bash
 machine run my-workflow --agent default=chatgpt-web -- "Fix the failing test"
@@ -519,6 +527,16 @@ quiet, then reads the event from the last assistant message. Commands that the
 matching rig-bridge workspace runs during the turn are reported as tool activity
 through rig-bridge's local `/api/status`, along with the conversation URL.
 Successful runs close their tab; failed runs leave it open for inspection.
+
+The event's `conversation` is the chat's lasting address,
+`https://chatgpt.com/c/<id>`. ChatGPT shows a new chat under a temporary address
+first, such as `https://chatgpt.com/c/local-chatgpt%3A<uuid>`, which later leads
+to the home page instead of the chat. The runner never returns or reports that
+one: it watches for the lasting address until the run ends. If none has appeared
+by then, the event has no `conversation` and its `summary` says the address was
+not available, so the chat cannot be continued from that event. The address is
+read from the page alone; a `conversation` the assistant writes in its own event
+is dropped.
 
 The launched browser is detached and persists between runs so the login survives
 and runs can share it. Machines does not stop it, and terminating a run does not
@@ -546,8 +564,10 @@ Options (environment fallbacks in parentheses):
 - `url` (`CHATGPT_WEB_URL`): start page, such as a ChatGPT Project or GPT whose
   instructions or connectors you want. Defaults to `https://chatgpt.com/`.
 - `model` (`CHATGPT_WEB_MODEL`): model slug appended as `?model=`.
-- `connector` (`CHATGPT_WEB_CONNECTOR`): app name, default `rig-bridge`.
-  `selectConnector: false` skips the `+` menu and relies on the prompt.
+- `connector` (`CHATGPT_WEB_CONNECTOR`): the name the app has in your ChatGPT,
+  default `rig-bridge`. It must match the app's entry in the `+` menu, whose
+  text it is looked for in, ignoring case. `selectConnector: false` skips the
+  `+` menu and relies on the prompt.
 - `cdpUrl` (`CHATGPT_WEB_CDP_URL`): DevTools endpoint, default `http://127.0.0.1:9222`.
 - `launch`: `true` (default), `false`, or `{ executable, userDataDir, headless, args }`.
   The executable falls back to `CHATGPT_WEB_BROWSER`, then a PATH search for
@@ -559,10 +579,13 @@ Options (environment fallbacks in parentheses):
   Another conversation using the same directory at the same time also appears.
 - `acknowledgeHandoff`: mark handoff notifications read on rig-bridge when completed.
   Defaults to `true`.
-- `timeoutMs` (60 minutes), `settleMs` (5 seconds of quiet after generation),
-  `pollMs` (1 second), and `keepTab`.
+- `timeoutMs` (60 minutes), `composerTimeoutMs` (45 seconds for the composer to
+  appear), `settleMs` (5 seconds of quiet after generation), `pollMs` (1 second),
+  and `keepTab`.
 - `selectors`: override the CSS selectors for the composer, send and stop buttons,
-  assistant messages, `+` button, and menu items when the ChatGPT page changes.
+  assistant messages, `+` button, menu items, and sign-in control when the
+  ChatGPT page changes. Each default lists the current page's selector and the
+  earlier one.
 - `output`: `stream` (default) or `capture`, as for the Codex runner.
 
 #### rig-bridge handoff notifications
@@ -630,8 +653,9 @@ submitted exactly as given, without the workspace opener.
 
 - The input is checked before a browser is used. `conversation` must be an
   `https://chatgpt.com/` URL containing `/c/<id>`, with no credentials; `text`
-  must not be empty; `cwd` is required. A rig-bridge status URL is required, so
-  `bridgeStatusUrl: false` is rejected.
+  must not be empty; `cwd` is required. A temporary address, such as
+  `/c/local-chatgpt%3A<uuid>`, is refused because it no longer opens the chat.
+  A rig-bridge status URL is required, so `bridgeStatusUrl: false` is rejected.
 - The message is sent once. If ChatGPT is still generating in that chat, the
   page opens somewhere other than the conversation, or the composer already
   holds an unsent draft, the call fails without sending; nothing is queued and
