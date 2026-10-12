@@ -203,7 +203,7 @@ export class MachineSession {
 
   async start(input: unknown): Promise<CallToolResult> {
     // This server publishes its runs itself, so that they also take responses through their inbox.
-    const run = await this.#session.start({ ...parse(startInput, input), publishRunStatus: false });
+    const run = await this.#session.start({ ...parse(startInput, input), publishRunStatus: "caller" });
     return result(`Started ${run.machine}.\nRun id: ${run.id}\nStatus: ${run.status}`, { run });
   }
 

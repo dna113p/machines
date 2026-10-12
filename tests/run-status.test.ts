@@ -675,7 +675,7 @@ test("a hosted run publishes what machine run does, from its first state to its 
   });
   const human = deferred<HostedHumanRequest>();
   const hosted = await startMachineHost({
-    cwd: root, home: join(root, "home"), machine: "work", onHumanRequest: human.resolve,
+    cwd: root, publishRunStatus: true, home: join(root, "home"), machine: "work", onHumanRequest: human.resolve,
   });
   context.after(() => hosted.terminate());
   const published = () => readRunStatuses(directory)[0];
@@ -745,7 +745,7 @@ test("a hosted run's label and owner options replace the environment's, and ever
   const clear = async () => { for (const name of await readdir(directory)) await rm(join(directory, name)); };
 
   const failing = await startMachineHost({
-    machine: hostFixture, input: "fail", label: `\n  org-9: ${"x".repeat(300)}\nsecond line`, owner: "session-9",
+    machine: hostFixture, publishRunStatus: true, input: "fail", label: `\n  org-9: ${"x".repeat(300)}\nsecond line`, owner: "session-9",
   });
   await assert.rejects(failing.result, /host fixture failed/u);
   assert.deepEqual(
@@ -762,7 +762,7 @@ test("a hosted run's label and owner options replace the environment's, and ever
   // An empty option says the run has none, whatever the environment names.
   await clear();
   const human = deferred<HostedHumanRequest>();
-  const terminated = await startMachineHost({ machine: hostFixture, label: "", owner: "", onHumanRequest: human.resolve });
+  const terminated = await startMachineHost({ machine: hostFixture, publishRunStatus: true, label: "", owner: "", onHumanRequest: human.resolve });
   await human.promise;
   await eventually(() => assert.equal(only().status, "waiting"));
   assert.deepEqual({ label: only().label, owner: only().owner }, { label: undefined, owner: undefined });
@@ -775,7 +775,7 @@ test("a hosted run's label and owner options replace the environment's, and ever
 
   // The hosted process cannot record its own death; the host that outlives it does.
   await clear();
-  const exited = await startMachineHost({ machine: hostFixture, input: "exit" });
+  const exited = await startMachineHost({ machine: hostFixture, publishRunStatus: true, input: "exit" });
   await assert.rejects(exited.result, /exited before completion/u);
   assert.deepEqual(
     { label: only().label, owner: only().owner, status: only().status, error: only().error },
@@ -790,7 +790,7 @@ test("a hosted run publishes a wait for a usage limit", async (context) => {
   const directory = await temporaryDirectory(context);
   publishFrom(context, { MACHINES_RUN_STATUS_DIR: directory });
   const hosted = await startMachineHost({
-    cwd: resolve("tests/fixtures/agent-limit-project"), home: resolve("tests/fixtures/empty-home"),
+    publishRunStatus: true, cwd: resolve("tests/fixtures/agent-limit-project"), home: resolve("tests/fixtures/empty-home"),
     machine: "work", agents: { default: "waits" },
   });
   context.after(() => hosted.terminate());
@@ -835,7 +835,7 @@ test("a hosted run is the parent of the runs it starts, and publishes nothing wh
   ].join("\n"));
   const start = async (input: string) => {
     const hosted = await startMachineHost({
-      cwd: root, home: join(root, "home"), machine: "outer", input, label: "org-9: Watch runs", owner: "session-9",
+      cwd: root, publishRunStatus: true, home: join(root, "home"), machine: "outer", input, label: "org-9: Watch runs", owner: "session-9",
     });
     return hosted.result;
   };
@@ -864,10 +864,19 @@ test("a hosted run is the parent of the runs it starts, and publishes nothing wh
   );
   assert.equal(process.env.MACHINES_RUN_PARENT, "enclosing-run");
 
+  // A host that does not ask publishes nothing and hands nothing down, whatever its environment says.
+  await rm(directory, { recursive: true });
+  const unasked = await startMachineHost({ cwd: root, home: join(root, "home"), machine: "outer", input: "nested" });
+  assert.deepEqual(await unasked.result, { state: "done", output: "enclosing-run" });
+  assert.deepEqual(
+    readRunStatuses(directory).map((record) => ({ machine: record.machine, parent: record.parent })),
+    [{ machine: "inner", parent: "enclosing-run" }],
+  );
+
   // A caller that publishes the record itself, as the MCP server does, still has its run's id handed down.
   await rm(directory, { recursive: true });
   const unpublished = await startMachineHost({
-    cwd: root, home: join(root, "home"), machine: "outer", input: "nested", publishRunStatus: false,
+    cwd: root, home: join(root, "home"), machine: "outer", input: "nested", publishRunStatus: "caller",
   });
   assert.deepEqual(await unpublished.result, { state: "done", output: unpublished.id });
   assert.deepEqual(
@@ -882,7 +891,7 @@ test("a session's run is published under the id the session gives it, which anot
   const session = new MachineSession();
   context.after(() => session.close());
   const run = await session.start({
-    machine: resolve("tests/fixtures/host-sequential.machine.ts"), label: "org-9: Watch runs", owner: "session-9",
+    publishRunStatus: true, machine: resolve("tests/fixtures/host-sequential.machine.ts"), label: "org-9: Watch runs", owner: "session-9",
   });
   const waiting = async (after?: string) => {
     await eventually(() => {

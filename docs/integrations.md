@@ -199,8 +199,11 @@ choice to publish that text. `machine run` exports its run id as
 records that id as `parent`; the status line shows only top-level runs.
 
 A run hosted through `startMachineHost` from `@dna113p/machines/host` publishes
-the same record when the variable is set in the hosting process, for example a
-daemon that runs tickets, or Pi with the extension loaded. Two options replace the environment for that one run:
+the same record when its host asks with `publishRunStatus: true` and the
+variable is set in the hosting process, as a daemon that runs tickets does. A
+host that does not ask publishes nothing, whatever its environment says: a
+program that presents its runs itself, such as Pi with the extension loaded, is
+not changed by the variable. Two options replace the environment for that one run:
 `label`, shortened as `MACHINES_RUN_LABEL` is, and `owner`. When an option is
 absent the environment rule above applies; an empty one publishes the run
 without that field. The run exports its id as `MACHINES_RUN_PARENT` to its
@@ -216,7 +219,8 @@ only through the host's own `respond` and `ask`: the run reads no inbox, its
 `human` has no `requestId`, and `machine respond` refuses it. The field is absent
 from every other record and did not exist in earlier version 2 records. A caller
 that publishes its own record for the run, as the MCP server does so that its
-runs keep their inbox, passes `publishRunStatus: false`.
+runs keep their inbox, passes `publishRunStatus: "caller"`: the host then writes
+nothing, and the run still hands its id down to the runs it starts.
 
 While an Agent state waits for a [usage limit](authoring.md#usage-limits) to
 reset, the record stays `running` and carries the wait in `limit`:
