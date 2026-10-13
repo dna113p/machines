@@ -290,16 +290,16 @@ test("the script prints the visible runs for the Claude Code session on stdin", 
   assert.match(plain.stdout, /^● owned-ru  ticket › review · \d+s\n  claude · opus · high\n✓ local-ru  ticket › done · \d+s\n$/u);
 
   const colored = runScript(stdin, { MACHINES_RUN_STATUS_DIR: directory });
-  assert.equal(stripVTControlCharacters(colored.stdout), plain.stdout);
+  assert.equal(steady(stripVTControlCharacters(colored.stdout)), steady(plain.stdout));
   assert.ok(colored.stdout.startsWith("\x1b[36m●\x1b[0m "));
   // NO_COLOR disables colour whenever it is set, even to an empty value.
-  assert.equal(runScript(stdin, { MACHINES_RUN_STATUS_DIR: directory, NO_COLOR: "" }).stdout, plain.stdout);
-  assert.equal(runScript(stdin, { MACHINES_RUN_STATUS_DIR: directory, NO_COLOR: "0" }).stdout, plain.stdout);
+  assert.equal(steady(runScript(stdin, { MACHINES_RUN_STATUS_DIR: directory, NO_COLOR: "" }).stdout), steady(plain.stdout));
+  assert.equal(steady(runScript(stdin, { MACHINES_RUN_STATUS_DIR: directory, NO_COLOR: "0" }).stdout), steady(plain.stdout));
 
   const narrow = runScript(stdin, { MACHINES_RUN_STATUS_DIR: directory, NO_COLOR: "1", COLUMNS: "12" });
   assert.deepEqual(narrow.stdout.split("\n"), ["● owned-ru …", "  claude · …", "✓ local-ru …", ""]);
   const invalidWidth = runScript(stdin, { MACHINES_RUN_STATUS_DIR: directory, NO_COLOR: "1", COLUMNS: "wide" });
-  assert.equal(invalidWidth.stdout, plain.stdout);
+  assert.equal(steady(invalidWidth.stdout), steady(plain.stdout));
 
   for (const fallback of [
     { session_id: "none", workspace: { current_dir: "/work/project" }, cwd: "/tmp" },
@@ -314,7 +314,7 @@ test("the script prints the visible runs for the Claude Code session on stdin", 
   const linked = spawnSync(process.execPath, [link], {
     input: stdin, encoding: "utf8", env: { PATH: process.env.PATH, MACHINES_RUN_STATUS_DIR: directory, NO_COLOR: "1" },
   });
-  assert.equal(linked.stdout, plain.stdout);
+  assert.equal(steady(linked.stdout), steady(plain.stdout));
 });
 
 test("the script also shows what its session watches, and a list it cannot read changes nothing", async (context) => {
@@ -456,6 +456,14 @@ function ago(milliseconds: number): string {
 }
 
 /** Runs the script with publication off unless `environment` says where; an undefined value unsets its variable. */
+/**
+ * Each run of the script reads the real clock, so two runs a second boundary apart print different
+ * elapsed times. Comparing runs with each other is about everything else on the line.
+ */
+function steady(output: string): string {
+  return output.replace(/ · \d+s$/gmu, " · <elapsed>");
+}
+
 function runScript(input: string, environment: Readonly<Record<string, string | undefined>>) {
   return spawnSync(process.execPath, [script], {
     input, encoding: "utf8", env: { PATH: process.env.PATH, MACHINES_RUN_STATUS_DIR: "off", ...environment },
