@@ -23,6 +23,7 @@ import {
   createRunStatusPublisher,
   isProcessAlive,
   readRunStatuses,
+  runOutputSummary,
   runSessionId,
   runStatusDirectory,
   runStatusObserver,
@@ -161,7 +162,7 @@ async function runMachine(machinePath: string, args: string[]) {
       },
     });
 
-    published.finish({ state: result.value });
+    published.finish({ state: result.value, note: runOutputSummary(result.output) });
     status.succeed();
     console.log(`--> ${String(result.value)}`);
     if (result.output !== undefined) {
@@ -337,7 +338,11 @@ function describeWatch(watched: RunWatch) {
 function printWatchedRuns(watched: RunWatch, runs: readonly RunStatusRecord[]) {
   const matched = runs.filter((record) => runWatchMatches(watched, record));
   if (matched.length === 0) console.log("  no published run matches yet");
-  for (const record of matched) console.log(`  ${runColumns(record).join("\t")}`);
+  for (const record of matched) {
+    console.log(`  ${runColumns(record).join("\t")}`);
+    const note = finishedRunNote(record);
+    if (note !== undefined) console.log(`    ${note}`);
+  }
 }
 
 /** The session whose watch list is read or changed, this process's own unless one is named, and where the list is kept. */
@@ -494,6 +499,11 @@ function runColumns(record: RunStatusRecord | ViewerRun) {
   return [record.id, record.machine, runStatus(record), record.state ?? "starting"].map(plain).concat(label === "" ? [] : [label]);
 }
 
+function finishedRunNote(record: RunStatusRecord | ViewerRun): string | undefined {
+  if (record.status !== "completed" && record.status !== "failed") return undefined;
+  return record.note?.split(/\r?\n/u).map(plain).find((line) => line !== "");
+}
+
 function printRunListing(record: RunStatusRecord | ViewerRun, separate: boolean, watched: boolean) {
   const state = record.state ?? "starting";
   const recorded = runStatus(record);
@@ -508,6 +518,8 @@ function printRunListing(record: RunStatusRecord | ViewerRun, separate: boolean,
     ...(human.suggestions === undefined ? [] : [`suggestions: ${human.suggestions.map(plain).join(", ")}`]),
     ...(human.discussion === true ? ["discussion: questions allowed"] : []),
   ];
+  const note = finishedRunNote(record);
+  if (note !== undefined) details.push(note);
 
   if (!process.stdout.isTTY) {
     const columns = runColumns(record);

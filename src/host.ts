@@ -14,6 +14,7 @@ import {
 } from "./launcher.ts";
 import {
   createRunStatusPublisher,
+  runOutputSummary,
   runStatusDirectory,
   runStatusObserver,
   type RunStatusPublisher,
@@ -345,7 +346,7 @@ export function startMachineHost(
         }
         phase = "completed";
         pendingHuman = undefined;
-        published?.finish({ state: message.state as StateValue });
+        published?.finish({ state: message.state as StateValue, note: runOutputSummary(message.output) });
         dispose();
         resolveResult({
           state: message.state as StateValue,
