@@ -49,6 +49,15 @@ test("project setup references are portable and resolve within the distributed p
   }
 });
 
+test("setup and builder name the optional starter library and where to get it", () => {
+  for (const name of ["machine-project-setup", "machine-builder"]) {
+    const source = read(`skills/${name}/SKILL.md`);
+    assert.match(source, /Machine Shop is an optional starter library/u);
+    assert.match(source, /Nothing\s+here requires it/u);
+    assert.match(source, /`https:\/\/github\.com\/dna113p\/machine-shop`/u);
+  }
+});
+
 test("builder and delegation guide project-level gaps to the setup skill", () => {
   for (const name of ["machine-builder", "machine-delegation"]) {
     assert.match(read(`skills/${name}/SKILL.md`), /\[machine-project-setup\]\(\.\.\/machine-project-setup\/SKILL\.md\)/u);

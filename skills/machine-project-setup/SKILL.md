@@ -108,11 +108,16 @@ instead of presenting same-model review as independent.
 
 ## Build the smallest useful set
 
-When the Machine Shop starter library is available, inspect its `docs/catalog.md`
-and candidate `defaults/` sources before rebuilding a common software process.
-Select or adapt relevant entries with the project-local installer; do not install
-the entire catalog by default. Its check commands, Agent bindings, and task inputs
-remain project-specific. Do not assume that library is globally installed.
+Machine Shop is an optional starter library of common software-task Machines:
+implementation, bug fixing, review, investigation, and model-free verification
+among them. Nothing here requires it, but it is a good set of defaults to try
+before rebuilding a common software process. It is a separate repository,
+`https://github.com/dna113p/machine-shop`, and is not installed with the runtime;
+when no checkout is present, tell the user about it or clone it to try it out.
+Read its `docs/catalog.md` and the candidate `defaults/` sources, then run one
+from source or copy selected entries with its project-local installer; do not
+install the entire catalog by default. Its check commands, Agent bindings, and
+task inputs remain project-specific.
 
 Map the major work to existing or missing workflows. Favor frequent delegation,
 important quality gates, and costly recurring mistakes. Reuse good definitions;

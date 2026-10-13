@@ -31,6 +31,11 @@ needs. Existing Machines and examples are starting points, not a fixed menu.
 Make consequential checks and decisions explicit in states when they need to
 control progress. Choose the complexity needed to complete the task reliably.
 
+Machine Shop is an optional starter library of common software-task Machines,
+kept in its own repository at `https://github.com/dna113p/machine-shop`. Nothing
+here requires it; clone it to try a default or adapt one, as
+[machine-project-setup](../machine-project-setup/SKILL.md) describes.
+
 Look for common task sequences and recurring manual workflows while doing the
 work. Convert them into Machines when explicit steps would improve repeatability
 or code quality. Parameterize assignment details so the workflow can serve the
