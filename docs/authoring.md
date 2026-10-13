@@ -101,6 +101,10 @@ The Machine owns this loop. An Agent runner only returns an allowed outcome; it
 does not decide destination states. Add verification Operations where the workflow
 has a concrete condition to check.
 
+When designing verification and repair routes, follow
+[Checks the Machine owns](../skills/machine-builder/SKILL.md#checks-the-machine-owns)
+for the checks and evidence the workflow must own.
+
 ### Handling a usage limit in the Machine
 
 By default an Agent state never sees its provider's usage limit: the launcher

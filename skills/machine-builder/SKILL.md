@@ -82,3 +82,29 @@ Agent runners or injected Human input where possible. A successful run reaches
 the intended final state and produces the requested artifact or effect. Run real
 external work only within the user's authorized scope. Report what was verified
 and any branch that still requires a configured harness or human interaction.
+
+## Checks the Machine owns
+
+Design the workflow so these checks control progress and leave evidence for the
+next repair round or person taking over:
+
+- Run every gate, not only up to the first failure, so one repair round sees
+  all failures.
+- Keep the project's gate list in one place that every route reads.
+- For new behaviour, write tests first; have an Operation see them fail before
+  implementation, then pass after implementation.
+- After each editing Agent, run an Operation that compares the changed paths
+  against the paths the assignment allows.
+- Ask for a structured review: each acceptance criterion met or not, findings
+  tagged by severity. Let an Operation, not the reviewer's verdict word, decide
+  what happens next.
+- Match a reviewer's findings across rounds by their place in the conversation,
+  never by their wording.
+- End stuck unattended runs with work kept and a written note of what a person
+  must decide, instead of waiting in a Human state. Every stop keeps both so a later
+  run or a person can continue from them.
+- Before implementation, have a read-only Agent try to show the assignment is
+  wrong, already done, or underspecified; require options and a recommended answer
+  for each question it raises.
+- Tell editing Agents that checks they cannot run in their environment are the
+  workflow's to run, so a sandboxed Agent returns its work instead of `blocked`.

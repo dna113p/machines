@@ -62,6 +62,16 @@ Workers do not inherit this conversation. Supply the context needed to act:
 - Applicable constraints, permitted effects, and what should produce a blocked outcome.
 - A result location readable by the coordinator, and what evidence it must contain.
 
+State these five fields for each assignment:
+
+1. Its goal.
+2. The paths it may change.
+3. Its acceptance criteria.
+4. How it will be verified.
+5. What is forbidden.
+
+A field that cannot be filled means the unit is not scoped yet.
+
 Follow the selected Machine's input contract. MCP/Pi accept JSON-serializable
 input; CLI positional input is text, while `--input-file <file|->` accepts JSON.
 Keep task details in input rather than hardcoding each assignment into a new
@@ -103,6 +113,15 @@ polling continuously. Interpret the current snapshot:
 Preserve existing user authorization when answering Human requests, and surface a
 new decision when the request requires one. A desire to finish is not an answer.
 
+A `blocked` or parked run is a completed run to read, not a failure to retry blindly.
+Design stuck unattended runs to end with work kept and a written note of what a
+person must decide, instead of waiting in a Human state; every stop keeps both.
+Read the note, answer it or take it to the user, then start a fresh run from the
+kept work and note when resolved, or let a person continue from them.
+
+Tell an editing Agent that checks it cannot run in its environment are the
+workflow's to run, so a sandboxed Agent returns its work instead of `blocked`.
+
 To follow a run this session did not start, such as a ticket a daemon runs, use
 `machine watch <ticket-or-run-id>` where run status is published (`machine runs`
 lists what can be watched; `--all` adds runs that already ended). Watching only
@@ -126,3 +145,7 @@ verified. Read the report and inspect relevant changes or checks, then integrate
 the result into the user's task. If evidence is missing, treat that as incomplete
 work even if the run says `completed`. Report the useful result, any blocker, and
 artifact paths; a run ID alone is not the delegated deliverable.
+
+Read the reviewer's structured report: each acceptance criterion met or not,
+findings tagged by severity. Let an Operation, not the reviewer's verdict word,
+decide what happens next.
