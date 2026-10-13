@@ -36,6 +36,8 @@ export interface RunStatusRecord {
   /** Names the inbox responses the run took lately, so that each sender can tell; never a response. */
   readonly deliveries?: readonly string[];
   readonly error?: string;
+  /** The finished run's summary, at most 2000 characters including any ellipsis. */
+  readonly note?: string;
   readonly startedAt: string;
   readonly updatedAt: string;
 }
@@ -88,7 +90,7 @@ export interface RunStatusChange {
 }
 
 export type RunStatusOutcome =
-  | { readonly state?: StateValue }
+  | { readonly state?: StateValue; readonly note?: string }
   | { readonly error: string };
 
 export interface RunStatusPublisher {
@@ -159,8 +161,9 @@ export function runDeliveryPath(directory: string, id: string, delivery: string)
 /**
  * Publishes one run for hosts that can only read files, such as a status line,
  * in `runStatusDirectory`. Publication is presentation: it never throws, and it
- * records neither Machine input nor output. A run whose first record cannot be
- * written, as in a read-only home, is not published at all.
+ * records no Machine input and only the supplied summary of its output.
+ * A run whose first record cannot be written, as in a read-only home, is not
+ * published at all.
  */
 export function createRunStatusPublisher(
   run: RunStatusRun,
@@ -182,6 +185,7 @@ export function createRunStatusPublisher(
   let human: RunStatusHuman | undefined;
   let deliveries: ReadonlyArray<{ readonly id: string; readonly takenAt: number }> = [];
   let error: string | undefined;
+  let note: string | undefined;
 
   const publish = (): boolean => {
     const record: RunStatusRecord = {
@@ -203,6 +207,7 @@ export function createRunStatusPublisher(
       ...(run.answeredBy === undefined ? {} : { answeredBy: run.answeredBy }),
       ...(deliveries.length === 0 ? {} : { deliveries: deliveries.map((delivery) => delivery.id) }),
       ...(error === undefined ? {} : { error }),
+      ...(note === undefined ? {} : { note }),
       startedAt,
       updatedAt: new Date().toISOString(),
     };
@@ -265,6 +270,7 @@ export function createRunStatusPublisher(
       } else {
         status = "completed";
         state = formatState(outcome.state) ?? state;
+        note = formatNote(outcome.note);
       }
       stateSince = undefined;
       agent = undefined;
@@ -442,6 +448,7 @@ function isRunStatusRecord(value: unknown): value is RunStatusRecord {
     && (record.answeredBy === undefined || record.answeredBy === "host")
     && isOptionalStrings(record.deliveries)
     && isOptionalString(record.error)
+    && isOptionalString(record.note)
     && isTimestamp(record.startedAt)
     && isTimestamp(record.updatedAt);
 }
@@ -476,6 +483,24 @@ export function isProcessAlive(pid: number): boolean {
 function formatState(state: StateValue | undefined): string | undefined {
   if (state === undefined) return undefined;
   return typeof state === "string" ? state : JSON.stringify(state);
+}
+
+/** Only an object's non-empty summary is published from a Machine's output. */
+export function runOutputSummary(output: unknown): string | undefined {
+  if (output === null || typeof output !== "object" || Array.isArray(output)) return undefined;
+  const summary = (output as Record<string, unknown>).summary;
+  return typeof summary === "string" && summary.trim() !== "" ? summary : undefined;
+}
+
+function formatNote(note: string | undefined): string | undefined {
+  const text = note?.trim();
+  if (!text) return undefined;
+  if (text.length <= 2000) return text;
+  // Reserve one character for the ellipsis, keeping the last whole word that fits.
+  let end = 1999;
+  while (end > 0 && !/\s/u.test(text[end]!)) end -= 1;
+  // A single word longer than the limit still has to fit in the record.
+  return `${text.slice(0, end || 1999).trimEnd()}…`;
 }
 
 /** One short line: a label is a caption, not a place for task text. */

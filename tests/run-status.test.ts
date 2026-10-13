@@ -10,6 +10,7 @@ import { test, type TestContext } from "node:test";
 import { runStatusDirectory as statusLineDirectory, runStatusLines } from "../claude/statusline.mjs";
 import { MachineSession as McpSession } from "../mcp/server.ts";
 import { startMachineHost, type HostedHumanRequest } from "../src/host.ts";
+import type { JsonValue } from "../src/json.ts";
 import { respondToRun } from "../src/run-inbox.ts";
 import {
   createRunStatusPublisher,
@@ -17,6 +18,7 @@ import {
   runDeliveryPath,
   runInboxPath,
   runStatusDirectory,
+  type RunStatusOutcome,
   type RunStatusRecord,
 } from "../src/run-status.ts";
 import { readRunWatches } from "../src/run-watch.ts";
@@ -24,6 +26,8 @@ import { MachineSession } from "../src/session.ts";
 
 const run = { machine: "ticket", path: "/work/.machines/ticket.ts", cwd: "/work" };
 const fixture = resolve("tests/fixtures/run-status.machine.ts");
+/** Returns its input as its output, so a test chooses what a run ends with. */
+const structured = resolve("tests/fixtures/structured.machine.ts");
 /** Where a run publishes when nothing says where, under the home it is given. */
 const standardDirectory = (home: string) => join(home, ".local", "state", "machines", "runs");
 
@@ -279,6 +283,54 @@ test("updates replace the record atomically until a terminal outcome", async (co
     { status: record.status, state: record.state, human: record.human, error: record.error },
     { status: "failed", state: "implement", human: undefined, error: "Operation failed in state \"implement\"" },
   );
+});
+
+test("a finished run keeps a note, cut to 2000 characters at a word boundary", async (context) => {
+  const directory = await temporaryDirectory(context);
+  const read = async (id: string): Promise<RunStatusRecord> => JSON.parse(await readFile(join(directory, `${id}.json`), "utf8"));
+  const finished = async (id: string, outcome: RunStatusOutcome): Promise<RunStatusRecord> => {
+    const published = createRunStatusPublisher({ ...run, id }, { MACHINES_RUN_STATUS_DIR: directory });
+    published.update({ state: "work" });
+    // A note is what a run ends with: one that is still going has none.
+    assert.equal("note" in await read(id), false);
+    published.finish(outcome);
+    return read(id);
+  };
+
+  const note = "Parked on ticket/org-12: which base should the branch take?\nNeeds: a decision from the ticket owner.";
+  const parked = await finished("parked", { state: "parked", note });
+  assert.deepEqual(
+    { schemaVersion: parked.schemaVersion, status: parked.status, state: parked.state, note: parked.note },
+    // Every line is kept; the field is optional, so the version is the one records already have.
+    { schemaVersion: 2, status: "completed", state: "parked", note },
+  );
+  assert.equal((await stat(join(directory, "parked.json"))).mode & 0o777, 0o600);
+
+  assert.equal("note" in await finished("plain", { state: "done" }), false);
+  assert.equal("note" in await finished("blank", { state: "done", note: " \n\t " }), false);
+  assert.equal((await finished("trimmed", { state: "parked", note: ` \n${note}\n ` })).note, note);
+  const failed = await finished("failed", { error: "Operation failed in state \"work\"" });
+  assert.deepEqual({ status: failed.status, hasNote: "note" in failed }, { status: "failed", hasNote: false });
+
+  const words = ["the", "ticket", "is", "parked", "until", "someone", "decides", "which", "base", "its", "branch", "takes"];
+  const long = Array.from({ length: 600 }, (_, index) => words[index % words.length]).join(" ");
+  // A note that fits is published as it is.
+  const fits = long.slice(0, 2000).trimEnd();
+  assert.equal(fits.length, 2000);
+  assert.equal((await finished("fits", { state: "parked", note: fits })).note, fits);
+
+  assert.ok(long.length > 3000);
+  const cut = (await finished("cut", { state: "parked", note: long })).note;
+  assert.ok(cut !== undefined && cut.endsWith("…"), cut);
+  assert.ok(cut.length <= 2000, `the note is ${cut.length} characters`);
+  // No further back than the last whole word that fits.
+  assert.ok(cut.length >= 1985, `the note is ${cut.length} characters`);
+  const kept = cut.slice(0, -1);
+  assert.ok(long.startsWith(kept));
+  assert.match(long.slice(kept.trimEnd().length), /^\s/u, "the note ends with a whole word");
+  const boundary = `${"a".repeat(1999)} next`;
+  assert.equal((await finished("boundary", { state: "parked", note: boundary })).note, `${"a".repeat(1999)}…`);
+  assert.equal((await finished("unbroken", { state: "parked", note: "a".repeat(2001) })).note, `${"a".repeat(1999)}…`);
 });
 
 test("a wait for an Agent usage limit is published until the Agent resumes or the state is left", async (context) => {
@@ -672,6 +724,23 @@ test("reading skips unreadable and malformed files", async (context) => {
   assert.deepEqual(readRunStatuses(directory).map((record) => record.id).sort(), ["valid", "valid-1", "valid-2"]);
 });
 
+test("reading accepts a record with or without a note, and skips one whose note is not text", async (context) => {
+  const directory = await temporaryDirectory(context);
+  const note = "Parked on ticket/org-12: which base should the branch take?\nNeeds: a decision from the ticket owner.";
+  await writeRecord(directory, { id: "with-note", status: "completed", state: "parked", note });
+  await writeRecord(directory, { id: "without-note", status: "completed", state: "done" });
+  for (const [index, invalid] of [7, ["Parked"], { text: "Parked" }].entries()) {
+    await writeRecord(directory, { id: `invalid-${index}`, status: "completed", note: invalid } as unknown as Partial<RunStatusRecord>);
+  }
+
+  const records = readRunStatuses(directory).sort((left, right) => left.id.localeCompare(right.id));
+  assert.deepEqual(
+    records.map((record) => ({ id: record.id, schemaVersion: record.schemaVersion, note: record.note })),
+    [{ id: "with-note", schemaVersion: 2, note }, { id: "without-note", schemaVersion: 2, note: undefined }],
+  );
+  assert.equal("note" in records[1]!, false);
+});
+
 test("machine run publishes a running record and then its completion", async (context) => {
   const root = await temporaryDirectory(context);
   const directory = join(root, "status");
@@ -732,6 +801,50 @@ test("machine run publishes a failure with its message", async (context) => {
       error: 'Operation failed in state "observe": run-status fixture failed',
     },
   );
+});
+
+test("machine run publishes the summary of its final output as the run's note", async (context) => {
+  const root = await temporaryDirectory(context);
+  /** The one record a run of the fixture leaves, as it is in its file, having ended with `output`. */
+  const finished = async (name: string, output: JsonValue): Promise<{ record: RunStatusRecord; text: string }> => {
+    const directory = join(root, name);
+    const input = join(root, `${name}.json`);
+    await writeFile(input, JSON.stringify(output));
+    const result = runCli(["--input-file", input], process.cwd(), { MACHINES_RUN_STATUS_DIR: directory }, structured);
+    assert.equal(result.status, 0, result.stderr);
+    const files = await readdir(directory);
+    assert.equal(files.length, 1);
+    const text = await readFile(join(directory, files[0]!), "utf8");
+    return { record: JSON.parse(text), text };
+  };
+
+  const summary = "Parked on ticket/org-12: which base should the branch take?\nNeeds: a decision from the ticket owner.";
+  const parked = await finished("parked", { summary, branch: "ticket/org-12", secret: "never-published-value" });
+  assert.deepEqual(
+    { schemaVersion: parked.record.schemaVersion, status: parked.record.status, state: parked.record.state, note: parked.record.note },
+    { schemaVersion: 2, status: "completed", state: "done", note: summary },
+  );
+  // The summary is all of the output that is published.
+  assert.doesNotMatch(parked.text, /never-published-value|ticket\/org-12"/u);
+
+  const without: Array<[string, JsonValue]> = [
+    ["text", "Parked: only text, not an object with a summary"],
+    ["other", { result: "Parked", secret: "never-published-value" }],
+    ["empty", { summary: "" }],
+    ["blank", { summary: " \n\t " }],
+    ["number", { summary: 7 }],
+    ["list", { summary: ["Parked"] }],
+    ["null", null],
+  ];
+  for (const [name, output] of without) {
+    const { record, text } = await finished(name, output);
+    assert.deepEqual(
+      { status: record.status, state: record.state, hasNote: "note" in record },
+      { status: "completed", state: "done", hasNote: false },
+      name,
+    );
+    assert.doesNotMatch(text, /Parked|never-published-value/u, name);
+  }
 });
 
 test("machine run publishes the identity of an Agent entered by a transition, and clears it on leaving", async (context) => {
@@ -1019,6 +1132,35 @@ test("a hosted run's label and owner options replace the environment's, and ever
   );
 });
 
+test("a hosted run publishes the summary of its final output as the run's note, as machine run does", async (context) => {
+  const directory = await temporaryDirectory(context);
+  publishFrom(context, { MACHINES_RUN_STATUS_DIR: directory });
+  const finished = async (output: JsonValue): Promise<RunStatusRecord> => {
+    for (const name of await readdir(directory)) await rm(join(directory, name));
+    const hosted = await startMachineHost({ machine: structured, publishRunStatus: true, input: output });
+    assert.deepEqual(await hosted.result, { state: "done", output });
+    assert.deepEqual(await readdir(directory), [`${hosted.id}.json`]);
+    return JSON.parse(await readFile(join(directory, `${hosted.id}.json`), "utf8"));
+  };
+
+  const summary = "Parked on ticket/org-12: which base should the branch take?\nNeeds: a decision from the ticket owner.";
+  const parked = await finished({ summary, branch: "ticket/org-12" });
+  assert.deepEqual(
+    { schemaVersion: parked.schemaVersion, status: parked.status, state: parked.state, note: parked.note, branch: "branch" in parked },
+    { schemaVersion: 2, status: "completed", state: "done", note: summary, branch: false },
+  );
+
+  const without: JsonValue[] = ["Parked: only text", { result: "Parked" }, { summary: "" }, { summary: " \n\t " }, { summary: 7 }, null];
+  for (const output of without) {
+    const record = await finished(output);
+    assert.deepEqual(
+      { status: record.status, state: record.state, hasNote: "note" in record },
+      { status: "completed", state: "done", hasNote: false },
+      JSON.stringify(output),
+    );
+  }
+});
+
 test("a host asked to publish, with nothing set, publishes in the standard directory of its home", async (context) => {
   const root = await temporaryDirectory(context);
   const home = join(root, "home");
@@ -1207,6 +1349,21 @@ test("a session's run is published under the id the session gives it, which anot
     [{ id: run.id, status: "completed", state: "done" }],
   );
   assert.deepEqual((await readdir(directory)).sort(), [".watch.watcher.json", `${run.id}.json`]);
+});
+
+test("the integrations guide describes a finished run's note for hosts that read the directory", async () => {
+  const guide = await readFile(resolve("docs/integrations.md"), "utf8");
+  // Where the record is described field by field, before the commands that read it.
+  const described = guide.slice(
+    guide.indexOf("\n## Run status for host status lines\n"),
+    guide.indexOf("\n### Answering a waiting run from outside\n"),
+  );
+  assert.match(described, /`status` is `running`, `waiting`, `completed`, or `failed`/u);
+  const paragraphs = described.split(/\n{2,}/u).filter((paragraph) => paragraph.includes("`note`"));
+  assert.notDeepEqual(paragraphs, [], "the record description names `note`");
+  // What a host needs to use it: where it comes from, and how long it can be.
+  assert.ok(paragraphs.some((paragraph) => /`summary`/u.test(paragraph)), "it says the note is the final output's `summary`");
+  assert.ok(paragraphs.some((paragraph) => /\b2,?000\b/u.test(paragraph)), "it says the note is at most 2000 characters");
 });
 
 const publishedFrom = new WeakMap<TestContext, Map<string, string | undefined>>();

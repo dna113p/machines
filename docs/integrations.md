@@ -282,8 +282,16 @@ taken a response from its inbox, its record lists that delivery's id in
 id stays listed for at least a minute, however many responses the run takes
 after it, and never contains the response.
 
-Machine input, Machine output, and Human responses are never recorded. A Human
-prompt and its choices are written to the `0600` file while the request is
+When `machine run` or a host publishing its status finishes, an object output
+with a non-empty string `summary` supplies the optional `note` field. It is
+trimmed and limited to 2000 characters, including a trailing `…` when shortened
+at a word boundary (a single word longer than the limit is cut to fit).
+Empty or whitespace-only summaries leave the field absent. The whole note,
+including its line breaks, is available in JSON. This optional field keeps
+`schemaVersion` at 2; readers should accept records with or without it.
+
+Machine input, output fields other than that summary, and Human responses are
+never recorded. A Human prompt and its choices are written to the `0600` file while the request is
 waiting. The standard directory is private to you; one you name instead should
 be a directory only you can read and write.
 
@@ -333,7 +341,9 @@ session and project; `--for` narrows it to
 [what one viewer shows](#drawing-your-own-widgets). `--all`, with or without `--json`, lists every published
 run: also the ones whose records remain after they finished, as `completed` or
 `failed`, or after their process disappeared, as `lost` (in JSON such a record
-keeps the status it last published). A run answered through its host shows
+keeps the status it last published). For a completed or failed run, the first
+non-empty line of its note is printed beneath the row; `--json` includes the
+whole note. A run answered through its host shows
 `answered through its host` in place of a request id:
 
 ```text
@@ -472,7 +482,8 @@ machine watch --for <session> org-9   # the same commands for another session's 
 - An entry keeps matching runs that start later, so a ticket can be watched
   before its run exists. `machine watch` lists a matched run for as long as its
   record remains, with the status `machine runs --all` gives it, so it also
-  says how a watched run ended.
+  says how a watched run ended, with the first non-empty line of its note
+  beneath the row when present.
 - `--for <session>`, first, makes `machine watch` and `machine unwatch` read
   and change the list of the session it names instead of this process's own.
   A program that draws [its own widgets](#drawing-your-own-widgets) for a
