@@ -269,14 +269,19 @@ test("recorded text cannot inject control sequences, and invalid records are ski
 
 test("the script prints the visible runs for the Claude Code session on stdin", async (context) => {
   const directory = await temporaryDirectory(context);
-  const started = new Date(Date.now() - 5_000).toISOString();
+  // Keep all child invocations at the same instant, regardless of startup time.
+  const environment = {
+    MACHINES_RUN_STATUS_DIR: directory,
+    NODE_OPTIONS: `--import=data:text/javascript,Date.now=()=>${now}`,
+  };
+  const started = ago(5_000);
   await writeFile(join(directory, "owned.json"), JSON.stringify(record({
     id: "owned-run", owner: "session", cwd: "/elsewhere", state: "review", pid: process.pid,
     startedAt: started, updatedAt: started, agent: { harness: "claude", model: "opus", thinking: "high" },
   })));
   await writeFile(join(directory, "local.json"), JSON.stringify(record({
     id: "local-run", cwd: "/work/project/child", status: "completed", state: "done",
-    startedAt: started, updatedAt: new Date().toISOString(),
+    startedAt: started, updatedAt: ago(0),
   })));
   await writeFile(join(directory, "foreign.json"), JSON.stringify(record({
     id: "foreign", owner: "other", cwd: "/work/project", pid: process.pid, startedAt: started, updatedAt: started,
@@ -285,34 +290,35 @@ test("the script prints the visible runs for the Claude Code session on stdin", 
   await writeFile(join(directory, ".owned.json.1.tmp"), "{");
   const stdin = JSON.stringify({ session_id: "session", workspace: { project_dir: "/work/project", current_dir: "/tmp" }, cwd: "/tmp" });
 
-  const plain = runScript(stdin, { MACHINES_RUN_STATUS_DIR: directory, NO_COLOR: "1" });
+  const plain = runScript(stdin, { ...environment, NO_COLOR: "1" });
+  assert.ifError(plain.error);
   assert.equal(plain.status, 0, plain.stderr);
-  assert.match(plain.stdout, /^● owned-ru  ticket › review · \d+s\n  claude · opus · high\n✓ local-ru  ticket › done · \d+s\n$/u);
+  assert.equal(plain.stdout, "● owned-ru  ticket › review · 5s\n  claude · opus · high\n✓ local-ru  ticket › done · 5s\n");
 
-  const colored = runScript(stdin, { MACHINES_RUN_STATUS_DIR: directory });
+  const colored = runScript(stdin, environment);
   assert.equal(stripVTControlCharacters(colored.stdout), plain.stdout);
   assert.ok(colored.stdout.startsWith("\x1b[36m●\x1b[0m "));
   // NO_COLOR disables colour whenever it is set, even to an empty value.
-  assert.equal(runScript(stdin, { MACHINES_RUN_STATUS_DIR: directory, NO_COLOR: "" }).stdout, plain.stdout);
-  assert.equal(runScript(stdin, { MACHINES_RUN_STATUS_DIR: directory, NO_COLOR: "0" }).stdout, plain.stdout);
+  assert.equal(runScript(stdin, { ...environment, NO_COLOR: "" }).stdout, plain.stdout);
+  assert.equal(runScript(stdin, { ...environment, NO_COLOR: "0" }).stdout, plain.stdout);
 
-  const narrow = runScript(stdin, { MACHINES_RUN_STATUS_DIR: directory, NO_COLOR: "1", COLUMNS: "12" });
+  const narrow = runScript(stdin, { ...environment, NO_COLOR: "1", COLUMNS: "12" });
   assert.deepEqual(narrow.stdout.split("\n"), ["● owned-ru …", "  claude · …", "✓ local-ru …", ""]);
-  const invalidWidth = runScript(stdin, { MACHINES_RUN_STATUS_DIR: directory, NO_COLOR: "1", COLUMNS: "wide" });
+  const invalidWidth = runScript(stdin, { ...environment, NO_COLOR: "1", COLUMNS: "wide" });
   assert.equal(invalidWidth.stdout, plain.stdout);
 
   for (const fallback of [
     { session_id: "none", workspace: { current_dir: "/work/project" }, cwd: "/tmp" },
     { session_id: "none", cwd: "/work/project" },
   ]) {
-    const scoped = runScript(JSON.stringify(fallback), { MACHINES_RUN_STATUS_DIR: directory, NO_COLOR: "1" });
+    const scoped = runScript(JSON.stringify(fallback), { ...environment, NO_COLOR: "1" });
     assert.match(scoped.stdout, /^✓ local-ru  ticket › done · \d+s\n$/u);
   }
 
   const link = join(directory, "linked-statusline.mjs");
   await symlink(script, link);
   const linked = spawnSync(process.execPath, [link], {
-    input: stdin, encoding: "utf8", env: { PATH: process.env.PATH, MACHINES_RUN_STATUS_DIR: directory, NO_COLOR: "1" },
+    input: stdin, encoding: "utf8", env: { PATH: process.env.PATH, ...environment, NO_COLOR: "1" },
   });
   assert.equal(linked.stdout, plain.stdout);
 });
