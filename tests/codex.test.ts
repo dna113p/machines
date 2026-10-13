@@ -61,6 +61,29 @@ test("Codex option identity and arguments honor merged environment precedence", 
   assert.deepEqual(explicit[0], { type: "identity", harness: "reviewer", model: "explicit-model", thinking: "low" });
 });
 
+test("Codex selects fast mode with option and environment precedence, otherwise inheriting CLI config", async () => {
+  const previous = process.env.CODEX_SERVICE_TIER;
+  const tierArgs = async (options: CodexAgentOptions = {}) => {
+    const event = await runner("arguments", options)(request);
+    assert.ok(Array.isArray(event.args));
+    const args: unknown[] = event.args;
+    return args.filter((arg, index) => args[index - 1] === "--config"
+      && typeof arg === "string" && arg.startsWith("service_tier="));
+  };
+  try {
+    delete process.env.CODEX_SERVICE_TIER;
+    assert.deepEqual(await tierArgs(), []);
+    assert.deepEqual(await tierArgs({ serviceTier: "fast" }), ['service_tier="fast"']);
+    process.env.CODEX_SERVICE_TIER = "fast";
+    assert.deepEqual(await tierArgs(), ['service_tier="fast"']);
+    assert.deepEqual(await tierArgs({ env: { CODEX_SERVICE_TIER: "flex" } }), ['service_tier="flex"']);
+    assert.deepEqual(await tierArgs({ env: { CODEX_SERVICE_TIER: "flex" }, serviceTier: "fast" }), ['service_tier="fast"']);
+  } finally {
+    if (previous === undefined) delete process.env.CODEX_SERVICE_TIER;
+    else process.env.CODEX_SERVICE_TIER = previous;
+  }
+});
+
 test("Codex final output owns the outcome and reaches observers without duplicates", async () => {
   for (const mode of ["normal", "progress", "final-only", "retry", "malformed"]) {
     const updates: AgentUpdate[] = [];

@@ -15,6 +15,8 @@ export interface CodexAgentOptions {
   readonly model?: string;
   /** A reasoning effort supported by the selected Codex model. */
   readonly effort?: string;
+  /** Codex service tier, e.g. "fast"; omitted values inherit the CLI configuration. */
+  readonly serviceTier?: string;
   /** Defaults to read-only; writes and unrestricted access require an explicit choice. */
   readonly sandbox?: "read-only" | "workspace-write" | "danger-full-access";
   readonly skipGitRepoCheck?: boolean;
@@ -37,6 +39,7 @@ export function codexAgent(
     const env = { ...process.env, ...options.env };
     const model = options.model ?? env.CODEX_MODEL ?? env.MACHINES_AGENT_MODEL;
     const effort = options.effort ?? env.CODEX_EFFORT ?? env.MACHINES_AGENT_EFFORT;
+    const serviceTier = options.serviceTier ?? env.CODEX_SERVICE_TIER;
     const outputMode = options.output ?? "stream";
     report?.({
       type: "identity",
@@ -58,6 +61,7 @@ export function codexAgent(
         ...(options.ephemeral === false ? [] : ["--ephemeral"]),
         ...(model === undefined ? [] : ["--model", model]),
         ...(effort === undefined ? [] : ["--config", `model_reasoning_effort=${JSON.stringify(effort)}`]),
+        ...(serviceTier === undefined ? [] : ["--config", `service_tier=${JSON.stringify(serviceTier)}`]),
         "--output-last-message", finalPath, "-",
       ], { cwd: request.cwd, env, stdio: ["pipe", "pipe", "pipe"] });
 

@@ -471,6 +471,13 @@ Options:
   `MACHINES_AGENT_MODEL` / `MACHINES_AGENT_EFFORT`. The `env` option overrides
   matching parent variables. With no setting, Codex selects its configured values;
   effort must be supported by the selected model.
+- `serviceTier`: selects a Codex service tier, for example
+  `codexAgent("codex", [], { serviceTier: "fast" })` for Fast mode. Overrides
+  `CODEX_SERVICE_TIER` (including values supplied through `env`); when neither
+  is set, the runner leaves Codex's configured tier unchanged. The built-in
+  preset also accepts `CODEX_SERVICE_TIER=fast`. Supported tiers depend on the
+  installed CLI, model, and account. See the
+  [Codex configuration reference](https://developers.openai.com/codex/config-reference#service_tier).
 - `output`: `stream` (default) writes agent messages and stderr to the terminal;
   `capture` keeps them off the terminal and includes final prose in the event's
   `message`. Both modes report activity to observers.
