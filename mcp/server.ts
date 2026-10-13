@@ -21,7 +21,7 @@ import { MachineSession as RunSession, type RunSnapshot } from "../src/session.t
 export type { RunSnapshot } from "../src/session.ts";
 import { listAgentPresets, listMachines } from "../src/launcher.ts";
 import { watchRunInbox } from "../src/run-inbox.ts";
-import { createRunStatusPublisher, type RunStatusPublisher } from "../src/run-status.ts";
+import { createRunStatusPublisher, runOutputSummary, type RunStatusPublisher } from "../src/run-status.ts";
 import { machineCoordinatorGuidelines, machineDiscoveryDescription, machineSupervisionGuidelines } from "../src/coordinator-guidance.ts";
 
 const widgetUri = "ui://machines/run-v1.html";
@@ -250,7 +250,7 @@ export class MachineSession {
       });
       return;
     }
-    publisher.finish(run.status === "completed" ? { state: run.state } : { error: run.error ?? "Machine run failed" });
+    publisher.finish(run.status === "completed" ? { state: run.state, note: runOutputSummary(run.output) } : { error: run.error ?? "Machine run failed" });
     this.#published.delete(run.id);
   }
 

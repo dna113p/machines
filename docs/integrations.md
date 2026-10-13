@@ -282,9 +282,10 @@ taken a response from its inbox, its record lists that delivery's id in
 id stays listed for at least a minute, however many responses the run takes
 after it, and never contains the response.
 
-When `machine run` or a host publishing its status finishes, an object output
-with a non-empty string `summary` supplies the optional `note` field. It is
-trimmed and limited to 2000 characters, including a trailing `…` when shortened
+When a run finishes, `machine run`, the MCP server, and a host that asks for
+publication all three publish the optional `note` field if the final output
+is an object with a non-empty string `summary`. It is trimmed and limited to
+2000 characters, including a trailing `…` when shortened
 at a word boundary (a single word longer than the limit is cut to fit).
 Empty or whitespace-only summaries leave the field absent. The whole note,
 including its line breaks, is available in JSON. This optional field keeps

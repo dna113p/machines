@@ -1161,6 +1161,61 @@ test("a hosted run publishes the summary of its final output as the run's note, 
   }
 });
 
+test("a run started through the MCP server publishes the summary of its final output as the run's note, as machine run does", async (context) => {
+  const root = await temporaryDirectory(context);
+  const directory = join(root, "mcp");
+  publishFrom(context, { MACHINES_RUN_STATUS_DIR: directory });
+  const session = new McpSession();
+  context.after(() => session.close());
+  /** The record a run of the fixture leaves, as it is in its file, having ended with `output`. */
+  const finished = async (output: JsonValue): Promise<{ record: RunStatusRecord; text: string }> => {
+    const started = await session.start({ cwd: process.cwd(), machine: structured, input: output });
+    const { id } = (started.structuredContent as { run: { id: string } }).run;
+    await eventually(() => assert.equal(readRunStatuses(directory).find((record) => record.id === id)?.status, "completed"));
+    const text = await readFile(join(directory, `${id}.json`), "utf8");
+    return { record: JSON.parse(text), text };
+  };
+
+  const summary = "Parked on ticket/org-16: which base should the branch take?\nNeeds: a decision from the ticket owner.";
+  const parked = await finished({ summary, branch: "ticket/org-16", secret: "never-published-value" });
+  assert.deepEqual(
+    { schemaVersion: parked.record.schemaVersion, status: parked.record.status, state: parked.record.state, note: parked.record.note },
+    { schemaVersion: 2, status: "completed", state: "done", note: summary },
+  );
+  // The summary is all of the output that is published.
+  assert.doesNotMatch(parked.text, /never-published-value|ticket\/org-16"/u);
+
+  // Trimmed and cut as machine run cuts it: the same output leaves the same note either way.
+  const long = { summary: ` \n${"word ".repeat(500)}\n ` };
+  const input = join(root, "long.json");
+  await writeFile(input, JSON.stringify(long));
+  const cli = runCli(["--input-file", input], process.cwd(), { MACHINES_RUN_STATUS_DIR: join(root, "cli") }, structured);
+  assert.equal(cli.status, 0, cli.stderr);
+  const cut = (await finished(long)).record.note;
+  assert.equal(cut, `${"word ".repeat(400).trimEnd()}…`);
+  assert.deepEqual(readRunStatuses(join(root, "cli")).map((record) => record.note), [cut]);
+  assert.equal((await finished({ summary: "a".repeat(2001) })).record.note, `${"a".repeat(1999)}…`);
+
+  const without: JsonValue[] = [
+    "Parked: only text, not an object with a summary",
+    { result: "Parked", secret: "never-published-value" },
+    { summary: "" },
+    { summary: " \n\t " },
+    { summary: 7 },
+    { summary: ["Parked"] },
+    null,
+  ];
+  for (const output of without) {
+    const { record, text } = await finished(output);
+    assert.deepEqual(
+      { status: record.status, state: record.state, hasNote: "note" in record },
+      { status: "completed", state: "done", hasNote: false },
+      JSON.stringify(output),
+    );
+    assert.doesNotMatch(text, /Parked|never-published-value/u, JSON.stringify(output));
+  }
+});
+
 test("a host asked to publish, with nothing set, publishes in the standard directory of its home", async (context) => {
   const root = await temporaryDirectory(context);
   const home = join(root, "home");
@@ -1364,6 +1419,25 @@ test("the integrations guide describes a finished run's note for hosts that read
   // What a host needs to use it: where it comes from, and how long it can be.
   assert.ok(paragraphs.some((paragraph) => /`summary`/u.test(paragraph)), "it says the note is the final output's `summary`");
   assert.ok(paragraphs.some((paragraph) => /\b2,?000\b/u.test(paragraph)), "it says the note is at most 2000 characters");
+});
+
+test("the integrations guide says every way of starting a run that publishes a record publishes its note", async () => {
+  const guide = await readFile(resolve("docs/integrations.md"), "utf8");
+  const described = guide.slice(
+    guide.indexOf("\n## Run status for host status lines\n"),
+    guide.indexOf("\n### Answering a waiting run from outside\n"),
+  );
+  // The paragraph that says where the note comes from, read as one line whatever its wrapping.
+  const sources = described.split(/\n{2,}/u)
+    .filter((paragraph) => paragraph.includes("`note`") && paragraph.includes("`summary`"))
+    .map((paragraph) => paragraph.replace(/\s+/gu, " "));
+  assert.equal(sources.length, 1, "one paragraph says the note is the final output's `summary`");
+  // The three that keep a record, as the guide lists them where it introduces the record.
+  assert.match(described.replace(/\s+/gu, " "), /`machine run`, the MCP server, and a host that asks for it/u);
+  assert.match(sources[0]!, /`machine run`/u, "it names machine run");
+  assert.match(sources[0]!, /\bMCP server\b/u, "it names the MCP server");
+  assert.match(sources[0]!, /\bhost\b/u, "it names a host that publishes");
+  assert.match(sources[0]!, /\b(?:all three|each of the three|any of the three|every one of the three)\b/iu, "it says all three publish the note");
 });
 
 const publishedFrom = new WeakMap<TestContext, Map<string, string | undefined>>();
