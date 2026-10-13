@@ -6,7 +6,7 @@ import { join, resolve } from "node:path";
 import { test, type TestContext } from "node:test";
 
 import { runStatusLines } from "../claude/statusline.mjs";
-import { readRunStatuses, type RunStatusRecord } from "../src/run-status.ts";
+import { createRunStatusPublisher, readRunStatuses, type RunStatusRecord } from "../src/run-status.ts";
 import { readRunWatches, runWatchMatches, runWatchPath, writeRunWatches, type RunWatch } from "../src/run-watch.ts";
 
 const session = { CLAUDE_CODE_SESSION_ID: "session" };
@@ -112,6 +112,62 @@ test("a session adds, lists, and removes what it watches", async (context) => {
   assert.equal(watching(), "This session watches no other runs.\n");
   assert.deepEqual((await readdir(directory)).filter((name) => name.startsWith(".")), [".watch.explicit.json"]);
   assert.equal(machine(directory, session, "unwatch", "--all").status, 0);
+});
+
+test("a finished run's note is shown by its first line wherever runs are listed, and whole in JSON", async (context) => {
+  const directory = await temporaryDirectory(context);
+  const note = "Parked on ticket/org-9: which base should the branch take?\nNeeds: a decision from the ticket owner.";
+  const stopped = "Stopped: the base branch is gone.\nIt was deleted while the run worked.";
+  // This run is published as a run publishes itself, and is still going when it is first watched.
+  const parked = createRunStatusPublisher({
+    id: "parked-run", machine: "ticket", path: "/work/.machines/ticket.ts", cwd: "/work", label: "org-9: Watch runs",
+    startedAt: "2026-03-04T05:06:00.000Z",
+  }, { MACHINES_RUN_STATUS_DIR: directory });
+  await writeRecord(directory, {
+    id: "failed-run", label: "org-9.1: Second try", status: "failed", state: "work", error: "Operation failed", note: stopped,
+    startedAt: "2026-03-04T05:06:01.000Z",
+  });
+  await writeRecord(directory, {
+    id: "done-run", label: "org-9: Done", status: "completed", state: "done", startedAt: "2026-03-04T05:06:02.000Z",
+  });
+  await writeRecord(directory, { id: "working-run", label: "org-90: Later", startedAt: "2026-03-04T05:06:03.000Z" });
+  const rows = {
+    parked: "parked-run\tticket\tcompleted\tparked\torg-9: Watch runs",
+    failed: "failed-run\tticket\tfailed\twork\torg-9.1: Second try",
+    done: "done-run\tticket\tcompleted\tdone\torg-9: Done",
+    working: "working-run\tticket\trunning\tstarting\torg-90: Later",
+  };
+  const question = "Parked on ticket/org-9: which base should the branch take?";
+  const reason = "Stopped: the base branch is gone.";
+
+  assert.equal(machine(directory, session, "watch", "org-9").stdout, [
+    "Watching org-9", "  parked-run\tticket\trunning\tstarting\torg-9: Watch runs",
+    `  ${rows.failed}`, `    ${reason}`, `  ${rows.done}`, "",
+  ].join("\n"));
+
+  parked.finish({ state: "parked", note });
+  // When the watched run finishes, its row says how and the line under it says what it left to answer.
+  const watched = ["org-9", `  ${rows.parked}`, `    ${question}`, `  ${rows.failed}`, `    ${reason}`, `  ${rows.done}`, ""];
+  assert.equal(machine(directory, session, "watch").stdout, watched.join("\n"));
+  assert.equal(machine(directory, session, "watch", "org-9").stdout, ["Watching org-9", ...watched.slice(1)].join("\n"));
+
+  // A finished run is listed with --all. The columns stay as they were; the note is a line of its own.
+  assert.equal(machine(directory, {}, "runs", "--all").stdout, [
+    rows.parked, `  ${question}`, rows.failed, `  ${reason}`, rows.done, rows.working, "",
+  ].join("\n"));
+  assert.equal(machine(directory, session, "runs", "--all").stdout, [
+    `${rows.parked}\twatched`, `  ${question}`, `${rows.failed}\twatched`, `  ${reason}`, `${rows.done}\twatched`, rows.working, "",
+  ].join("\n"));
+  assert.equal(machine(directory, session, "runs").stdout, `${rows.working}\n`);
+  const viewed = machine(directory, {}, "runs", "--for", "session", "--all").stdout.split("\n");
+  assert.deepEqual(viewed.slice(viewed.indexOf(`${rows.parked}\twatched`)).slice(0, 2), [`${rows.parked}\twatched`, `  ${question}`]);
+
+  const notes = (...args: string[]) => (JSON.parse(machine(directory, session, "runs", ...args).stdout) as RunStatusRecord[])
+    .map((record) => [record.id, record.note]);
+  assert.deepEqual(notes("--all", "--json"), [
+    ["parked-run", note], ["failed-run", stopped], ["done-run", undefined], ["working-run", undefined],
+  ]);
+  assert.deepEqual(notes("--for", "--all", "--json").filter(([id]) => id === "parked-run"), [["parked-run", note]]);
 });
 
 test("with nothing set, a session's watch list and the runs it lists are in the standard directory of its home", async (context) => {
