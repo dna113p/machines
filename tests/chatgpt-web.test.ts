@@ -7,7 +7,6 @@ import { join, resolve } from "node:path";
 import { after, before, beforeEach, test } from "node:test";
 
 import {
-  acknowledgeRigBridgeHandoff,
   chatGptWebAgent,
   chatGptWebContinue,
   chatGptWebPrompt,

@@ -484,6 +484,7 @@ function printAgentListing(preset: AgentPresetSummary, separate: boolean) {
 
 /** Recorded text must not be able to move the cursor or restyle the terminal. */
 function plain(text: string) {
+  // oxlint-disable-next-line no-control-regex -- control characters are what this removes.
   return text.replace(/[\u0000-\u001f\u007f-\u009f]+/gu, " ").trim();
 }
 

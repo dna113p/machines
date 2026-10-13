@@ -696,6 +696,7 @@ test("the terminal picker leaves the terminal as it found it when its question i
   });
   // The menu is drawn, then cleared from its first line down, and nothing is confirmed.
   assert.ok(stdout.includes("approve") && stdout.includes("↑↓ select · enter confirm"), stdout);
+  // oxlint-disable-next-line no-control-regex -- terminal styling is stripped before the cursor movement is compared.
   assert.ok(stdout.replace(/\x1b\[\d*m/gu, "").endsWith("\x1b[3A\x1b[1G\x1b[0Janswered elsewhere\n"), JSON.stringify(stdout));
   assert.doesNotMatch(stdout, /✔/u);
 });
