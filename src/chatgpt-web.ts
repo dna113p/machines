@@ -7,7 +7,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import * as v from "valibot";
 
 import { agentPrompt, readAgentEvent } from "./agent-protocol.ts";
-import type { AgentReporter, AgentRequest, AgentRunner, Event } from "./index.ts";
+import type { AgentReporter, AgentRequest, Event } from "./index.ts";
 
 /** CSS selectors for the ChatGPT page. Override them when the web UI changes. */
 export interface ChatGptWebSelectors {

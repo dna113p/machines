@@ -19,6 +19,10 @@ For each major task type, record:
 - Expected final state, checks, result retrieval, and verification command.
 - Allowed effects, Human decisions, retry limits, and untested prerequisites.
 
+Record the gate inventory once, by class (lint, types, tests, build, live
+check): the command for each, where the one list that every route reads lives,
+and the classes the project has no command for.
+
 Mark deliberately direct, deferred, or blocked work with its reason. An existing
 setup may need no new Machine. Do not generate placeholders to fill categories.
 Include copyable invocations only for routes that exist. CLI positional input is

@@ -16,6 +16,7 @@ import { pathToFileURL } from "node:url";
 const terminalVisibleMilliseconds = 30_000;
 const maximumRuns = 5;
 const defaultColumns = 120;
+// oxlint-disable-next-line no-control-regex -- the escape character is the point: this strips terminal styling.
 const ansiSequence = /\x1b\[[0-9;]*m/uy;
 // Combining marks, format characters such as joiners, and Hangul medial and
 // final jamo are drawn on the character before them.
@@ -196,6 +197,7 @@ function formatElapsed(startedAt, endedAt) {
 
 /** Recorded text must not be able to move the cursor or restyle the status line. */
 function plain(text) {
+  // oxlint-disable-next-line no-control-regex -- control characters are what a status line must not carry.
   return text.replace(/[\u0000-\u001f\u007f-\u009f]+/gu, " ").trim();
 }
 

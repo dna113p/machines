@@ -1,3 +1,6 @@
+// A DOM stand-in walks ancestors by reassigning a node variable that starts at `this`, and
+// snapshots a listener set before dispatch so a listener removing itself cannot skip the next.
+/* oxlint-disable typescript/no-this-alias, unicorn/no-useless-spread */
 import { createHash } from "node:crypto";
 import { createServer, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";

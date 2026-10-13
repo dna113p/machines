@@ -20,30 +20,96 @@
   },
   "types": "./dist/src/index.d.ts",
   "exports": {
-    ".": { "types": "./dist/src/index.d.ts", "import": "./dist/src/index.js" },
-    "./acp": { "types": "./dist/src/acp.d.ts", "import": "./dist/src/acp.js" },
-    "./agy": { "types": "./dist/src/agy.d.ts", "import": "./dist/src/agy.js" },
-    "./chatgpt-web": { "types": "./dist/src/chatgpt-web.d.ts", "import": "./dist/src/chatgpt-web.js" },
-    "./claude": { "types": "./dist/src/claude.d.ts", "import": "./dist/src/claude.js" },
-    "./conversation": { "types": "./dist/src/conversation.d.ts", "import": "./dist/src/conversation.js" },
-    "./codex": { "types": "./dist/src/codex.d.ts", "import": "./dist/src/codex.js" },
-    "./deepseek": { "types": "./dist/src/deepseek.d.ts", "import": "./dist/src/deepseek.js" },
-    "./decision": { "types": "./dist/src/decision.d.ts", "import": "./dist/src/decision.js" },
-    "./jev": { "types": "./dist/src/jev.d.ts", "import": "./dist/src/jev.js" },
-    "./openrouter": { "types": "./dist/src/openrouter.d.ts", "import": "./dist/src/openrouter.js" },
-    "./laya": { "types": "./dist/src/laya.d.ts", "import": "./dist/src/laya.js" },
-    "./von": { "types": "./dist/src/von.d.ts", "import": "./dist/src/von.js" },
-    "./host": { "types": "./dist/src/host.d.ts", "import": "./dist/src/host.js" },
-    "./launcher": { "types": "./dist/src/launcher.d.ts", "import": "./dist/src/launcher.js" },
-    "./mcp": { "types": "./dist/mcp/server.d.ts", "import": "./dist/mcp/server.js" },
-    "./pi-extension": { "types": "./dist/pi-extension/index.d.ts", "import": "./dist/pi-extension/index.js" },
-    "./run-status": { "types": "./dist/src/run-viewer.d.ts", "import": "./dist/src/run-viewer.js" }
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
+    },
+    "./acp": {
+      "types": "./dist/src/acp.d.ts",
+      "import": "./dist/src/acp.js"
+    },
+    "./agy": {
+      "types": "./dist/src/agy.d.ts",
+      "import": "./dist/src/agy.js"
+    },
+    "./chatgpt-web": {
+      "types": "./dist/src/chatgpt-web.d.ts",
+      "import": "./dist/src/chatgpt-web.js"
+    },
+    "./claude": {
+      "types": "./dist/src/claude.d.ts",
+      "import": "./dist/src/claude.js"
+    },
+    "./conversation": {
+      "types": "./dist/src/conversation.d.ts",
+      "import": "./dist/src/conversation.js"
+    },
+    "./codex": {
+      "types": "./dist/src/codex.d.ts",
+      "import": "./dist/src/codex.js"
+    },
+    "./deepseek": {
+      "types": "./dist/src/deepseek.d.ts",
+      "import": "./dist/src/deepseek.js"
+    },
+    "./decision": {
+      "types": "./dist/src/decision.d.ts",
+      "import": "./dist/src/decision.js"
+    },
+    "./jev": {
+      "types": "./dist/src/jev.d.ts",
+      "import": "./dist/src/jev.js"
+    },
+    "./openrouter": {
+      "types": "./dist/src/openrouter.d.ts",
+      "import": "./dist/src/openrouter.js"
+    },
+    "./laya": {
+      "types": "./dist/src/laya.d.ts",
+      "import": "./dist/src/laya.js"
+    },
+    "./von": {
+      "types": "./dist/src/von.d.ts",
+      "import": "./dist/src/von.js"
+    },
+    "./host": {
+      "types": "./dist/src/host.d.ts",
+      "import": "./dist/src/host.js"
+    },
+    "./launcher": {
+      "types": "./dist/src/launcher.d.ts",
+      "import": "./dist/src/launcher.js"
+    },
+    "./mcp": {
+      "types": "./dist/mcp/server.d.ts",
+      "import": "./dist/mcp/server.js"
+    },
+    "./pi-extension": {
+      "types": "./dist/pi-extension/index.d.ts",
+      "import": "./dist/pi-extension/index.js"
+    },
+    "./run-status": {
+      "types": "./dist/src/run-viewer.d.ts",
+      "import": "./dist/src/run-viewer.js"
+    }
   },
-  "files": ["dist", "claude/statusline.mjs", "docs/architecture.md", "docs/authoring.md", "docs/integrations.md", "docs/local-decisions.md", "services/laya/server.py", "skills", "LICENSE", "README.md"],
+  "files": [
+    "dist",
+    "claude/statusline.mjs",
+    "docs/architecture.md",
+    "docs/authoring.md",
+    "docs/integrations.md",
+    "docs/local-decisions.md",
+    "services/laya/server.py",
+    "skills",
+    "LICENSE",
+    "README.md"
+  ],
   "scripts": {
     "build": "node scripts/build.mjs",
     "build:plugin": "npm run build && node scripts/build-plugin.mjs",
-    "check": "npm run typecheck && npm test",
+    "check": "npm run lint && npm run typecheck && npm test",
+    "lint": "oxlint --deny-warnings",
     "example": "node examples/operation.ts",
     "example:agents": "node examples/named-agents.ts",
     "example:agy": "node examples/agy.ts",
@@ -73,6 +139,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "oxlint": "^1.87.0",
     "typescript": "^7.0.2"
   }
 }

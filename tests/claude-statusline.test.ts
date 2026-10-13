@@ -262,6 +262,7 @@ test("recorded text cannot inject control sequences, and invalid records are ski
   ], { ...alive, color: true });
 
   assert.equal(lines.length, 2);
+  // oxlint-disable-next-line no-control-regex -- the test is that no control character other than styling survives.
   assert.ok(lines.every((line) => !/[\u0000-\u001a\u001c-\u001f\u007f]/u.test(line.replace(/\x1b\[[0-9;]*m/gu, ""))));
   assert.deepEqual(lines.map(stripVTControlCharacters), ["◆ hostile  tick [2Jet › input needed · 0s", "  Approve ]0;title ?"]);
 });

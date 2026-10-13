@@ -29,6 +29,19 @@ types, quality gates, recurring failure modes, and decisions needing a Human.
 Include domain-specific work, not just generic coding stages. Use only relevant,
 available project context; distinguish observed needs from speculative ones.
 
+Inventory the project's deterministic checks before designing any workflow, by
+class: lint, types, tests, build, and a live check that drives the real artifact
+(a packaging smoke, an install test, a CLI or service run against a scratch
+directory). Take them from the project's own scripts and CI, not from a fixed
+list, and run each once to learn its duration and that it leaves the checkout
+clean. Record the inventory in the map, naming the classes the project has no
+command for; a missing class is a finding for the owner, not something to
+invent. Put the resulting gate list in one project-owned place that every
+route reads (a configuration file the launchers load, not a copy in each
+launcher), so an Agent is held to the same gates a person runs. Where the
+project's checks stop at the first failure, prefer running every gate and
+reporting all failures at once: one repair round then sees them all.
+
 Inspect the existing orchestrator instructions and any `.machines/README.md`.
 Run `machine list` and `machine agents` in the actual work directories, or use
 `machine_list` / `machine_agents` with the correct workspace. Read candidate
