@@ -15,7 +15,7 @@ export interface CodexAgentOptions {
   readonly model?: string;
   /** A reasoning effort supported by the selected Codex model. */
   readonly effort?: string;
-  /** Codex service tier, e.g. "fast"; omitted values inherit the CLI configuration. */
+  /** Codex service tier, e.g. "fast" or "ultrafast"; omitted values inherit the CLI configuration. */
   readonly serviceTier?: string;
   /** Defaults to read-only; writes and unrestricted access require an explicit choice. */
   readonly sandbox?: "read-only" | "workspace-write" | "danger-full-access";

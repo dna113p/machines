@@ -61,7 +61,7 @@ test("Codex option identity and arguments honor merged environment precedence", 
   assert.deepEqual(explicit[0], { type: "identity", harness: "reviewer", model: "explicit-model", thinking: "low" });
 });
 
-test("Codex selects fast mode with option and environment precedence, otherwise inheriting CLI config", async () => {
+test("Codex selects fast and ultrafast tiers with option and environment precedence, otherwise inheriting CLI config", async () => {
   const previous = process.env.CODEX_SERVICE_TIER;
   const tierArgs = async (options: CodexAgentOptions = {}) => {
     const event = await runner("arguments", options)(request);
@@ -74,8 +74,10 @@ test("Codex selects fast mode with option and environment precedence, otherwise 
     delete process.env.CODEX_SERVICE_TIER;
     assert.deepEqual(await tierArgs(), []);
     assert.deepEqual(await tierArgs({ serviceTier: "fast" }), ['service_tier="fast"']);
+    assert.deepEqual(await tierArgs({ serviceTier: "ultrafast" }), ['service_tier="ultrafast"']);
     process.env.CODEX_SERVICE_TIER = "fast";
     assert.deepEqual(await tierArgs(), ['service_tier="fast"']);
+    assert.deepEqual(await tierArgs({ env: { CODEX_SERVICE_TIER: "ultrafast" } }), ['service_tier="ultrafast"']);
     assert.deepEqual(await tierArgs({ env: { CODEX_SERVICE_TIER: "flex" } }), ['service_tier="flex"']);
     assert.deepEqual(await tierArgs({ env: { CODEX_SERVICE_TIER: "flex" }, serviceTier: "fast" }), ['service_tier="fast"']);
   } finally {
