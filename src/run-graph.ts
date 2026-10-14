@@ -83,7 +83,9 @@ export function machineGraph(definition: AnyStateMachine): RunGraph | undefined 
       };
       for (const [event, definitions] of node.transitions) {
         // The runtime's own actor events only run actions; the outcome they raise is the transition.
-        const label = event.startsWith("xstate.done.state.") ? "done"
+        // A plain XState state can target from them directly, through `onDone` and `onError`.
+        const label = event.startsWith("xstate.done.state.") || event.startsWith("xstate.done.actor.") ? "done"
+          : event.startsWith("xstate.error.actor.") ? "error"
           : event.startsWith("xstate.after.") ? "after"
           : event;
         for (const transition of definitions) add(label, transition.target);

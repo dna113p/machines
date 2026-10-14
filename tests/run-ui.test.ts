@@ -8,6 +8,8 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test, type TestContext } from "node:test";
 
+import { createMachine, fromPromise } from "xstate";
+
 import { agent, final, human, machine, operation } from "../src/index.ts";
 import { machineGraph, statePaths } from "../src/run-graph.ts";
 import { createRunStatusPublisher, readRunStatuses, trailLimit } from "../src/run-status.ts";
@@ -54,6 +56,26 @@ test("a definition's graph names each state's kind, its Agent role, and every tr
     { from: "nested", to: "done", event: "done" },
     { from: "nested.inner", to: "nested.end", event: "go" },
   ]);
+});
+
+test("a plain XState definition's invoke, delay, and eventless transitions read as done, error, after, and always", () => {
+  const graph = machineGraph(createMachine({
+    initial: "fetch",
+    states: {
+      fetch: { invoke: { src: fromPromise(async () => 1), onDone: "wait", onError: "failed" } },
+      wait: { after: { 1_000: "settle" } },
+      settle: { always: "done" },
+      failed: { type: "final" },
+      done: { type: "final" },
+    },
+  }));
+  assert.deepEqual(graph?.edges, [
+    { from: "fetch", to: "wait", event: "done" },
+    { from: "fetch", to: "failed", event: "error" },
+    { from: "wait", to: "settle", event: "after" },
+    { from: "settle", to: "done", event: "always" },
+  ]);
+  assert.deepEqual(graph?.states.map((state) => state.kind), ["operation", "state", "state", "final", "final"]);
 });
 
 test("a state value reads as the dotted paths of its active states", () => {
