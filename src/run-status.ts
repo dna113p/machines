@@ -5,6 +5,7 @@ import type { StateValue } from "xstate";
 
 import { machinesUserHome } from "./discovery.ts";
 import type { AgentUpdate } from "./index.ts";
+import { statePaths, type RunGraph, type RunTrailStep } from "./run-graph.ts";
 
 /** One published run, stored as `<id>.json` in the run-status directory. */
 export interface RunStatusRecord {
@@ -38,6 +39,10 @@ export interface RunStatusRecord {
   readonly error?: string;
   /** The finished run's summary, at most 2000 characters including any ellipsis. */
   readonly note?: string;
+  /** The Machine's states and transitions, when it is small enough to draw. */
+  readonly graph?: RunGraph;
+  /** The states the run entered, oldest first: the latest `trailLimit` of them. */
+  readonly trail?: readonly RunTrailStep[];
   readonly startedAt: string;
   readonly updatedAt: string;
 }
@@ -75,6 +80,7 @@ export interface RunStatusRun {
   /** Replaces `MACHINES_RUN_LABEL`, and is shortened as it is. */
   readonly label?: string;
   readonly answeredBy?: "host";
+  readonly graph?: RunGraph;
 }
 
 /** A present key replaces its field; a present key holding `undefined` clears it. */
@@ -104,6 +110,8 @@ export interface RunStatusPublisher {
 }
 
 const staleAfterMilliseconds = 60 * 60 * 1_000;
+/** How many entered states a record keeps: enough for a long run's repairs, small enough to rewrite at every step. */
+export const trailLimit = 200;
 /** How long a record goes on naming a response its run took: longer than a sender waits to hear of it. */
 export const deliveryRetentionMilliseconds = 60_000;
 /** How long a session's watch list is kept after its last change: sessions end without saying so. */
@@ -186,6 +194,12 @@ export function createRunStatusPublisher(
   let deliveries: ReadonlyArray<{ readonly id: string; readonly takenAt: number }> = [];
   let error: string | undefined;
   let note: string | undefined;
+  let trail: RunTrailStep[] = [];
+  const enter = (entered: string | undefined, at: string) => {
+    const path = entered === undefined ? "" : statePaths(entered).join(", ");
+    if (path === "" || trail.at(-1)?.state === path) return;
+    trail = [...trail, { state: path, at }].slice(-trailLimit);
+  };
 
   const publish = (): boolean => {
     const record: RunStatusRecord = {
@@ -208,6 +222,8 @@ export function createRunStatusPublisher(
       ...(deliveries.length === 0 ? {} : { deliveries: deliveries.map((delivery) => delivery.id) }),
       ...(error === undefined ? {} : { error }),
       ...(note === undefined ? {} : { note }),
+      ...(run.graph === undefined ? {} : { graph: run.graph }),
+      ...(trail.length === 0 ? {} : { trail }),
       startedAt,
       updatedAt: new Date().toISOString(),
     };
@@ -258,7 +274,10 @@ export function createRunStatusPublisher(
       };
       // Repeated notifications for an unchanged run do not need another write.
       if (JSON.stringify(next) === JSON.stringify({ status, state, agent, limit, human, deliveries })) return;
-      if (next.state !== state) stateSince = new Date().toISOString();
+      if (next.state !== state) {
+        stateSince = new Date().toISOString();
+        enter(next.state, stateSince);
+      }
       ({ status, state, agent, limit, human, deliveries } = next);
       publish();
     },
@@ -271,6 +290,7 @@ export function createRunStatusPublisher(
         status = "completed";
         state = formatState(outcome.state) ?? state;
         note = formatNote(outcome.note);
+        enter(state, new Date().toISOString());
       }
       stateSince = undefined;
       agent = undefined;
@@ -449,8 +469,22 @@ function isRunStatusRecord(value: unknown): value is RunStatusRecord {
     && isOptionalStrings(record.deliveries)
     && isOptionalString(record.error)
     && isOptionalString(record.note)
+    && (record.graph === undefined || isGraph(record.graph))
+    && (record.trail === undefined || (Array.isArray(record.trail) && record.trail.every((step) =>
+      step !== null && typeof step === "object" && typeof step.state === "string" && isTimestamp(step.at))))
     && isTimestamp(record.startedAt)
     && isTimestamp(record.updatedAt);
+}
+
+function isGraph(value: unknown): boolean {
+  if (value === null || typeof value !== "object") return false;
+  const graph = value as Record<string, unknown>;
+  return isOptionalString(graph.initial)
+    && Array.isArray(graph.states) && graph.states.every((state) => state !== null && typeof state === "object"
+      && typeof state.id === "string" && typeof state.kind === "string"
+      && isOptionalString(state.parent) && isOptionalString(state.role))
+    && Array.isArray(graph.edges) && graph.edges.every((edge) => edge !== null && typeof edge === "object"
+      && typeof edge.from === "string" && typeof edge.to === "string" && typeof edge.event === "string");
 }
 
 function isOptionalString(value: unknown): boolean {

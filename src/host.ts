@@ -8,6 +8,7 @@ import { assertJsonValue, isJsonValue, type JsonValue } from "./json.ts";
 import type { StateValue } from "xstate";
 
 import type { AgentUpdate, HumanRequest, HumanResponse } from "./index.ts";
+import type { RunGraph } from "./run-graph.ts";
 import {
   prepareMachineRun,
   type PrepareMachineRunOptions,
@@ -134,6 +135,8 @@ const childMessageSchema = v.variant("type", [
     description: v.string(),
     path: v.string(),
     agentRoles: v.record(v.string(), v.string()),
+    // Checked as the record is read back; here it only has to be an object.
+    graph: v.optional(v.custom<RunGraph>((value) => value !== null && typeof value === "object")),
   }),
   v.strictObject({ type: v.literal("state"), state: stateValueSchema }),
   v.strictObject({ type: v.literal("agentUpdate"), update: agentUpdateSchema }),
@@ -257,6 +260,7 @@ export function startMachineHost(
             machine: message.name,
             path: message.path,
             cwd: resolvePath(cwd),
+            ...(message.graph === undefined ? {} : { graph: message.graph }),
             ...(options.label === undefined ? {} : { label: options.label }),
             ...(options.owner === undefined ? {} : { owner: options.owner }),
             // Responses reach this run through `respond` and `ask` below, never through an inbox.
@@ -461,6 +465,7 @@ function runChildHost(): void {
         description: prepared.description,
         path: prepared.path,
         agentRoles: prepared.agentRoles,
+        ...(prepared.graph === undefined ? {} : { graph: prepared.graph }),
       });
       // Machines started by this run's Operations and Agents are its sub-runs.
       if (runId !== undefined) process.env.MACHINES_RUN_PARENT = runId;

@@ -205,6 +205,7 @@ machine runs --for [<session>] [--project <dir>] [--json] [--all]   # the runs o
 machine respond <run-id> <request-id> <response>   # answer a waiting run
 machine watch [<run-id-or-label-start> | --dir <path>]     # show other runs on this session's status line
 machine unwatch <run-id-or-label-start> | --dir <path> | --all
+machine ui [--port <port>] [--project <dir>]       # a live page of every run, with its Machine drawn as a graph
 ```
 
 `machine runs` shows each waiting run's prompt, request id, and choices. A run
@@ -220,6 +221,10 @@ such as a ticket a daemon runs. See
 runs one session shows, so any application can
 [draw its own widgets](docs/integrations.md#drawing-your-own-widgets); `watch`
 and `unwatch` take `--for <session>` first to manage that session's list.
+`machine ui` serves a local page of every published run, drawing each run's
+Machine with its current state and the path it took, answering waiting runs, and
+showing a project's own panels; see
+[watching runs in a browser](docs/integrations.md#watching-runs-in-a-browser).
 
 ## Execution model and limitations
 

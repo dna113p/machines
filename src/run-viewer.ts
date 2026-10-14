@@ -6,6 +6,8 @@ import { isWithinDirectory, runWatchMatches, type RunWatch } from "./run-watch.t
 // the publisher and the watch-list writer stay in the runtime.
 export { readRunStatuses, runSessionId, runStatusDirectory } from "./run-status.ts";
 export type { RunStatusAgent, RunStatusHuman, RunStatusLimit, RunStatusRecord } from "./run-status.ts";
+export { statePaths } from "./run-graph.ts";
+export type { RunGraph, RunGraphEdge, RunGraphState, RunTrailStep } from "./run-graph.ts";
 export { readRunWatches } from "./run-watch.ts";
 export type { RunWatch } from "./run-watch.ts";
 

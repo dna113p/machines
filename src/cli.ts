@@ -39,6 +39,7 @@ import {
   type RunWatch,
 } from "./run-watch.ts";
 import { runsForViewer, type ViewerRun } from "./run-viewer.ts";
+import { startRunUi, uiProjectDir } from "./run-ui.ts";
 
 import type { StateValue } from "xstate";
 import type { AgentUpdate, RunOptions } from "./index.ts";
@@ -49,6 +50,7 @@ const watchUsage = "machine watch [<run-id-or-label-start> | --dir <path>]";
 const unwatchUsage = "machine unwatch <run-id-or-label-start> | --dir <path> | --all";
 const watchForUsage = "machine watch --for <session> [<run-id-or-label-start> | --dir <path>]";
 const unwatchForUsage = "machine unwatch --for <session> <run-id-or-label-start> | --dir <path> | --all";
+const uiUsage = "machine ui [--port <port>] [--project <dir>]";
 
 try {
   const listing = command === "runs" ? parseRunsOptions(runsOptions) : undefined;
@@ -80,6 +82,8 @@ try {
     watch(selector === undefined ? [] : [selector, ...argumentsAfterSelector]);
   } else if (command === "unwatch" && selector !== undefined) {
     unwatch([selector, ...argumentsAfterSelector]);
+  } else if (command === "ui") {
+    await ui(selector === undefined ? [] : [selector, ...argumentsAfterSelector]);
   } else {
     throw new Error([
       "Usage:",
@@ -94,6 +98,7 @@ try {
       `  ${unwatchUsage}`,
       `  ${watchForUsage}`,
       `  ${unwatchForUsage}`,
+      `  ${uiUsage}`,
     ].join("\n"));
   }
 } catch (cause) {
@@ -125,7 +130,13 @@ async function runMachine(machinePath: string, args: string[]) {
   });
   const status = createRunStatus(machinePath);
   const runId = randomUUID();
-  const published = createRunStatusPublisher({ id: runId, machine: prepared.name, path: prepared.path, cwd: process.cwd() });
+  const published = createRunStatusPublisher({
+    id: runId,
+    machine: prepared.name,
+    path: prepared.path,
+    cwd: process.cwd(),
+    ...(prepared.graph === undefined ? {} : { graph: prepared.graph }),
+  });
   const statusDirectory = published.directory;
   // Machines started by this run's Operations and Agents are its sub-runs.
   process.env.MACHINES_RUN_PARENT = runId;
@@ -374,6 +385,33 @@ async function respond(args: string[]) {
     response: question ? { type: "question", text } : text,
   });
   console.log(`Machine run ${runId} took the ${question ? "question" : "response"}.`);
+}
+
+/** Serves the live page of published runs until interrupted. */
+async function ui(args: string[]) {
+  let port: number | undefined;
+  let project: string | undefined;
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    const value = args[index + 1];
+    if (argument === "--port" && value !== undefined && /^\d+$/u.test(value) && Number(value) <= 65_535) port = Number(value);
+    else if (argument === "--project" && value !== undefined) project = resolve(value);
+    else throw new Error(`Usage: ${uiUsage}`);
+    index += 1;
+  }
+  const page = await startRunUi({
+    directory: requireStatusDirectory(),
+    projectDir: project ?? uiProjectDir(process.cwd()),
+    ...(port === undefined ? {} : { port }),
+  });
+  console.log(`Machines UI: ${page.url}`);
+  console.log("Press Ctrl-C to stop.");
+  await new Promise<void>((resolveStop) => {
+    const stop = () => resolveStop();
+    process.once("SIGINT", stop);
+    process.once("SIGTERM", stop);
+  });
+  await page.close();
 }
 
 function requireStatusDirectory() {

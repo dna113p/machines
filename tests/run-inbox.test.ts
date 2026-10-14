@@ -48,7 +48,8 @@ test("a waiting run publishes what is needed to show and to answer its request",
     assert.equal(machine(directory, "respond", record.id, record.human!.requestId!, response).status, 0);
     assert.equal((await run.exited).code, 0);
     const text = await readFile(join(directory, `${record.id}.json`), "utf8");
-    assert.doesNotMatch(text, /a response never published|"human"/u, kind);
+    // A Human state in the published graph is not a request: only the `human` field would be one.
+    assert.doesNotMatch(text, /a response never published|"human":/u, kind);
   }
 });
 
