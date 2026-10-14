@@ -110,6 +110,15 @@ export type { JsonValue } from "./json.ts";
 
 export { AgentLimitError, agentLimitOf, type AgentLimit } from "./agent-limit.ts";
 
+export {
+  machineGraph,
+  statePaths,
+  type RunGraph,
+  type RunGraphEdge,
+  type RunGraphState,
+  type RunTrailStep,
+} from "./run-graph.ts";
+
 export type AgentRunner = (
   request: AgentRequest,
   report?: AgentReporter,

@@ -26,6 +26,12 @@ test("a host starts one Machine, reports state, and accepts Human input", async 
   assert.deepEqual(await hosted.result, { state: "done" });
   assert.equal(hosted.name, "host.machine");
   assert.equal(hosted.description, "Exercises one hosted Machine run.");
+  // The graph comes with the run although this host publishes nothing.
+  assert.deepEqual(hosted.graph, {
+    initial: "work",
+    states: [{ id: "work", kind: "operation" }, { id: "review", kind: "human" }, { id: "done", kind: "final" }],
+    edges: [{ from: "work", to: "review", event: "completed" }, { from: "review", to: "done", event: "submitted" }],
+  });
   assert.equal(typeof request.requestId, "string");
   assert.deepEqual(request, {
     requestId: request.requestId,

@@ -10,8 +10,8 @@ import { test, type TestContext } from "node:test";
 
 import { createMachine, fromPromise } from "xstate";
 
-import { agent, final, human, machine, operation } from "../src/index.ts";
-import { machineGraph, statePaths } from "../src/run-graph.ts";
+// The package's own entry, which any tool that holds a definition can read its graph from.
+import { agent, final, human, machine, machineGraph, operation, statePaths } from "../src/index.ts";
 import { createRunStatusPublisher, readRunStatuses, trailLimit } from "../src/run-status.ts";
 import { parsePanelOutput, readPanelSources, startRunUi, uiProjectDir, uiRuns } from "../src/run-ui.ts";
 

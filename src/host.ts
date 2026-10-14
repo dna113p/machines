@@ -55,6 +55,11 @@ export interface MachineHostRun {
   readonly description: string;
   readonly path: string;
   readonly agentRoles: Readonly<Record<string, string>>;
+  /**
+   * The Machine's states and transitions, as its published run status carries
+   * them, whether or not this run is published. Absent for a Machine too large to draw.
+   */
+  readonly graph?: RunGraph;
   readonly result: Promise<MachineHostResult>;
   respond(response: string, requestId: string): Promise<void>;
   ask(question: string, requestId: string): Promise<void>;
@@ -273,6 +278,7 @@ export function startMachineHost(
           description: message.description,
           path: message.path,
           agentRoles: message.agentRoles,
+          ...(message.graph === undefined ? {} : { graph: message.graph }),
           result,
           async respond(response, requestId) {
             if (phase !== "running" || pendingHuman === undefined) {
