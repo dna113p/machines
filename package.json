@@ -1,6 +1,6 @@
 {
   "name": "@dna113p/machines",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "description": "Reusable workflows coordinating agents, local operations, and human decisions.",
   "license": "MIT",
   "repository": {
