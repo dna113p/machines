@@ -149,7 +149,16 @@ launch it, supervise it, and collect its result. For example:
 Delegated workers receive explicit task context and produce result artifacts the
 coordinating agent can read. Runs remain session-scoped; the skill does not add
 durable sessions or arbitrary messaging between agents. All three skills ship in the
-npm package and portable plugin.
+npm package and portable plugin. To make them available in every project for
+Claude Code, Codex, Pi, and Antigravity, install them at user level:
+
+```bash
+npx skills add dna113p/machines --global --skill '*' \
+  --agent claude-code codex pi antigravity
+```
+
+[Integrations](docs/integrations.md#install-the-skills-for-every-agent) covers
+linking them from a checkout instead.
 
 ## Install from npm
 
