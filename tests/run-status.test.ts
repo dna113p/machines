@@ -769,9 +769,13 @@ test("machine run publishes a running record and then its completion", async (co
   assert.doesNotMatch(text, /never-published-value|observed\.json/u);
   const completed = readRunStatuses(directory)[0]!;
   assert.deepEqual(
-    { ...completed, stateSince: undefined, updatedAt: undefined },
-    { ...running, status: "completed", state: "done", stateSince: undefined, updatedAt: undefined },
+    { ...completed, stateSince: undefined, updatedAt: undefined, trail: undefined },
+    { ...running, status: "completed", state: "done", stateSince: undefined, updatedAt: undefined, trail: undefined },
   );
+  // The trail grows by the state the run ended in; the graph was published with the first record.
+  assert.deepEqual(completed.trail?.map((step) => step.state), ["observe", "done"]);
+  assert.deepEqual(completed.trail?.[0], running.trail?.[0]);
+  assert.deepEqual(completed.graph?.states.map((state) => state.id), ["observe", "done"]);
   assert.ok(Date.parse(completed.updatedAt) >= Date.parse(running.updatedAt));
   assert.equal((await stat(join(directory, files[0]!))).mode & 0o777, 0o600);
 });
@@ -1028,12 +1032,19 @@ test("a hosted run publishes what machine run does, from its first state to its 
   const identity = { harness: "fixture", model: "tiny", thinking: "low" };
 
   await eventually(() => assert.deepEqual(published()?.agent, identity));
-  const { id, startedAt, updatedAt, stateSince, ...running } = published()!;
+  const { id, startedAt, updatedAt, stateSince, graph, trail, ...running } = published()!;
   assert.equal(id, hosted.id);
   assert.deepEqual(running, {
     schemaVersion: 2, pid: process.pid, owner: "session-9", label: "org-9 → machines: Watch runs",
     machine: "work", path: hosted.path, cwd: root, status: "running", state: "work", agent: identity, answeredBy: "host",
   });
+  // The hosted process reads the graph and the host publishes it, with the states entered so far.
+  assert.deepEqual(graph, {
+    initial: "prepare",
+    states: [{ id: "prepare", kind: "operation" }, { id: "work", kind: "agent", role: "default" }, { id: "review", kind: "human" }, { id: "done", kind: "final" }],
+    edges: [{ from: "prepare", to: "work", event: "prepared" }, { from: "work", to: "review", event: "completed" }, { from: "review", to: "done", event: "submitted" }],
+  });
+  assert.deepEqual(trail?.map((step) => step.state), ["prepare", "work"]);
   assert.ok(Date.parse(stateSince!) >= Date.parse(startedAt) && Date.parse(updatedAt) >= Date.parse(stateSince!));
   assert.deepEqual(await readdir(directory), [`${id}.json`]);
   assert.equal((await stat(join(directory, `${id}.json`))).mode & 0o777, 0o600);
@@ -1068,7 +1079,8 @@ test("a hosted run publishes what machine run does, from its first state to its 
   await hosted.respond("approve", request.requestId);
   assert.deepEqual(await hosted.result, { state: "done" });
   // Like machine run, it leaves its outcome behind for readers, and later runs prune it.
-  const { updatedAt: finishedAt, ...completed } = published()!;
+  const { updatedAt: finishedAt, graph: _graph, trail: finalTrail, ...completed } = published()!;
+  assert.deepEqual(finalTrail?.map((step) => step.state), ["prepare", "work", "review", "done"]);
   assert.deepEqual(completed, {
     schemaVersion: 2, id, pid: process.pid, owner: "session-9", label: "org-9 → machines: Watch runs",
     machine: "work", path: hosted.path, cwd: root, status: "completed", state: "done", answeredBy: "host", startedAt,

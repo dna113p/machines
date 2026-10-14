@@ -220,6 +220,16 @@ choice to publish that text. `machine run` exports its run id as
 `MACHINES_RUN_PARENT`, so a Machine started by one of its Operations or Agents
 records that id as `parent`; the status line shows only top-level runs.
 
+`graph` is the Machine's states and transitions, published once when the run
+starts: `initial`, `states` (each with an `id`, a `kind` of `agent`, `human`,
+`operation`, `final`, `group`, or `state`, an Agent's `role`, and the `parent`
+group of a nested state), and `edges` (`from`, `to`, and the `event` taken). Ids
+are state paths joined by dots, so a nested state is `review.round`. A Machine
+with more than 300 states or 1000 transitions publishes no graph. `trail` is the
+states the run entered, oldest first, each with the time it was entered, as the
+same dotted paths; it keeps the latest 200. Both are additions to version 2:
+a reader that does not know them ignores them.
+
 A run hosted through `startMachineHost` from `@dna113p/machines/host` publishes
 the same record when its host asks with `publishRunStatus: true` and
 publication is on in the hosting process, as a daemon that runs tickets does. A
@@ -454,6 +464,36 @@ whose project directory contains the run's working directory. Finished runs stay
 for the same time, so the status line must run where it can see that process.
 Set `NO_COLOR` (to any value, even an empty one) for plain text and `COLUMNS`
 to change the 120-column truncation.
+
+### Watching runs in a browser
+
+```bash
+machine ui [--port <port>] [--project <dir>]
+```
+
+serves a live page on `127.0.0.1` (port 4777, or the next free one) of every
+published run: what is waiting on you, what is running, and what finished, with
+each run's Machine drawn as a graph, its current state marked, the states and
+transitions it has taken counted, and the path it took so far. A waiting run
+that takes outside responses is answered from the page, as `machine respond`
+answers it; a run answered through its host, such as a daemon's, names where to
+answer it instead. The page loads nothing from outside, accepts requests only
+under its own host name, and answers a run only with a token it was served.
+
+A project adds its own panels beside the runs, such as its tickets or pull
+requests, in `.machines/ui.json` in the project (the nearest directory above the
+current one that has a `.machines` directory, or `--project`):
+
+```json
+{ "panels": [{ "title": "Tickets", "command": ["node", "scripts/ui-panels.mjs", "tickets"], "refreshSeconds": 10 }] }
+```
+
+Each command runs in the project directory every `refreshSeconds` (10 by
+default) and prints one JSON object: `{ "summary"?, "items": [{ "text",
+"detail"?, "status"?, "href"?, "at"? }] }`, where `status` is `ok`, `warn`,
+`bad`, `active`, or `idle`, `href` is a web link, and `at` a time. Commands are
+project code, trusted as `.machines/` Machines are; a command that fails or
+prints something else shows its error in its panel.
 
 ### Watching other runs
 

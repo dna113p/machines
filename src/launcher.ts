@@ -21,6 +21,7 @@ import {
   type AgentRunner,
   type RunOptions,
 } from "./index.ts";
+import { machineGraph, type RunGraph } from "./run-graph.ts";
 
 export interface PrepareMachineRunOptions extends LauncherLocation {
   readonly machine: string;
@@ -42,6 +43,8 @@ export interface PreparedMachineRun {
   readonly description: string;
   readonly path: string;
   readonly agentRoles: Readonly<Record<string, string>>;
+  /** The definition's states and transitions, for run status; undefined when it is too large to draw. */
+  readonly graph?: RunGraph;
   start(options?: Omit<RunOptions, "agents">): Promise<SnapshotFrom<AnyStateMachine>>;
 }
 
@@ -81,11 +84,13 @@ export async function prepareMachineRun(
   const limitAware = limitAwareAgents(requiredRoles, overrides, configured, limitPolicy(options.agentLimits));
 
   let started = false;
+  const graph = machineGraph(definition);
   return {
     name: machineName(path),
     description,
     path,
     agentRoles,
+    ...(graph === undefined ? {} : { graph }),
     start(runOptions = {}) {
       if (started) throw new Error(`Prepared Machine "${path}" has already started`);
       started = true;
