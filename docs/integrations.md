@@ -26,6 +26,36 @@ points with `npm run build` and reconnect/start a new client session. Portable
 plugin installations need their complete bundle refreshed as described below.
 Already-running conversations are not retroactively given new instructions.
 
+## Install the skills for every agent
+
+Install the three skills once, at user level, so every project can start with
+`machine-project-setup` instead of only `machine-builder`. The cross-agent
+[`skills` CLI](https://github.com/vercel-labs/skills) keeps one copy in
+`~/.agents/skills` and links each agent's skills directory to it:
+
+```bash
+npx skills add dna113p/machines --global --skill '*' \
+  --agent claude-code codex pi antigravity
+```
+
+Codex and Pi read `~/.agents/skills` directly. Claude Code reads
+`~/.claude/skills`, and Antigravity reads `~/.gemini/antigravity/skills`. Run
+`npx skills update --global` after a Machines release to refresh the copy.
+
+When you work from a Machines checkout, link the skills to the checkout instead,
+so edits apply without reinstalling:
+
+```bash
+for s in machine-builder machine-delegation machine-project-setup; do
+  ln -sfn "$PWD/skills/$s" ~/.agents/skills/$s
+  ln -sfn ~/.agents/skills/$s ~/.claude/skills/$s
+  ln -sfn ~/.agents/skills/$s ~/.gemini/antigravity/skills/$s
+done
+```
+
+Skip the lines for agents you do not use. A project's own `.claude/skills` or
+`.agents/skills` links still take precedence for that project.
+
 ## Project orchestrator setup
 
 Use [machine-project-setup](../skills/machine-project-setup/SKILL.md) when the agent
