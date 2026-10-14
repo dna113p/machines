@@ -230,6 +230,12 @@ states the run entered, oldest first, each with the time it was entered, as the
 same dotted paths; it keeps the latest 200. Both are additions to version 2:
 a reader that does not know them ignores them.
 
+The graph does not depend on publication. `machineGraph(definition)` from
+`@dna113p/machines` returns it for any Machine definition a program holds, or
+undefined for one too large to draw. The value `startMachineHost` resolves to
+carries the run's `graph` whether or not the host publishes, and its `onState`
+callback reports each state a trail is made of.
+
 A run hosted through `startMachineHost` from `@dna113p/machines/host` publishes
 the same record when its host asks with `publishRunStatus: true` and
 publication is on in the hosting process, as a daemon that runs tickets does. A
