@@ -178,7 +178,7 @@ test("with nothing set, a session's watch list and the runs it lists are in the 
   // Reading creates nothing, and a directory that is not there yet holds no runs.
   assert.equal(machine(undefined, unset, "watch").stdout, "This session watches no other runs.\n");
   const none = machine(undefined, unset, "runs");
-  assert.deepEqual({ status: none.status, stdout: none.stdout }, { status: 0, stdout: "No Machine runs are running or waiting.\n" }, none.stderr);
+  assert.deepEqual({ status: none.status, stdout: none.stdout }, { status: 0, stdout: "No Machine runs are running, waiting or sleeping.\n" }, none.stderr);
   assert.equal(machine(undefined, unset, "unwatch", "org-9").stdout, "This session was not watching org-9\n");
   await assert.rejects(stat(home), /ENOENT/u);
 

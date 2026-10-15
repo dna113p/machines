@@ -131,6 +131,55 @@ test("a settled or lost run stays for thirty seconds, and all keeps it for as lo
   assert.deepEqual(runsForViewer(records, viewer, { ...options, now: now + 1 }).map((run) => run.id), ["old-wait", "old-run", "fail-29"]);
 });
 
+test("a sleeping run is never lost, stays with the runs that can still change, and says what it waits for", () => {
+  // A sleeping run's process ended on purpose: its pid says nothing about it.
+  const options = { now, isAlive: () => false };
+  const request = { prompt: "Ship the release?", requestId: "request-1", choices: ["approve", "deny"] };
+  const records = [
+    record({ id: "done", status: "completed", updatedAt: ago(1_000) }),
+    record({ id: "asking", pid: 4242, status: "sleeping", state: "ask", human: request, updatedAt: ago(3_600_000) }),
+    record({ id: "answered", pid: 4242, status: "sleeping", state: "ask", human: { ...request, requestId: "request-2", answer: "approve" }, updatedAt: ago(3_600_000) }),
+    record({ id: "open", pid: 4242, status: "sleeping", state: "ask", human: { prompt: "Why?", requestId: "request-3" }, updatedAt: ago(3_600_000) }),
+    record({ id: "resting", pid: 4242, status: "sleeping", state: "rest", due: ago(-250_000), updatedAt: ago(3_600_000) }),
+    record({ id: "overdue", pid: 4242, status: "sleeping", state: "rest", due: ago(1_000), updatedAt: ago(3_600_000) }),
+  ];
+  const runs = runsForViewer(records, viewer, options);
+  // Kept however long ago it slept, ahead of a run that settled since, and never `lost`.
+  assert.deepEqual(runs.map((run) => [run.id, run.status]), [
+    ["asking", "sleeping"], ["answered", "sleeping"], ["open", "sleeping"], ["resting", "sleeping"], ["overdue", "sleeping"], ["done", "completed"],
+  ]);
+  const byId = new Map(runs.map((run) => [run.id, run]));
+  assert.deepEqual(byId.get("asking")!.sleep, { for: "answer", requestId: "request-1", choices: ["approve", "deny"], answered: false });
+  assert.deepEqual(byId.get("answered")!.sleep, { for: "answer", requestId: "request-2", choices: ["approve", "deny"], answered: true });
+  assert.deepEqual(byId.get("open")!.sleep, { for: "answer", requestId: "request-3", answered: false });
+  assert.deepEqual(byId.get("resting")!.sleep, { for: "time", due: ago(-250_000), isDue: false });
+  assert.deepEqual(byId.get("overdue")!.sleep, { for: "time", due: ago(1_000), isDue: true });
+  // Due is the caller's clock, as everything else here is.
+  assert.deepEqual(runsForViewer(records, viewer, { ...options, now: now + 250_000 }).find((run) => run.id === "resting")!.sleep, {
+    for: "time", due: ago(-250_000), isDue: true,
+  });
+  // Only an unanswered request has something to answer it; a run that does not sleep says nothing of sleep.
+  assert.deepEqual(byId.get("asking")!.answer, { via: "respond", runId: "asking", requestId: "request-1" });
+  assert.equal(byId.get("answered")!.answer, undefined);
+  assert.equal(byId.get("resting")!.answer, undefined);
+  assert.equal("sleep" in byId.get("done")!, false);
+  assert.equal("sleep" in runsForViewer([record({ status: "waiting", human: request })], viewer, alive)[0]!, false);
+});
+
+test("a hosted sleeping request is answered through respond and never probes its old pid", () => {
+  const sleeping = record({
+    status: "sleeping", continuedBy: "host", updatedAt: ago(3_600_000),
+    human: { prompt: "What next?", requestId: "request-host", discussion: true },
+  });
+  const options = { now, isAlive() { throw new Error("a sleeping pid must not be probed"); } };
+  const [pending] = runsForViewer([sleeping], viewer, options);
+  assert.deepEqual(pending?.answer, { via: "respond", runId: sleeping.id, requestId: "request-host" });
+  // Even an empty recorded answer is answered; host continuation is independent of answering.
+  const [answered] = runsForViewer([{ ...sleeping, human: { ...sleeping.human!, answer: "" } }], viewer, options);
+  assert.equal(answered?.sleep?.for === "answer" && answered.sleep.answered, true);
+  assert.equal(answered?.answer, undefined);
+});
+
 test("runs that can still change come first, then the most recently updated, and ties keep their order", () => {
   const records = [
     record({ id: "done-new", status: "completed", updatedAt: ago(1_000) }),
@@ -157,7 +206,7 @@ test("the status line's own copy of the rule shows the same runs in the same ord
   // combination below must give the two the same runs, statuses, and order.
   const owners = ["session", "another", undefined];
   const directories = ["/work/project", "/work/project/packages/child", "/work/project-other", "/elsewhere/child", "project"];
-  const statuses = ["running", "waiting", "completed", "failed"] as const;
+  const statuses = ["running", "waiting", "sleeping", "completed", "failed"] as const;
   const ages = [0, settledRunVisibleMilliseconds - 1, settledRunVisibleMilliseconds, settledRunVisibleMilliseconds + 1, 3_600_000];
   const pool: RunStatusRecord[] = [];
   for (const owner of owners) for (const cwd of directories) for (const status of statuses) {
@@ -171,6 +220,13 @@ test("the status line's own copy of the rule shows the same runs in the same ord
         // Some runs say what they are for, with a label one watch names and one it does not.
         ...(index % 3 === 0 ? { label: `${index % 2 === 0 ? "org-9" : "org-90"}: ${id}` } : {}),
         ...(status === "waiting" ? { human: { prompt: "Approve?", requestId: `request-${id}` } } : {}),
+        // A sleeping run waits for an answer, has one, or waits for a time that is ahead or past.
+        ...(status === "sleeping" ? [
+          { human: { prompt: "Approve?", requestId: `request-${id}` } },
+          { human: { prompt: "Approve?", requestId: `request-${id}`, answer: "yes" } },
+          { due: ago(-60_000) },
+          { due: ago(5_000) },
+        ][index % 4] : {}),
       }));
     }
   }
@@ -192,7 +248,9 @@ test("the status line's own copy of the rule shows the same runs in the same ord
     [], [{ text: "org-9" }], [{ text: "r00" }], [{ dir: "/elsewhere" }], [{ dir: "/work/project/" }],
     [{ text: "org-90" }, { dir: "/elsewhere/child" }, { text: "r0010" }, { text: "org-90" }], [{ dir: "elsewhere" }],
   ];
-  const symbols = { running: "●", waiting: "◆", sleeping: "●", completed: "✓", failed: "✕", lost: "✕" } satisfies Record<ViewerRun["status"], string>;
+  const symbols = { running: "●", waiting: "◆", sleeping: "◇", completed: "✓", failed: "✕", lost: "✕" } satisfies Record<ViewerRun["status"], string>;
+  // A sleeping run that waits for an answer is drawn as a waiting run; the others are calm.
+  const symbol = (run: ViewerRun) => run.sleep?.for === "answer" && !run.sleep.answered ? "◆" : symbols[run.status];
   const isAlive = (pid: number) => pid !== 4242;
   let compared = 0;
   let shown = 0;
@@ -207,7 +265,7 @@ test("the status line's own copy of the rule shows the same runs in the same ord
     });
     const described = JSON.stringify({ first: records[0]!.id, count: records.length, seen, watches, clock: clock - now });
     // The status line draws the first five and counts the rest.
-    assert.deepEqual(drawn, expected.slice(0, 5).map((run) => `${symbols[run.status]} ${run.id}`), described);
+    assert.deepEqual(drawn, expected.slice(0, 5).map((run) => `${symbol(run)} ${run.id}`), described);
     assert.equal(overflow === null ? 0 : Number(overflow[1]), Math.max(0, expected.length - 5), described);
     compared += 1;
     shown += expected.length;
@@ -374,6 +432,77 @@ test("machine runs --for lists the runs one viewer shows, as text and as JSON", 
     "sub-run\tticket\trunning\tstarting",
     "",
   ].join("\n"));
+});
+
+test("machine runs lists sleeping runs without --all, never as lost, with what each waits for", async (context) => {
+  const directory = await temporaryDirectory(context);
+  const exited = spawnSync(process.execPath, ["-e", ""]).pid;
+  const past = (milliseconds: number) => new Date(Date.now() - milliseconds).toISOString();
+  const due = new Date(Date.now() + 3_600_000).toISOString();
+  const overdue = past(60_000);
+  const request = { prompt: "Ship the release?\nIt tags main.", requestId: "request-1", choices: ["approve", "deny"] };
+  // Each slept an hour ago, and its process is gone, as a sleeping run's always is.
+  const sleeping = { owner: "viewer", pid: exited, status: "sleeping" } as const;
+  await writeRecord(directory, { ...sleeping, id: "asking", state: "ask", human: request, startedAt: "2026-03-04T05:06:01.000Z", updatedAt: past(3_600_000) });
+  await writeRecord(directory, {
+    ...sleeping, id: "answered", state: "ask", human: { ...request, requestId: "request-2", answer: "approve" },
+    startedAt: "2026-03-04T05:06:02.000Z", updatedAt: past(3_601_000),
+  });
+  await writeRecord(directory, { ...sleeping, id: "resting", state: "rest", due, startedAt: "2026-03-04T05:06:03.000Z", updatedAt: past(3_602_000) });
+  await writeRecord(directory, { ...sleeping, id: "overdue", state: "rest", due: overdue, startedAt: "2026-03-04T05:06:04.000Z", updatedAt: past(3_603_000) });
+  await writeRecord(directory, { id: "lost", owner: "viewer", pid: exited, status: "running", startedAt: "2026-03-04T05:06:05.000Z" });
+  const ids = ["asking", "answered", "resting", "overdue"];
+  const sleeps = {
+    asking: { for: "answer", requestId: "request-1", choices: ["approve", "deny"], answered: false },
+    answered: { for: "answer", requestId: "request-2", choices: ["approve", "deny"], answered: true },
+    resting: { for: "time", due, isDue: false },
+    overdue: { for: "time", due: overdue, isDue: true },
+  };
+
+  // As records, each with what it sleeps for.
+  for (const args of [[], ["--all"]]) {
+    const listed = machine(directory, {}, "runs", ...args, "--json");
+    assert.equal(listed.status, 0, listed.stderr);
+    const runs = (JSON.parse(listed.stdout) as Array<RunStatusRecord & { sleep?: unknown }>).filter((run) => ids.includes(run.id));
+    assert.deepEqual(runs.map((run) => [run.id, run.status]), ids.map((id) => [id, "sleeping"]), args.join(" "));
+    assert.deepEqual(Object.fromEntries(runs.map((run) => [run.id, run.sleep])), sleeps, args.join(" "));
+  }
+  // A viewer keeps them however long ago they slept, by the same rule.
+  const viewed = machine(directory, {}, "runs", "--for", "viewer", "--json");
+  assert.equal(viewed.status, 0, viewed.stderr);
+  const runs = JSON.parse(viewed.stdout) as ViewerRun[];
+  assert.deepEqual(runs.map((run) => [run.id, run.status]), [...ids.map((id) => [id, "sleeping"]), ["lost", "lost"]]);
+  assert.deepEqual(Object.fromEntries(runs.filter((run) => run.sleep !== undefined).map((run) => [run.id, run.sleep])), sleeps);
+
+  // As text, each run says what it waits for, and how it is answered or woken.
+  for (const args of [[], ["--for", "viewer"]]) {
+    const text = machine(directory, {}, "runs", ...args);
+    assert.deepEqual({ status: text.status, stderr: text.stderr }, { status: 0, stderr: "" }, args.join(" "));
+    const blocks = new Map<string, string[]>();
+    let current: string[] = [];
+    for (const line of text.stdout.trimEnd().split("\n")) {
+      if (line.startsWith("  ")) current.push(line.slice(2));
+      else blocks.set(line.split("\t")[0]!, current = [line]);
+    }
+    for (const id of ids) {
+      assert.match(blocks.get(id)?.[0] ?? "", new RegExp(`^${id}\tticket\tsleeping\t`, "u"), `${args.join(" ")}: ${text.stdout}`);
+    }
+    // Only the run that was running is lost, and only a viewer still shows it.
+    assert.equal((text.stdout.match(/\tlost\t/gu) ?? []).length, args.length === 0 ? 0 : 1, text.stdout);
+
+    const asking = blocks.get("asking")!;
+    assert.ok(asking.includes("Ship the release?"), asking.join("\n"));
+    assert.ok(asking.includes("request: request-1"), asking.join("\n"));
+    assert.ok(asking.includes("choices: approve, deny"), asking.join("\n"));
+    assert.ok(asking.some((line) => line.includes("machine respond asking request-1")), asking.join("\n"));
+    const answered = blocks.get("answered")!;
+    assert.ok(answered.includes("request: request-2"), answered.join("\n"));
+    assert.ok(answered.some((line) => /answered/u.test(line) && line.includes("machine continue answered")), answered.join("\n"));
+    assert.ok(!answered.some((line) => line.includes("machine respond")), answered.join("\n"));
+    const resting = blocks.get("resting")!;
+    assert.ok(resting.some((line) => line.startsWith(`due: ${due}`) && !line.includes("due now")), resting.join("\n"));
+    assert.ok(blocks.get("overdue")!.some((line) => line.startsWith(`due: ${overdue}`) && line.includes("due now")), blocks.get("overdue")!.join("\n"));
+  }
 });
 
 test("machine runs --for orders runs updated together as the library and the status line script do", async (context) => {

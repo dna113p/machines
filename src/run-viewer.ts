@@ -32,12 +32,30 @@ export interface ViewerRunOptions {
 }
 
 /**
- * How a waiting run's Human request is answered: by `machine respond` with
+ * How a pending Human request is answered: by `machine respond` with
  * these two ids, or only through the program that hosts the run.
  */
 export type RunAnswer =
   | { readonly via: "respond"; readonly runId: string; readonly requestId: string }
   | { readonly via: "host" };
+
+/** What a sleeping run waits for, evaluated at the viewer's clock. */
+export type RunSleep =
+  | { readonly for: "answer"; readonly requestId: string; readonly choices?: readonly string[]; readonly answered: boolean }
+  | { readonly for: "time"; readonly due: string; readonly isDue: boolean };
+
+/** Reads sleep details without probing the process or changing the run. */
+export function runSleep(record: RunStatusRecord | ViewerRun, now: number = Date.now()): RunSleep | undefined {
+  if (record.status !== "sleeping") return undefined;
+  if (record.due !== undefined) return { for: "time", due: record.due, isDue: now >= Date.parse(record.due) };
+  if (record.human?.requestId === undefined) return undefined;
+  return {
+    for: "answer",
+    requestId: record.human.requestId,
+    ...(record.human.choices === undefined ? {} : { choices: record.human.choices }),
+    answered: record.human.answer !== undefined,
+  };
+}
 
 /** A published record as one viewer shows it. */
 export interface ViewerRun extends Omit<RunStatusRecord, "status"> {
@@ -47,6 +65,8 @@ export interface ViewerRun extends Omit<RunStatusRecord, "status"> {
   readonly shown: "owned" | "project" | "watched";
   /** Present while the run waits on a request that something can answer. */
   readonly answer?: RunAnswer;
+  /** Present while sleeping, even when its process has ended. */
+  readonly sleep?: RunSleep;
 }
 
 /**
@@ -54,7 +74,8 @@ export interface ViewerRun extends Omit<RunStatusRecord, "status"> {
  * inside its project, and runs it watches. Sub-runs are never shown, and a
  * settled or lost run drops out after `settledRunVisibleMilliseconds`. Runs
  * that can still change come first, then the most recently updated; records
- * that tie keep the order they were given in.
+ * that tie keep the order they were given in. Sleeping runs stay active
+ * regardless of their pid and never become lost.
  *
  * Pure apart from the default process-liveness probe. `claude/statusline.mjs`
  * cannot load this module and carries a copy of the selection;
@@ -76,11 +97,16 @@ export function runsForViewer(
     const recorded = record.status === "running" || record.status === "waiting";
     // A run that stopped reporting without finishing has lost its process.
     const lost = recorded && !isAlive(record.pid);
-    const active = recorded && !lost;
+    const active = record.status === "sleeping" || (recorded && !lost);
     if (!active && !all && now - updatedAt > settledRunVisibleMilliseconds) continue;
     const status = lost ? "lost" : record.status;
-    const answer = status === "waiting" ? runAnswer(record) : undefined;
-    visible.push({ run: { ...record, status, shown, ...(answer === undefined ? {} : { answer }) }, active, updatedAt });
+    const sleep = runSleep(record, now);
+    const answer = status === "waiting" || (sleep?.for === "answer" && !sleep.answered) ? runAnswer(record) : undefined;
+    visible.push({ run: {
+      ...record, status, shown,
+      ...(answer === undefined ? {} : { answer }),
+      ...(sleep === undefined ? {} : { sleep }),
+    }, active, updatedAt });
   }
   visible.sort((left, right) => Number(right.active) - Number(left.active) || right.updatedAt - left.updatedAt);
   return visible.map(({ run }) => run);

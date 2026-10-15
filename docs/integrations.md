@@ -495,7 +495,7 @@ it, set the same `MACHINES_RUN_STATUS_DIR` for the run and for whatever answers
 it. With publication off these commands fail and say how to turn it on.
 
 ```bash
-machine runs                 # running and waiting runs
+machine runs                 # running, waiting and sleeping runs
 machine runs --json          # the same runs as their records
 machine runs --all           # every published run, also finished and lost ones still recorded
 machine respond <run-id> <request-id> <response>
@@ -503,11 +503,11 @@ machine respond --question <run-id> <request-id> <text>
 ```
 
 `machine runs` prints each run's id, Machine, status, and state, and for a
-waiting run its prompt, request id, and choices (tab-separated when its
-output is not a terminal). A run's label follows as a fifth column when it has
-one, and a sixth says `watched` for a run this session
-[watches](#watching-other-runs). It lists the running and waiting runs of every
-session and project; `--for` narrows it to
+waiting or sleeping Human request its prompt, request id, and choices
+(tab-separated when its output is not a terminal). A run's label follows as a
+fifth column when it has one, and a sixth says `watched` for a run this session
+[watches](#watching-other-runs). It lists the running, waiting and sleeping runs
+of every session and project; `--for` narrows it to
 [what one viewer shows](#drawing-your-own-widgets). `--all`, with or without `--json`, lists every published
 run: also the ones whose records remain after they finished, as `completed` or
 `failed`, or after their process disappeared, as `lost` (in JSON such a record
@@ -522,6 +522,15 @@ whole note. A run answered through its host shows
   request: 9f8e7d6c-…
   choices: publish, hold
 ```
+
+A sleeping run stays listed without `--all` and is never `lost`, regardless of
+its pid. A timed wait prints `due: <iso>` and, once due, `due now`. A Human
+request prints how to answer it; after an answer is recorded it prints
+`answered` and how the run wakes, with `machine continue <run-id>` or its host.
+`--json` adds `sleep` to sleeping records: either
+`{ "for": "answer", "requestId": "…", "choices": ["publish", "hold"], "answered": false }`
+(choices are optional), or `{ "for": "time", "due": "<iso>", "isDue": false }`.
+The booleans reflect the recorded answer and the current clock.
 
 `machine respond` checks the response against the current record before it
 delivers anything. It fails with a nonzero exit when the run is unknown, is
@@ -620,7 +629,12 @@ prints one to three lines per run and nothing when there is nothing to show:
 A session sees the runs it owns and the runs it
 [watches](#watching-other-runs); runs without an owner also appear in sessions
 whose project directory contains the run's working directory. Finished runs stay for
-30 seconds. A run whose process disappeared without finishing is shown as `lost`
+30 seconds. Sleeping runs stay visible until they continue or finish. An
+unanswered sleeping Human request uses the same yellow `◆ input needed` style
+as a waiting run. An answered request uses a calm `◇` with `answered`; a timed
+wait uses `◇` with `due in …` or `due now`. Neither needs a person's action:
+its host or `machine continue --due` wakes it.
+A running or waiting run whose process disappeared is shown as `lost`
 for the same time, so the status line must run where it can see that process.
 Set `NO_COLOR` (to any value, even an empty one) for plain text and `COLUMNS`
 to change the 120-column truncation.
@@ -632,13 +646,20 @@ machine ui [--port <port>] [--project <dir>]
 ```
 
 serves a live page on `127.0.0.1` (port 4777, or the next free one) of every
-published run: what is waiting on you, what is running, and what finished, with
-each run's Machine drawn as a graph, its current state marked, the states and
+published run: what is waiting on you, what is running or sleeping, and what
+finished, with each run's Machine drawn as a graph, its current state marked, the states and
 transitions it has taken counted, and the path it took so far. A waiting run
 that takes outside responses is answered from the page, as `machine respond`
 answers it; a run answered through its host, such as a daemon's, names where to
 answer it instead. The page loads nothing from outside, accepts requests only
 under its own host name, and answers a run only with a token it was served.
+
+Sleeping Human requests without an answer appear under "Waiting on you" with
+the existing answer form. Sending an answer records it while the run stays
+sleeping; the page says "Answer recorded" and names `machine continue <run-id>`
+or the host that wakes it. Sleeping requests take plain answers only, so the
+form offers no discussion-question checkbox. Answered requests and timed waits
+appear under "Sleeping", with their request or due time. There is no wake button.
 
 A project adds its own panels beside the runs, such as its tickets or pull
 requests, in `.machines/ui.json` in the project (the nearest directory above the
@@ -664,7 +685,7 @@ otherwise by the session id its coding agent gives it, so an agent inside Claude
 Code, Codex, or Pi only runs the command.
 
 ```bash
-machine runs                   # running and waiting runs, with their labels
+machine runs                   # running, waiting and sleeping runs, with their labels
 machine runs --all             # every published run, also finished and lost ones
 machine watch org-9            # runs whose id or label starts with org-9
 machine watch --dir ../other   # runs working in that directory or below it
@@ -731,6 +752,7 @@ directory. The rule that decides what it shows is the status line's:
   below it, and the runs its session [watches](#watching-other-runs), whoever
   owns them;
 - a run recorded as running or waiting whose process is gone is `lost`;
+- a sleeping run stays visible regardless of its pid and never becomes `lost`;
 - a finished or lost run stays for 30 seconds and then drops out;
 - each run once, the ones that can still change first, then the most recently
   updated. Runs updated in the same millisecond keep the order they were read
@@ -754,10 +776,10 @@ process's own session, and the command fails when nothing names one.
 without it only owned and watched runs are selected. `--all` also keeps the
 finished and lost runs that the 30 seconds would have dropped, for as long as
 their records remain. Without `--json` the runs are printed in the columns of
-`machine runs`. Without `--for`, `machine runs` is unchanged: every session's
-running and waiting runs, as plain records.
+`machine runs`. Without `--for`, `machine runs` shows every session's
+running, waiting and sleeping runs, adding `sleep` to sleeping JSON records.
 
-Each item is the published record with three additions:
+Each viewer item is the published record with these additions:
 
 ```json
 {
@@ -779,6 +801,10 @@ Each item is the published record with three additions:
   `machine respond <runId> <requestId> <response>`; `"via": "host"` means only
   the program hosting the run can answer it, so a widget shows the prompt and
   offers no input. `human` still has the prompt, choices, and suggestions.
+- `sleep` is present for a sleeping run. Its `RunSleep` value is
+  `{ for: "answer", requestId, choices?, answered }` or
+  `{ for: "time", due, isDue }`. An unanswered sleeping request also gets
+  `answer`; an answered one or a timed wait does not.
 
 Nothing is added for presentation: no colour, layout, or shortening, and no
 limit on how many runs are returned. Recorded text is the run's own, so escape
@@ -802,7 +828,10 @@ for (const run of runs) draw(run.label ?? run.id, run.status, run.shown, run.ans
 
 `runsForViewer(records, viewer, options)` is pure apart from probing whether
 each process is alive; `options` takes `now`, `all`, and an `isAlive` of your
-own. The module also exports `runSessionId`, the types of a record, a watch, a
+own. `runSleep(record, now)` returns the same `RunSleep` details directly,
+or `undefined` for a run that is not sleeping; `now` defaults to `Date.now()`.
+`ViewerRun.sleep` uses the `now` passed to `runsForViewer`.
+The module also exports `runSessionId`, `RunSleep`, the types of a record, a watch, a
 viewer, and an item, and `settledRunVisibleMilliseconds`. It only reads:
 publishing stays with the runtime, and a viewer's watch list is changed with
 `machine watch --for`.

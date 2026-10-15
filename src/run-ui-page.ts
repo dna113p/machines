@@ -19,7 +19,7 @@ const page = String.raw`<!doctype html>
   --bg: #f6f7f9; --panel: #ffffff; --panel-2: #f0f2f5; --ink: #16181d; --muted: #646b78; --faint: #9aa1ad;
   --line: #e1e4ea; --edge: #c3c8d2; --accent: #4f5bd5; --accent-soft: rgba(79, 91, 213, 0.12);
   --agent: #7c4dcc; --human: #c77700; --operation: #1f7a99; --final: #2f8f4e; --group: #8a8f99;
-  --running: #2f6fdb; --waiting: #c77700; --completed: #2f8f4e; --failed: #cc3a3a; --lost: #8a8f99;
+  --running: #2f6fdb; --waiting: #c77700; --sleeping: #657aaa; --completed: #2f8f4e; --failed: #cc3a3a; --lost: #8a8f99;
   --shadow: 0 1px 2px rgba(16, 24, 40, 0.06), 0 1px 3px rgba(16, 24, 40, 0.08);
   color-scheme: light;
 }
@@ -28,7 +28,7 @@ const page = String.raw`<!doctype html>
     --bg: #0f1115; --panel: #171a21; --panel-2: #1e222b; --ink: #e8eaef; --muted: #9aa1ad; --faint: #6b7280;
     --line: #2a2f3a; --edge: #3d4452; --accent: #8b94ff; --accent-soft: rgba(139, 148, 255, 0.16);
     --agent: #b18cff; --human: #f0a531; --operation: #4fb3d4; --final: #5cc282; --group: #8a8f99;
-    --running: #6c9dff; --waiting: #f0a531; --completed: #5cc282; --failed: #ff6b6b; --lost: #8a8f99;
+    --running: #6c9dff; --waiting: #f0a531; --sleeping: #94a8d4; --completed: #5cc282; --failed: #ff6b6b; --lost: #8a8f99;
     --shadow: none;
     color-scheme: dark;
   }
@@ -64,6 +64,7 @@ button { font: inherit; color: inherit; }
 .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex: none; background: var(--lost); }
 .dot.running { background: var(--running); box-shadow: 0 0 0 3px rgba(47, 111, 219, 0.18); }
 .dot.waiting { background: var(--waiting); animation: pulse 1.6s ease-in-out infinite; }
+.dot.sleeping { background: var(--sleeping); }
 .dot.completed { background: var(--completed); }
 .dot.failed { background: var(--failed); }
 .dot.ok { background: var(--completed); } .dot.warn { background: var(--waiting); } .dot.bad { background: var(--failed); } .dot.active { background: var(--running); } .dot.idle { background: var(--faint); }
@@ -78,6 +79,7 @@ button { font: inherit; color: inherit; }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
 .banner { padding: 10px 14px; border-radius: 10px; font-size: 13px; }
 .banner.limit { background: rgba(199, 119, 0, 0.1); border: 1px solid rgba(199, 119, 0, 0.35); }
+.banner.sleeping { background: var(--panel-2); border: 1px solid var(--line); }
 .banner.error { background: rgba(204, 58, 58, 0.08); border: 1px solid rgba(204, 58, 58, 0.35); white-space: pre-wrap; overflow-wrap: anywhere; }
 .ask { padding: 14px 16px; border-color: var(--waiting); box-shadow: 0 0 0 3px rgba(199, 119, 0, 0.12); display: flex; flex-direction: column; gap: 10px; }
 .ask h2, .block h2 { font-size: 13px; margin: 0; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
@@ -216,6 +218,14 @@ function ago(iso) { var t = Date.parse(iso); return isNaN(t) ? "" : duration(Dat
 function clock(iso) { var d = new Date(iso); return isNaN(d) ? "" : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }); }
 function live(iso, suffix) { return h("span", { "data-since": iso, "data-suffix": suffix || "", text: duration(Date.now() - Date.parse(iso)) + (suffix || "") }); }
 function active(run) { return run.status === "running" || run.status === "waiting"; }
+function sleepingForAnswer(run) { return run.status === "sleeping" && !run.due && run.human && run.human.requestId; }
+function needsAnswer(run) { return run.status === "waiting" || (sleepingForAnswer(run) && run.human.answer === undefined); }
+function wakesWith(run) { return run.continuedBy === "host" ? "when its host continues it" : "with machine continue " + run.id; }
+function sleepNote(run) {
+  if (run.status !== "sleeping") return "";
+  if (run.due) return "due " + clock(run.due) + (Date.now() >= Date.parse(run.due) ? " (due now)" : "");
+  return sleepingForAnswer(run) && run.human.answer !== undefined ? "answered" : "input needed";
+}
 function title(run) { return run.label || run.machine; }
 
 function paths(value) {
@@ -252,7 +262,7 @@ function render() {
   runs.forEach(function (r) { byId[r.id] = r; });
   if (!selected || !byId[selected]) {
     var pick = runs.filter(function (r) { return !r.parent || !byId[r.parent]; });
-    var first = pick.find(function (r) { return r.status === "waiting"; }) || pick.find(function (r) { return r.status === "running"; }) || pick[0];
+    var first = pick.find(needsAnswer) || pick.find(function (r) { return r.status === "running"; }) || pick[0];
     selected = first ? first.id : null;
   }
   // Sub-runs are counted with the run that started them.
@@ -269,7 +279,8 @@ function renderCounts(runs) {
   var el = document.getElementById("counts");
   el.replaceChildren.apply(el, [
     h("span", { class: "chip" }, h("span", { class: "dot running" }), h("b", { text: String(count("running")) }), "running"),
-    h("span", { class: "chip" }, h("span", { class: "dot waiting" }), h("b", { text: String(count("waiting")) }), "waiting on you"),
+    h("span", { class: "chip" }, h("span", { class: "dot waiting" }), h("b", { text: String(runs.filter(needsAnswer).length) }), "waiting on you"),
+    count("sleeping") ? h("span", { class: "chip" }, h("span", { class: "dot sleeping" }), h("b", { text: String(count("sleeping")) }), "sleeping") : null,
     failed ? h("span", { class: "chip" }, h("span", { class: "dot failed" }), h("b", { text: String(failed) }), "failed today") : null,
     count("lost") ? h("span", { class: "chip" }, h("span", { class: "dot" }), h("b", { text: String(count("lost")) }), "lost") : null
   ].filter(Boolean));
@@ -280,8 +291,9 @@ function renderRuns(runs, byId) {
   var children = {};
   runs.forEach(function (r) { if (r.parent && byId[r.parent]) (children[r.parent] = children[r.parent] || []).push(r); });
   var groups = [
-    ["Waiting on you", top.filter(function (r) { return r.status === "waiting"; })],
+    ["Waiting on you", top.filter(needsAnswer)],
     ["Running", top.filter(function (r) { return r.status === "running"; })],
+    ["Sleeping", top.filter(function (r) { return r.status === "sleeping" && !needsAnswer(r); })],
     ["Lost", top.filter(function (r) { return r.status === "lost"; })],
     ["Finished", top.filter(function (r) { return r.status === "completed" || r.status === "failed"; })],
   ];
@@ -297,10 +309,11 @@ function renderRuns(runs, byId) {
 function runCard(run, kids) {
   var running = kids.filter(active);
   return h("button", { class: "run" + (run.id === selected ? " selected" : ""), onclick: function () { select(run.id); } },
-    h("span", { class: "dot " + run.status }),
+    h("span", { class: "dot " + (needsAnswer(run) ? "waiting" : run.status) }),
     h("span", { class: "title", title: title(run), text: title(run) }),
     h("span", { class: "sub" }, [run.label ? run.machine : null, stateText(run) || null].filter(Boolean).concat([""]).join(" · "),
-      active(run) ? live(run.startedAt) : h("span", { text: ago(run.updatedAt) })),
+      run.status === "sleeping" ? h("span", { text: sleepNote(run) }) : active(run) ? live(run.startedAt) : h("span", { text: ago(run.updatedAt) })),
+    sleepingForAnswer(run) ? h("span", { class: "child", text: run.human.prompt + " · request: " + run.human.requestId }) : null,
     kids.length ? h("span", { class: "child", text: kids.length + " sub-run" + (kids.length > 1 ? "s" : "") + (running.length ? ", " + running.length + " active" : "") }) : null);
 }
 
@@ -310,7 +323,7 @@ function select(id) {
   render();
 }
 
-var statusWords = { running: "Running", waiting: "Waiting on you", completed: "Completed", failed: "Failed", lost: "Lost: its process is gone" };
+var statusWords = { running: "Running", waiting: "Waiting on you", sleeping: "Sleeping", completed: "Completed", failed: "Failed", lost: "Lost: its process is gone" };
 
 function renderDetail(run, runs, byId) {
   var el = document.getElementById("detail");
@@ -329,7 +342,17 @@ function renderDetail(run, runs, byId) {
       h("span", null, active(run) ? "Running for " : "Took ", active(run) ? live(run.startedAt) : h("b", { text: duration(Date.parse(run.updatedAt) - Date.parse(run.startedAt)) }))),
     h("div", { class: "meta mono", title: run.path, text: run.cwd })));
   if (run.limit) parts.push(h("div", { class: "banner limit" }, "Waiting for an Agent usage limit: " + run.limit.text + (run.limit.until ? " (until " + clock(run.limit.until) + ")" : "")));
-  if (run.status === "waiting" && run.human) parts.push(askCard(run));
+  if (run.status === "sleeping") {
+    var note = run.due ? "Sleeping until " + clock(run.due) + (Date.now() >= Date.parse(run.due) ? " (due now)" : "")
+      : sleepingForAnswer(run) && run.human.answer !== undefined ? "Answer recorded. The run wakes " + wakesWith(run) + "."
+      : "Sleeping for an answer. After it is recorded, the run wakes " + wakesWith(run) + ".";
+    parts.push(h("div", { class: "banner sleeping", text: note, title: run.due || "" }));
+    if (sleepingForAnswer(run) && !needsAnswer(run)) parts.push(h("div", { class: "card block" },
+      h("h2", { text: "Recorded request" }), h("div", { class: "prompt", text: run.human.prompt }),
+      h("div", { class: "hint mono", text: "request: " + run.human.requestId }),
+      run.human.choices ? h("div", { class: "hint", text: "choices: " + run.human.choices.join(", ") }) : null));
+  }
+  if (needsAnswer(run) && run.human) parts.push(askCard(run));
   parts.push(graphCard(run));
   var kids = runs.filter(function (r) { return r.parent === run.id; });
   if (kids.length) parts.push(h("div", { class: "card block" }, h("h2", { text: "Sub-runs" }), h("div", { class: "subruns" }, kids.map(function (k) {
@@ -349,6 +372,7 @@ function renderDetail(run, runs, byId) {
 
 function askCard(run) {
   var human = run.human;
+  var sleeping = run.status === "sleeping";
   var key = run.id + ":" + (human.requestId || "");
   var status = h("div", { class: "hint" });
   var card = h("div", { class: "card ask" }, h("h2", { text: "The run is asking" }), h("div", { class: "prompt", text: human.prompt }));
@@ -368,7 +392,7 @@ function askCard(run) {
     fetch("/api/respond", { method: "POST", headers: { "content-type": "application/json", "x-machines-ui": TOKEN },
       body: JSON.stringify({ runId: run.id, requestId: human.requestId, response: text, question: question }) })
       .then(function (r) { return r.json().then(function (body) { if (!r.ok) throw new Error(body.error || r.statusText); }); })
-      .then(function () { delete drafts[key]; status.textContent = "The run took it."; })
+      .then(function () { delete drafts[key]; status.textContent = sleeping ? "Answer recorded. The run wakes " + wakesWith(run) + "." : "The run took it."; })
       .catch(function (e) { status.textContent = e.message; card.querySelectorAll("button, textarea").forEach(function (b) { b.disabled = false; }); })
       .finally(function () { sending = false; });
   }
@@ -386,8 +410,8 @@ function askCard(run) {
       return h("button", { class: "btn", text: c, onclick: function () { box.value = c; drafts[key] = c; box.focus(); } });
     })));
     card.appendChild(h("div", { class: "row" },
-      h("button", { class: "btn primary", text: "Send", onmousedown: function (e) { e.preventDefault(); }, onclick: function () { submit(box.value, human.discussion ? asQuestion.checked : false); } }),
-      human.discussion ? h("label", { class: "hint" }, asQuestion, " Ask a question instead of answering") : null));
+      h("button", { class: "btn primary", text: "Send", onmousedown: function (e) { e.preventDefault(); }, onclick: function () { submit(box.value, human.discussion && !sleeping ? asQuestion.checked : false); } }),
+      human.discussion && !sleeping ? h("label", { class: "hint" }, asQuestion, " Ask a question instead of answering") : null));
   }
   card.appendChild(status);
   card.appendChild(h("div", { class: "hint mono", text: "machine respond " + run.id + " " + human.requestId + " <response>" }));

@@ -517,7 +517,7 @@ test("with nothing set, a waiting run is listed and answered in the standard dir
 test("machine runs lists the running and waiting runs as text and as JSON", async (context) => {
   const directory = await temporaryDirectory(context);
   const empty = machine(directory, "runs");
-  assert.deepEqual({ status: empty.status, stdout: empty.stdout }, { status: 0, stdout: "No Machine runs are running or waiting.\n" });
+  assert.deepEqual({ status: empty.status, stdout: empty.stdout }, { status: 0, stdout: "No Machine runs are running, waiting or sleeping.\n" });
   assert.equal(machine(directory, "runs", "--json").stdout, "[]\n");
 
   const exited = spawnSync(process.execPath, ["-e", ""]).pid;

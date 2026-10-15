@@ -7,6 +7,8 @@
 // src/run-status.ts, the watch list and its matching mirror src/run-watch.ts,
 // and which runs a session sees, and in what order, mirrors runsForViewer in
 // src/run-viewer.ts, which tests/run-viewer.test.ts checks.
+// Sleeping runs stay visible without a live process; only an unanswered Human
+// request needs attention. Answered requests and timed waits use a calm style.
 
 import { readdirSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
@@ -74,7 +76,7 @@ export function runStatusLines(records, options = {}) {
     const recorded = record.status === "running" || record.status === "waiting";
     // A run that stopped reporting without finishing has lost its process.
     const lost = recorded && !isAlive(record.pid);
-    const active = recorded && !lost;
+    const active = record.status === "sleeping" || (recorded && !lost);
     if (!active && now - updatedAt > terminalVisibleMilliseconds) continue;
     visible.push({ record, active, lost, updatedAt });
   }
@@ -82,25 +84,34 @@ export function runStatusLines(records, options = {}) {
 
   const lines = [];
   for (const { record, active, lost, updatedAt } of visible.slice(0, maximumRuns)) {
-    const waiting = active && record.status === "waiting";
+    const sleeping = record.status === "sleeping";
+    const waiting = active && (record.status === "waiting"
+      || (sleeping && record.due === undefined && record.human?.requestId !== undefined && record.human.answer === undefined));
     const completed = record.status === "completed";
     const failed = lost || record.status === "failed";
-    const code = waiting ? 33 : completed ? 32 : failed ? 31 : 36;
-    const symbol = waiting ? "◆" : completed ? "✓" : failed ? "✕" : "●";
-    const state = waiting
+    const code = waiting ? 33 : sleeping ? "2;34" : completed ? 32 : failed ? 31 : 36;
+    const symbol = waiting ? "◆" : sleeping ? "◇" : completed ? "✓" : failed ? "✕" : "●";
+    let state = waiting
       ? "input needed"
       : lost
         ? "lost"
         : failed
           ? "failed"
           : record.state ?? "starting";
+    if (sleeping && !waiting) {
+      const due = Date.parse(record.due);
+      const note = record.due !== undefined
+        ? now >= due ? "due now" : `due in ${formatElapsed(now, due)}`
+        : record.human?.answer !== undefined ? "answered" : "sleeping";
+      state += ` · ${note}`;
+    }
     const total = formatElapsed(Date.parse(record.startedAt), active ? now : updatedAt);
     // Time in the current state leads while it runs; the whole run follows.
     const elapsed = active && record.stateSince !== undefined
       ? `${formatElapsed(Date.parse(record.stateSince), now)} (${total} total)`
       : total;
     const progress = `${paint(1, plain(record.machine))} › ${paint(code, plain(state))} · ${paint(2, elapsed)}`;
-    const agent = active && !waiting && record.agent !== undefined ? plain(formatAgent(record.agent)) : undefined;
+    const agent = active && !waiting && !sleeping && record.agent !== undefined ? plain(formatAgent(record.agent)) : undefined;
     const label = record.label === undefined ? "" : plain(record.label);
     if (label !== "") {
       // A labelled run leads with what it is for; the workflow detail follows.
@@ -146,7 +157,7 @@ function isWatched(record, watch) {
 function isRecord(value) {
   if (value === null || typeof value !== "object") return false;
   const { agent, human } = value;
-  // Version 2 adds what answers a waiting request; the line shows only its prompt.
+  // Version 2 adds request identity; a sleeping request may also have an answer.
   return (value.schemaVersion === 1 || value.schemaVersion === 2)
     && typeof value.id === "string"
     && Number.isSafeInteger(value.pid) && value.pid > 0
@@ -156,11 +167,14 @@ function isRecord(value) {
     && (value.stateSince === undefined || isTimestamp(value.stateSince))
     && typeof value.machine === "string"
     && typeof value.cwd === "string"
-    && ["running", "waiting", "completed", "failed"].includes(value.status)
+    && ["running", "waiting", "sleeping", "completed", "failed"].includes(value.status)
+    && (value.due === undefined || isTimestamp(value.due))
+    && (value.status !== "sleeping" || value.due !== undefined || typeof human?.requestId === "string")
     && isOptionalString(value.state)
     && (agent === undefined || (agent !== null && typeof agent === "object" && typeof agent.harness === "string"
       && isOptionalString(agent.model) && isOptionalString(agent.thinking)))
-    && (human === undefined || (human !== null && typeof human === "object" && typeof human.prompt === "string"))
+    && (human === undefined || (human !== null && typeof human === "object" && typeof human.prompt === "string"
+      && isOptionalString(human.requestId) && isOptionalString(human.answer)))
     && isTimestamp(value.startedAt)
     && isTimestamp(value.updatedAt);
 }

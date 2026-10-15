@@ -328,6 +328,76 @@ test("a run started with --sleep sleeps at a Human request, takes one valid answ
   assert.equal(existsSync(checkpointFile(project, record.id)), false);
 });
 
+/** `machine runs` output as one block of lines per run, keyed by run id; detail lines lose their indent. */
+function runBlocks(stdout: string): Map<string, string[]> {
+  const blocks = new Map<string, string[]>();
+  let current: string[] = [];
+  for (const line of stdout.trimEnd().split("\n")) {
+    if (line.startsWith("  ")) current.push(line.slice(2));
+    else blocks.set(line.split("\t")[0]!, current = [line]);
+  }
+  return blocks;
+}
+
+type ListedRun = SleepingRecord & { readonly sleep?: unknown };
+
+function listedRuns(project: Project): ListedRun[] {
+  const listed = cli(project, ["runs", "--json"], {}, askerTimeout);
+  assert.equal(listed.status, 0, listed.stderr);
+  return JSON.parse(listed.stdout) as ListedRun[];
+}
+
+test("machine runs lists runs sleeping at a Human request and at a timed wait, each with what it waits for", async (context) => {
+  const project = await createProject(context, { every: "1h", checks: 1 });
+  const asked = cli(project, askerArgs(project, true), {}, askerTimeout);
+  assert.equal(asked.status, 0, asked.stderr);
+  const asking = onlyRecord(project);
+  const requestId = asking.human?.requestId;
+  assert.ok(requestId);
+  // The sleep message names the state, as the timed-wait message does.
+  assert.match(asked.stdout, new RegExp(`^--> sleeping in ask for an answer\\. Answer with: machine respond ${asking.id} ${requestId} <response>$`, "mu"));
+  assert.match(asked.stdout, new RegExp(`^Then wake it with: machine continue ${asking.id}$`, "mu"));
+
+  const slept = cli(project, runArgs(project, true));
+  assert.equal(slept.status, 0, slept.stderr);
+  assert.match(slept.stdout, /^--> sleeping in rest until /mu);
+  const resting = (readRunStatuses(project.status) as SleepingRecord[]).find((record) => record.id !== asking.id);
+  assert.ok(resting?.due);
+
+  // Without --all both are listed, and neither as lost though its process has ended.
+  const text = cli(project, ["runs"], {}, askerTimeout);
+  assert.deepEqual({ status: text.status, stderr: text.stderr }, { status: 0, stderr: "" });
+  assert.doesNotMatch(text.stdout, /\tlost\t/u);
+  const blocks = runBlocks(text.stdout);
+  assert.match(blocks.get(asking.id)?.[0] ?? "", new RegExp(`^${asking.id}\t${asking.machine}\tsleeping\task\\b`, "u"), text.stdout);
+  assert.match(blocks.get(resting.id)?.[0] ?? "", new RegExp(`^${resting.id}\t${resting.machine}\tsleeping\trest\\b`, "u"), text.stdout);
+  const request = blocks.get(asking.id)!;
+  assert.ok(request.includes(askerPrompt), text.stdout);
+  assert.ok(request.includes(`request: ${requestId}`), text.stdout);
+  assert.ok(request.includes("choices: approve, deny"), text.stdout);
+  assert.ok(request.some((line) => line.includes(`machine respond ${asking.id} ${requestId}`)), text.stdout);
+  assert.ok(blocks.get(resting.id)!.some((line) => line.startsWith(`due: ${resting.due}`)), text.stdout);
+
+  // As JSON, with what each sleeps for.
+  const byId = new Map(listedRuns(project).map((run) => [run.id, run]));
+  assert.equal(byId.get(asking.id)?.status, "sleeping");
+  assert.deepEqual(byId.get(asking.id)?.sleep, { for: "answer", requestId, choices: ["approve", "deny"], answered: false });
+  assert.equal(byId.get(resting.id)?.status, "sleeping");
+  assert.deepEqual(byId.get(resting.id)?.sleep, { for: "time", due: resting.due, isDue: false });
+
+  // Once answered, it says so and how it wakes, and no longer how to answer it.
+  const answered = cli(project, ["respond", asking.id, requestId, "approve"], {}, askerTimeout);
+  assert.equal(answered.status, 0, answered.stderr);
+  const after = runBlocks(cli(project, ["runs"], {}, askerTimeout).stdout).get(asking.id) ?? [];
+  assert.match(after[0] ?? "", /\tsleeping\t/u, after.join("\n"));
+  assert.ok(after.some((line) => /answered/u.test(line) && line.includes(`machine continue ${asking.id}`)), after.join("\n"));
+  assert.ok(!after.some((line) => line.includes("machine respond")), after.join("\n"));
+  assert.deepEqual(listedRuns(project).find((run) => run.id === asking.id)?.sleep, {
+    for: "answer", requestId, choices: ["approve", "deny"], answered: true,
+  });
+  assert.deepEqual(logLines(project), []);
+});
+
 test("a run sleeping at a timed wait takes no response", async (context) => {
   const project = await createProject(context, { every: "1h", checks: 1 });
   const ran = cli(project, runArgs(project, true));
