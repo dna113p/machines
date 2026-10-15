@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
 import type { HumanRequest, HumanResponse, HumanRunner } from "./index.ts";
+import { claimRun } from "./run-checkpoint.ts";
 import {
   deliveryRetentionMilliseconds,
   isFileSafeId,
@@ -11,6 +12,7 @@ import {
   readRunStatuses,
   runDeliveryPath,
   runInboxPath,
+  writeRunStatusRecord,
   type RunStatusHuman,
   type RunStatusRecord,
 } from "./run-status.ts";
@@ -42,12 +44,13 @@ export interface RunResponse {
 }
 
 /**
- * Answers a waiting run from another process of the same user. Resolves once
+ * Records an answer for a sleeping run without starting it, or answers a
+ * waiting run from another process of the same user. For a waiting run, resolves once
  * the run has left the request and named this delivery among the responses it
  * took; otherwise throws, having taken the response back unless the run
  * already has it.
  */
-export async function respondToRun(options: RunResponse): Promise<void> {
+export async function respondToRun(options: RunResponse): Promise<"taken" | "recorded"> {
   const { directory, runId, requestId, response } = options;
   const published = () => (isFileSafeId(runId)
     ? readRunStatuses(directory).find((record) => record.id === runId)
@@ -60,6 +63,7 @@ export async function respondToRun(options: RunResponse): Promise<void> {
       `Machine run "${runId}" is answered through the program hosting it, not by machine respond: answer it there`,
     );
   }
+  if (record.status === "sleeping") return answerSleepingRun(options, record);
   const request = pendingRequest(record);
   if (request === undefined) throw new Error(`Machine run "${runId}" is not waiting for Human input`);
   if (request.requestId === undefined) {
@@ -79,7 +83,7 @@ export async function respondToRun(options: RunResponse): Promise<void> {
     const current = published();
     const left = pendingRequest(current)?.requestId !== requestId;
     // The run also removes a response it discards, so only its record says which ones it took.
-    if (left && current?.deliveries?.includes(delivery) === true) return;
+    if (left && current?.deliveries?.includes(delivery) === true) return "taken";
     const waited = Date.now() - delivered;
     // A record still names every response its run took since this one was delivered.
     if (left && waited < deliveryRetentionMilliseconds) {
@@ -97,6 +101,30 @@ export async function respondToRun(options: RunResponse): Promise<void> {
     }
     await sleep(Math.min(pollMilliseconds / 2, timeout));
   }
+}
+
+function answerSleepingRun(options: RunResponse, record: RunStatusRecord): "recorded" {
+  const { directory, runId, requestId, response } = options;
+  const answeredRecord = (current: RunStatusRecord | undefined): RunStatusRecord => {
+    if (current?.status !== "sleeping") throw new Error(`Machine run "${runId}" is no longer sleeping`);
+    const request = current.human;
+    if (!request) throw new Error(`Machine run "${runId}" is sleeping at a timed wait until ${current.due}; it takes no response`);
+    if (typeof response !== "string") throw new Error("Only a plain response can be recorded while the run sleeps");
+    if (request.requestId !== requestId) {
+      throw new Error(`Machine run "${runId}" is waiting on request "${request.requestId}", not "${requestId}"`);
+    }
+    const refusal = responseRefusal(request, response);
+    if (refusal !== undefined) throw new Error(refusal);
+    if (request.answer !== undefined) throw new Error(`Machine run "${runId}" request "${requestId}" is already answered`);
+    return { ...current, human: { ...request, answer: response } };
+  };
+  answeredRecord(record);
+  const release = claimRun(directory, runId);
+  try {
+    const current = answeredRecord(readRunStatuses(directory).find((candidate) => candidate.id === runId));
+    writeRunStatusRecord(directory, { ...current, updatedAt: new Date().toISOString() });
+    return "recorded";
+  } finally { release(); }
 }
 
 /**

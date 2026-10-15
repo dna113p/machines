@@ -142,6 +142,10 @@ export interface RunOptions {
   readonly continueAt?: { readonly value: StateValue; readonly context: unknown; readonly due?: string };
   /** Stop at a future timed wait, after its entry has been checkpointed. */
   readonly onSleep?: (due: string) => void;
+  /** Stop at a Human request, after its entry has been checkpointed. */
+  readonly onHumanSleep?: (request: HumanRequest) => void;
+  /** Answer to the continued Human request, consumed once and validated normally. */
+  readonly answer?: string;
   readonly agents?: Readonly<Record<string, AgentRunner>>;
   readonly human?: HumanRunner;
   readonly onAgentUpdate?: AgentReporter;
@@ -379,6 +383,7 @@ export function run<TMachine extends AnyStateMachine>(
     assertAgentRunners(agentRunners);
     assertRequiredAgentRunners(definition, agentRunners);
     let waitDue: string | undefined;
+    let answer: string | undefined;
     const runnable = definition.provide({
       actions: {
         humanInputFinished: () => options.onHumanInput?.(false),
@@ -405,9 +410,23 @@ export function run<TMachine extends AnyStateMachine>(
           }
           return { type: "due" };
         }),
-        human: fromPromise<Event, HumanRequest>(async ({ input }) =>
-          submittedHumanEvent(input, options.human ?? terminalHuman)
-        ),
+        human: fromPromise<Event, HumanRequest>(async ({ input, signal }) => {
+          if (answer !== undefined) {
+            const submitted = answer;
+            answer = undefined;
+            return submittedHumanEvent(input, () => submitted);
+          }
+          if (options.onHumanSleep) {
+            // As with timed waits, let the entry observer save the checkpoint first.
+            await Promise.resolve();
+            signal.throwIfAborted();
+            options.onHumanSleep(input);
+            queueMicrotask(() => actor.stop());
+            await new Promise<void>((done) => signal.addEventListener("abort", () => done(), { once: true }));
+            return { type: "submitted" };
+          }
+          return submittedHumanEvent(input, options.human ?? terminalHuman);
+        }),
         ...(Object.keys(agentRunners).length === 0
           ? {}
           : {
@@ -514,6 +533,7 @@ export function run<TMachine extends AnyStateMachine>(
     entered = JSON.stringify(initialValue);
     options.onState?.(initialValue);
     if (options.continueAt && actor.getSnapshot()._nodes.some((node) => node.invoke.some((invoke) => invoke.src === "human"))) {
+      answer = options.answer;
       options.onHumanInput?.(true);
     }
     actor.start();

@@ -11,7 +11,11 @@ import { test, type TestContext } from "node:test";
 import { readRunStatuses, type RunStatusRecord } from "../src/run-status.ts";
 
 /** What a sleeping record adds, read loosely so the test names only what the ticket asks. */
-type SleepingRecord = Omit<RunStatusRecord, "status"> & { readonly status: string; readonly due?: string };
+type SleepingRecord = Omit<RunStatusRecord, "status" | "human"> & {
+  readonly status: string;
+  readonly due?: string;
+  readonly human?: RunStatusRecord["human"] & { readonly answer?: string };
+};
 
 interface Checkpoint {
   readonly state: { readonly value: unknown; readonly kind: string; readonly due?: string };
@@ -44,6 +48,35 @@ export default function sleeper(p, input) {
 }
 `;
 
+const askerPrompt = "Ship the release now?";
+
+/**
+ * Asks a person to approve or deny, allowing discussion, then logs the answer
+ * in an Operation and finishes.
+ */
+const askerSource = `import { appendFileSync } from "node:fs";
+
+export const description = "Asks a person, then logs the answer.";
+
+export default function asker(p, input) {
+  const saved = p.data({ answer: "" });
+  return p.machine({
+    initial: "ask",
+    states: {
+      ask: p.human(${JSON.stringify(askerPrompt)}, {
+        submitted: { target: "record", actions: ({ event }) => { saved.answer = event.value; } },
+        question: "ask",
+      }, { choices: ["approve", "deny"], discussion: true }),
+      record: p.operation(() => {
+        appendFileSync(input.log, "answer " + saved.answer + "\\n");
+        return { type: "done" };
+      }, { done: "finished" }),
+      finished: p.final(),
+    },
+  });
+}
+`;
+
 interface Project {
   readonly root: string;
   readonly project: string;
@@ -61,6 +94,7 @@ async function createProject(context: TestContext, input: { readonly every: stri
   await mkdir(join(project, ".machines"), { recursive: true });
   await mkdir(home);
   writeFileSync(join(project, ".machines", "sleeper.ts"), machineSource);
+  writeFileSync(join(project, ".machines", "asker.ts"), askerSource);
   const log = join(root, "log");
   const inputFile = join(root, "input.json");
   writeFileSync(inputFile, JSON.stringify({ ...input, log }));
@@ -75,9 +109,9 @@ function environment(project: Project, extra: Readonly<Record<string, string | u
   return { ...inherited, MACHINES_RUN_STATUS_DIR: project.status, MACHINES_USER_HOME: project.home, ...extra };
 }
 
-function cli(project: Project, args: readonly string[], extra: Readonly<Record<string, string | undefined>> = {}) {
+function cli(project: Project, args: readonly string[], extra: Readonly<Record<string, string | undefined>> = {}, timeout = 60_000) {
   return spawnSync(process.execPath, [resolve("src/cli.ts"), ...args], {
-    cwd: project.project, encoding: "utf8", env: environment(project, extra), timeout: 60_000,
+    cwd: project.project, encoding: "utf8", env: environment(project, extra), timeout,
   });
 }
 
@@ -257,4 +291,136 @@ test("a due sleeping run continues even when its recorded process id now belongs
   assert.equal(woken.status, 0, woken.stderr);
   assert.deepEqual(logLines(project), ["check 1"]);
   assert.equal(onlyRecord(project).status, "completed");
+});
+
+/** A run that does not end within this time is waiting in its process instead of sleeping or finishing. */
+const askerTimeout = 20_000;
+
+function askerArgs(project: Project, sleep: boolean): string[] {
+  return ["run", "asker", ...(sleep ? ["--sleep"] : []), "--input-file", project.inputFile];
+}
+
+/** A refused `machine respond`: it fails, says why, and changes no file. */
+function assertRefused(project: Project, args: readonly string[], reason?: RegExp): void {
+  const before = statusFiles(project);
+  const refused = cli(project, ["respond", ...args], {}, askerTimeout);
+  assert.equal(refused.status, 1, `respond ${args.join(" ")} was not refused: ${refused.stdout}${refused.stderr}`);
+  assert.notEqual(refused.stderr.trim(), "", `respond ${args.join(" ")} did not say why it was refused`);
+  if (reason !== undefined) assert.match(refused.stderr, reason);
+  assert.deepEqual(statusFiles(project), before, `respond ${args.join(" ")} changed the run's files`);
+  assert.deepEqual(logLines(project), []);
+}
+
+test("a run started with --sleep sleeps at a Human request, takes one valid answer while asleep, and uses it when continued", async (context) => {
+  const project = await createProject(context, { every: "1h", checks: 1 });
+  const ran = cli(project, askerArgs(project, true), {}, askerTimeout);
+  assert.equal(ran.error, undefined, `the run kept its process open at the Human request: ${String(ran.error)}`);
+  assert.equal(ran.status, 0, ran.stderr);
+  assert.deepEqual(logLines(project), []);
+
+  // The process ended, and the record holds the request.
+  const record = onlyRecord(project);
+  assert.equal(record.status, "sleeping");
+  assert.equal(record.state, "ask");
+  assert.equal(record.due, undefined);
+  assert.equal(record.human?.prompt, askerPrompt);
+  assert.deepEqual(record.human?.choices, ["approve", "deny"]);
+  const requestId = record.human?.requestId;
+  assert.equal(typeof requestId, "string");
+  assert.notEqual(requestId, "");
+  assert.equal(record.human?.answer, undefined);
+  const checkpoint = readCheckpoint(project, record.id);
+  assert.equal(checkpoint.state.value, "ask");
+  assert.equal(checkpoint.state.kind, "human");
+  assert.equal(checkpoint.sleep, true);
+
+  // Unanswered: continue says what the run waits for and how to answer it, and changes nothing.
+  const asleep = statusFiles(project);
+  const early = cli(project, ["continue", record.id], {}, askerTimeout);
+  assert.equal(early.error, undefined, `continue started the unanswered run: ${String(early.error)}`);
+  assert.equal(early.status, 0, early.stderr);
+  const said = `${early.stdout}${early.stderr}`;
+  assert.ok(said.includes(askerPrompt), `the request is not reported: ${said}`);
+  assert.ok(said.includes(requestId!), `the request id is not reported: ${said}`);
+  assert.ok(said.includes("machine respond"), `how to answer is not reported: ${said}`);
+  assert.deepEqual(statusFiles(project), asleep);
+  assert.deepEqual(logLines(project), []);
+
+  // Answers the request does not take are refused, and the request stays open.
+  assertRefused(project, [record.id, "not-the-request", "approve"]);
+  assertRefused(project, [record.id, requestId!, "maybe"], /approve, deny/u);
+  assertRefused(project, ["--question", record.id, requestId!, "Why now?"], /plain response/u);
+
+  // The right answer is recorded; the run stays asleep and nothing starts it.
+  const answered = cli(project, ["respond", record.id, requestId!, "approve"], {}, askerTimeout);
+  assert.equal(answered.status, 0, answered.stderr);
+  await new Promise((done) => setTimeout(done, 300));
+  assert.deepEqual(logLines(project), []);
+  const marked = onlyRecord(project);
+  assert.equal(marked.id, record.id);
+  assert.equal(marked.status, "sleeping");
+  assert.equal(marked.human?.requestId, requestId);
+  assert.equal(marked.human?.answer, "approve");
+  assert.ok(existsSync(checkpointFile(project, record.id)));
+
+  // A second answer is refused, whatever it is.
+  assertRefused(project, [record.id, requestId!, "deny"]);
+  assertRefused(project, [record.id, requestId!, "approve"]);
+  assert.equal(onlyRecord(project).human?.answer, "approve");
+
+  // Continue gives the Human state that answer without asking again.
+  const woken = cli(project, ["continue", record.id], {}, askerTimeout);
+  assert.equal(woken.error, undefined, `continue asked again instead of using the answer: ${String(woken.error)}`);
+  assert.equal(woken.status, 0, woken.stderr);
+  assert.ok(!`${woken.stdout}${woken.stderr}`.includes(askerPrompt), `the prompt was shown again: ${woken.stdout}${woken.stderr}`);
+  assert.deepEqual(logLines(project), ["answer approve"]);
+  const done = onlyRecord(project);
+  assert.equal(done.id, record.id);
+  assert.equal(done.startedAt, record.startedAt);
+  assert.deepEqual({ status: done.status, state: done.state, error: done.error }, { status: "completed", state: "finished", error: undefined });
+  assert.equal(existsSync(checkpointFile(project, record.id)), false);
+});
+
+test("a run sleeping at a timed wait takes no response", async (context) => {
+  const project = await createProject(context, { every: "1h", checks: 1 });
+  const ran = cli(project, runArgs(project, true));
+  assert.equal(ran.status, 0, ran.stderr);
+  const { record } = assertSleeping(project);
+  assertRefused(project, [record.id, "any-request", "approve"]);
+  assert.equal(onlyRecord(project).status, "sleeping");
+});
+
+test("without --sleep, a Human request is answered by machine respond while its process runs", async (context) => {
+  const project = await createProject(context, { every: "1h", checks: 1 });
+  const child = spawn(process.execPath, [resolve("src/cli.ts"), ...askerArgs(project, false)], {
+    cwd: project.project, env: environment(project), stdio: ["ignore", "pipe", "pipe"],
+  });
+  context.after(() => { child.kill("SIGKILL"); });
+  let output = "";
+  child.stdout.setEncoding("utf8").on("data", (text: string) => { output += text; });
+  child.stderr.setEncoding("utf8").on("data", (text: string) => { output += text; });
+  let finished = false;
+  const exited = new Promise<number | null>((done) => { child.on("close", (code) => { finished = true; done(code); }); });
+
+  const statuses = new Set<string>();
+  let waiting: SleepingRecord | undefined;
+  const deadline = Date.now() + askerTimeout;
+  while (waiting === undefined && !finished && Date.now() < deadline) {
+    for (const record of readRunStatuses(project.status) as SleepingRecord[]) {
+      statuses.add(record.status);
+      if (record.status === "waiting" && record.human?.requestId !== undefined) waiting = record;
+    }
+    if (waiting === undefined) await new Promise((done) => setTimeout(done, 20));
+  }
+  assert.ok(waiting, `the run never waited for an answer in its process: ${output}`);
+  assert.equal(finished, false, "the run's process ended at the Human request");
+
+  const answered = cli(project, ["respond", waiting.id, waiting.human!.requestId!, "deny"], {}, askerTimeout);
+  assert.equal(answered.status, 0, answered.stderr);
+  assert.equal(await exited, 0, output);
+  assert.deepEqual(logLines(project), ["answer deny"]);
+  const record = onlyRecord(project);
+  assert.deepEqual({ id: record.id, status: record.status, state: record.state }, { id: waiting.id, status: "completed", state: "finished" });
+  assert.equal(statuses.has("sleeping"), false);
+  assert.equal(existsSync(checkpointFile(project, record.id)), false);
 });

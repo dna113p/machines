@@ -58,6 +58,8 @@ export interface RunStatusHuman {
   readonly choices?: readonly string[];
   readonly suggestions?: readonly string[];
   readonly discussion?: boolean;
+  /** Plain answer recorded while sleeping; consumed on continuation. */
+  readonly answer?: string;
 }
 
 export interface RunStatusAgent {
@@ -111,6 +113,7 @@ export interface RunStatusPublisher {
   readonly directory: string | undefined;
   update(change: RunStatusChange): void;
   sleep(due: string): void;
+  sleepForAnswer(request: RunStatusHuman & { readonly requestId: string }): void;
   finish(outcome: RunStatusOutcome): void;
 }
 
@@ -127,7 +130,7 @@ export const watchListName = /^\.watch\..+\.json$/u;
 const leftoverName = /^\.[A-Za-z0-9._-]+\.(?:\d+\.\d+\.tmp|[A-Za-z0-9_-]+\.inbox\.(?:sent|taken))$/u;
 // A run's inbox, which goes with its record: one without a record belongs to a run that was pruned.
 const inboxName = /^[A-Za-z0-9_-][A-Za-z0-9._-]*\.inbox$/u;
-const disabled: RunStatusPublisher = { directory: undefined, update() {}, sleep() {}, finish() {} };
+const disabled: RunStatusPublisher = { directory: undefined, update() {}, sleep() {}, sleepForAnswer() {}, finish() {} };
 let temporaryFiles = 0;
 
 /**
@@ -238,16 +241,7 @@ export function createRunStatusPublisher(
       updatedAt: new Date().toISOString(),
     };
     try {
-      mkdirSync(directory, { recursive: true, mode: 0o700 });
-      // Readers only ever see a whole record: write beside it, then rename over it.
-      const temporary = join(directory, `.${id}.${process.pid}.${temporaryFiles += 1}.tmp`);
-      try {
-        writeFileSync(temporary, `${JSON.stringify(record)}\n`, { mode: 0o600 });
-        renameSync(temporary, join(directory, `${id}.json`));
-      } catch (cause) {
-        rmSync(temporary, { force: true });
-        throw cause;
-      }
+      writeRunStatusRecord(directory, record);
       return true;
     } catch {
       // A status line is never worth a run: an unwritable directory is ignored.
@@ -300,6 +294,15 @@ export function createRunStatusPublisher(
       human = undefined;
       publish();
     },
+    sleepForAnswer(request) {
+      if (status === "completed" || status === "failed" || status === "sleeping") return;
+      status = "sleeping";
+      due = undefined;
+      agent = undefined;
+      limit = undefined;
+      human = pickHuman(request);
+      publish();
+    },
     finish(outcome) {
       if (status === "completed" || status === "failed" || status === "sleeping") return;
       if ("error" in outcome) {
@@ -324,6 +327,20 @@ export function createRunStatusPublisher(
       }
     },
   };
+}
+
+/** Readers only ever see a whole record: write beside it, then rename over it. */
+export function writeRunStatusRecord(directory: string, record: RunStatusRecord): void {
+  if (!isFileSafeId(record.id)) throw new Error(`Invalid run id "${record.id}"`);
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const temporary = join(directory, `.${record.id}.${process.pid}.${temporaryFiles += 1}.tmp`);
+  try {
+    writeFileSync(temporary, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+    renameSync(temporary, join(directory, `${record.id}.json`));
+  } catch (cause) {
+    rmSync(temporary, { force: true });
+    throw cause;
+  }
 }
 
 /**
@@ -490,7 +507,8 @@ function isRunStatusRecord(value: unknown): value is RunStatusRecord {
     && isOptionalString(record.label)
     && (record.stateSince === undefined || isTimestamp(record.stateSince))
     && (record.due === undefined || isTimestamp(record.due))
-    && (record.status !== "sleeping" || isTimestamp(record.due))
+    && (record.status !== "sleeping" || isTimestamp(record.due)
+      || (human !== null && typeof human === "object" && typeof human.requestId === "string"))
     && typeof record.machine === "string"
     && typeof record.path === "string"
     && typeof record.cwd === "string"
@@ -500,7 +518,8 @@ function isRunStatusRecord(value: unknown): value is RunStatusRecord {
     && (agent === undefined || (agent !== null && typeof agent === "object" && typeof agent.harness === "string"
       && isOptionalString(agent.model) && isOptionalString(agent.thinking)))
     && (human === undefined || (human !== null && typeof human === "object" && typeof human.prompt === "string"
-      && isOptionalString(human.requestId) && isOptionalStrings(human.choices) && isOptionalStrings(human.suggestions)
+      && isOptionalString(human.requestId) && isOptionalString(human.answer)
+      && isOptionalStrings(human.choices) && isOptionalStrings(human.suggestions)
       && (human.discussion === undefined || typeof human.discussion === "boolean")))
     && (limit === undefined || (limit !== null && typeof limit === "object" && typeof limit.text === "string"
       && isOptionalString(limit.until)))

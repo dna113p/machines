@@ -6,7 +6,7 @@ import type { StateValue } from "xstate";
 import type { StateEntry } from "./index.ts";
 import { jsonProblem, type JsonValue } from "./json.ts";
 import { statePaths } from "./run-graph.ts";
-import { isFileSafeId, isProcessAlive, readRunStatuses, runStatusDirectory, cleanDeadClaim, type RunStatusRecord } from "./run-status.ts";
+import { isFileSafeId, isProcessAlive, readRunStatuses, runStatusDirectory, cleanDeadClaim, type RunStatusHuman, type RunStatusRecord } from "./run-status.ts";
 
 export interface RunCheckpoint {
   readonly schemaVersion: 1;
@@ -32,11 +32,21 @@ export class RunNotDueError extends Error {
   }
 }
 
+/** An unanswered continuation leaves the run's files unchanged. */
+export class RunNotAnsweredError extends Error {
+  readonly human: RunStatusHuman;
+  constructor(human: RunStatusHuman) {
+    super(`Run is waiting for an answer to: ${human.prompt}`);
+    this.human = human;
+  }
+}
+
 export interface Continuation {
   readonly directory: string;
   readonly checkpoint: RunCheckpoint;
   readonly record: RunStatusRecord;
   readonly machineChanged: boolean;
+  readonly answer?: string;
   release(): void;
 }
 
@@ -75,18 +85,48 @@ export function removeCheckpoint(directory: string, id: string): void {
 export function claimContinuation(id: string, directory = runStatusDirectory(), now = Date.now()): Continuation {
   if (directory === undefined) throw new Error("Cannot continue: run status publication is off");
   if (!isFileSafeId(id)) throw new Error(`Invalid run id "${id}"`);
-  const claim = join(directory, `.${id}.claim`);
   const record = readRunStatuses(directory).find((candidate) => candidate.id === id);
   if (!record) throw new Error(`Cannot continue run "${id}": no status record`);
   const file = checkpointPath(directory, id);
   if (!existsSync(file)) throw new Error(`Cannot continue run "${id}": no checkpoint (the run may have reached a final state)`);
   if (record.status === "completed") throw new Error(`Cannot continue run "${id}": it completed`);
+  if (record.status === "sleeping" && record.human && record.human.answer === undefined) {
+    throw new RunNotAnsweredError(record.human);
+  }
   if (record.status === "sleeping" && record.due && Date.parse(record.due) > now) {
     throw new RunNotDueError(record.due);
   }
   if (record.status !== "failed" && record.status !== "sleeping" && isProcessAlive(record.pid)) {
     throw new Error(`Cannot continue run "${id}": its process ${record.pid} is still alive`);
   }
+  const release = claimRun(directory, id);
+  try {
+    const checkpoint = readCheckpoint(file, id);
+    // A concurrent continuation may have published its pid before we acquired the claim.
+    const current = readRunStatuses(directory).find((candidate) => candidate.id === id);
+    if (!current || (current.status !== "failed" && current.status !== "sleeping" && isProcessAlive(current.pid))) {
+      throw new Error(`Cannot continue run "${id}": its process is still alive`);
+    }
+    // A preceding continuation may have slept again before we took the claim.
+    if (current.status === "sleeping" && current.human && current.human.answer === undefined) {
+      throw new RunNotAnsweredError(current.human);
+    }
+    if (current.status === "sleeping" && current.due && Date.parse(current.due) > now) {
+      throw new RunNotDueError(current.due);
+    }
+    return { directory, checkpoint, record: current,
+      ...(current.status === "sleeping" && current.human?.answer !== undefined ? { answer: current.human.answer } : {}),
+      machineChanged: machineSourceHash(checkpoint.machine.path) !== checkpoint.machine.sourceHash, release };
+  } catch (cause) {
+    release();
+    throw cause;
+  }
+}
+
+/** Exclusive claim shared by continuation and answers recorded while sleeping. */
+export function claimRun(directory: string, id: string): () => void {
+  if (!isFileSafeId(id)) throw new Error(`Invalid run id "${id}"`);
+  const claim = join(directory, `.${id}.claim`);
   const token = `${process.pid}.${randomUUID()}`;
   const temporary = join(directory, `.${id}.${token}.claim`);
   // Rename a populated directory into place: an existing nonempty claim cannot
@@ -98,33 +138,17 @@ export function claimContinuation(id: string, directory = runStatusDirectory(), 
     writeFileSync(join(temporary, token), "", { mode: 0o600 });
     renameSync(temporary, claim);
   } catch {
-    throw new Error(`Cannot continue run "${id}": another process has claimed it`);
+    throw new Error(`Cannot claim run "${id}": another process has claimed it`);
   } finally {
     rmSync(temporary, { recursive: true, force: true });
   }
   let released = false;
-  const release = () => {
+  return () => {
     if (released) return;
     released = true;
     rmSync(join(claim, token), { force: true });
     try { rmdirSync(claim); } catch { /* Another owner already replaced the empty claim. */ }
   };
-  try {
-    const checkpoint = readCheckpoint(file, id);
-    // A concurrent continuation may have published its pid before we acquired the claim.
-    const current = readRunStatuses(directory).find((candidate) => candidate.id === id);
-    if (!current || (current.status !== "failed" && current.status !== "sleeping" && isProcessAlive(current.pid))) {
-      throw new Error(`Cannot continue run "${id}": its process is still alive`);
-    }
-    // A preceding continuation may have slept again before we took the claim.
-    if (current.status === "sleeping" && current.due && Date.parse(current.due) > now) {
-      throw new RunNotDueError(current.due);
-    }
-    return { directory, checkpoint, record: current, machineChanged: machineSourceHash(checkpoint.machine.path) !== checkpoint.machine.sourceHash, release };
-  } catch (cause) {
-    release();
-    throw cause;
-  }
 }
 
 function readCheckpoint(file: string, id: string): RunCheckpoint {

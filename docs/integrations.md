@@ -237,7 +237,8 @@ directory is created by the first write, as `0700`, and each file is `0600`:
 ```
 
 `status` is `running`, `waiting`, `sleeping`, `completed`, or `failed`. A sleeping
-run has a `due` timestamp; see [continuing a run](#continuing-a-run). `state` is the current
+run has either a timed wait's `due` timestamp or a `human` request with a
+`requestId`; see [continuing a run](#continuing-a-run). `state` is the current
 state as a string (JSON for a nested state). `agent` is present while an Agent
 state has reported its identity, and `error` after a failure. `owner` is
 `MACHINES_RUN_OWNER` when set, otherwise the session id the coding agent gives
@@ -338,11 +339,13 @@ Empty or whitespace-only summaries leave the field absent. The whole note,
 including its line breaks, is available in JSON. This optional field keeps
 `schemaVersion` at 2; readers should accept records with or without it.
 
-The status record omits Machine input, output fields other than that summary,
-and Human responses. The checkpoint described below does keep input, saved
-working data, and `context`, which may contain sensitive values. A Human prompt and its choices are written to the `0600` file while the request is
-waiting. The standard directory is private to you; one you name instead should
-be a directory only you can read and write.
+The status record omits Machine input and output fields other than that summary.
+Human responses are omitted except for `human.answer` recorded while sleeping,
+which is cleared when the run continues. The checkpoint described below does
+keep input, saved working data, and `context`, which may contain sensitive values.
+A Human prompt and its choices are written to the `0600` file while the request
+is waiting or sleeping. The standard directory is private to you; one you name
+instead should be a directory only you can read and write.
 
 The first status publication is best effort. Where the directory cannot be created or
 written, as in a read-only home, a sandbox, or a container, a run goes on
@@ -373,11 +376,33 @@ machine continue <run-id>
 For waits that can last days, start with `machine run <name> --sleep`. At a
 future [timed wait](authoring.md#timed-waits), the CLI writes status `sleeping`
 with an ISO `due` time and ends its process successfully. The checkpoint keeps
-`sleep: true`; every CLI continuation keeps sleeping at subsequent waits. Human
-requests continue to wait in the process. `--sleep` is refused when publication
-is off or the initial status record cannot be written.
+`sleep: true`; every CLI continuation keeps sleeping at subsequent waits and
+Human requests. `--sleep` is refused when publication is off or the initial
+status record cannot be written.
 
-Before the deadline, `machine continue <run-id>` reports the due time, exits
+At a Human request, `--sleep` also ends the process successfully. Its record is
+`sleeping` with `human: { prompt, requestId, choices?, suggestions?, discussion? }`
+and no `due`. Record a plain answer while no process is running:
+
+```sh
+machine respond <run-id> <request-id> approve
+machine continue <run-id>
+```
+
+`respond` stores the string in `human.answer` and updates `updatedAt`, leaving
+the run sleeping. It never starts the run. A wrong request id, a response outside
+the offered choices, or a second answer is refused. Sleeping runs refuse
+`--question` even when discussion is allowed: only a plain response can be
+recorded while the run sleeps, and refusing a question leaves the request open.
+A run sleeping at a timed wait takes no response.
+
+On an unanswered Human request, `continue` reports the prompt, choices, request
+id and the command to answer it, exits successfully and changes nothing. After
+an answer, it gives that answer to the restored Human state once without showing
+the prompt again; the state's choice checks still apply. Without `--sleep`,
+Human requests are answered while their process runs, as usual.
+
+Before a timed wait's deadline, `machine continue <run-id>` reports the due time, exits
 successfully, and changes nothing: it does not claim the run, import its Machine,
 or publish a status. Once due, it takes the wait's `due` transition. A sleeping
 run's recorded pid may have been reused and does not block continuation. Nothing
@@ -407,16 +432,19 @@ Context uses normal JSON conversion; if that fails, the run continues and its
 checkpoint is removed until a later state has serializable context. Such a run
 cannot be continued while it has no checkpoint.
 
-Continuation accepts a due sleeping record, a failed record, or a running/waiting
-record whose pid is dead. A running or waiting run with a live pid, a completed run, and any run with
-no checkpoint are refused with a reason. A private claim prevents two processes
-from continuing the same run; a dead claim owner can be replaced immediately.
+Continuation accepts a due or answered sleeping record, a failed record, or a
+running/waiting record whose pid is dead. A running or waiting run with a live pid,
+a completed run, and any run with no checkpoint are refused with a reason.
+A private claim prevents two processes
+from continuing the same run or overwriting a sleeping run's answer; a dead claim
+owner can be replaced immediately.
 Parallel state values with more than one active path are refused.
 
 The run uses the saved working directory, home, input, and Agent overrides. Its
 id, start time, owner, label, parent, and trail remain, its pid is updated, and a
 previous failure is cleared. The saved step runs again from its start, including
-asking a Human again, without rerunning entry actions. See
+asking a Human again unless a sleeping run's answer was recorded, without
+rerunning entry actions. See
 [saved working data](authoring.md#saved-working-data) for serialization rules and
 repeatable steps.
 
