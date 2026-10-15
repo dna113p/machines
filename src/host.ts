@@ -29,6 +29,8 @@ export interface HostedHumanRequest extends HumanRequest {
 export interface MachineHostOptions extends Omit<PrepareMachineRunOptions, "machine" | "continueRun"> {
   readonly machine?: string;
   readonly continue?: string;
+  /** End the child process at Human requests and future timed waits, retaining a checkpoint. Requires status publication. */
+  readonly sleep?: boolean;
   readonly signal?: AbortSignal;
   /** What the run is for, in its published run status. `MACHINES_RUN_LABEL` applies when absent. */
   readonly label?: string;
@@ -49,6 +51,7 @@ export interface MachineHostOptions extends Omit<PrepareMachineRunOptions, "mach
 export interface MachineHostResult {
   readonly state: StateValue;
   readonly output?: JsonValue;
+  readonly sleeping?: { readonly due: string } | { readonly human: HostedHumanRequest };
 }
 
 export interface MachineHostRun {
@@ -124,6 +127,8 @@ const parentMessageSchema = v.variant("type", [
     // Present while run status is published, by the host or by its caller, under this id.
     runId: v.optional(v.string()),
     continueRun: v.optional(v.custom<RunCheckpoint>(isJsonValue)),
+    sleep: v.optional(v.boolean()),
+    answer: v.optional(v.string()),
     // The host publishes the record itself and needs each change to it.
     reportStatus: v.optional(v.boolean()),
   }),
@@ -140,6 +145,8 @@ const parentMessageSchema = v.variant("type", [
 ]);
 
 const childMessageSchema = v.variant("type", [
+  v.strictObject({ type: v.literal("sleep"), due: v.string() }),
+  v.strictObject({ type: v.literal("humanSleep"), request: humanRequestSchema }),
   v.strictObject({
     type: v.literal("started"),
     name: v.string(),
@@ -213,8 +220,13 @@ function launchMachineHost(
   const publication = runStatusDirectory() !== undefined;
   // An embedding program has to ask: its environment alone must not make its runs appear elsewhere.
   const publishes = publication && options.publishRunStatus === true;
+  const sleep = options.sleep ?? (continuation?.checkpoint.sleep === true);
+  if (sleep && !publishes) {
+    return Promise.reject(new Error("Cannot sleep: the host must publish run status and publication must be on"));
+  }
   const recorded = publishes || (publication && options.publishRunStatus === "caller");
   let published: RunStatusPublisher | undefined;
+  let sleeping: MachineHostResult["sleeping"];
   const child = fork(fileURLToPath(import.meta.url), [childArgument], {
     cwd,
     execArgv: [],
@@ -289,12 +301,12 @@ function launchMachineHost(
             ...(message.graph === undefined ? {} : { graph: message.graph }),
             ...(options.label === undefined ? {} : { label: options.label }),
             ...(options.owner === undefined ? {} : { owner: options.owner }),
-            // Responses reach this run through `respond` and `ask` below, never through an inbox.
-            answeredBy: "host",
+            // Sleeping requests take recorded answers; active requests use the host.
+            ...(sleep ? { continuedBy: "host" } : { answeredBy: "host" }),
           }, continuation ? { ...process.env, MACHINES_RUN_STATUS_DIR: continuation.directory } : process.env);
         }
-        if (continuation && published?.directory === undefined) {
-          fail(new Error("Cannot continue: could not publish the run status"));
+        if ((continuation || sleep) && published?.directory === undefined) {
+          fail(new Error(`Cannot ${sleep ? "sleep" : "continue"}: could not publish the run status`));
           return;
         }
         phase = "running";
@@ -369,6 +381,13 @@ function launchMachineHost(
           ...(agent === undefined ? {} : { agent: agent ?? undefined }),
           ...(limit === undefined ? {} : { limit: limit ?? undefined }),
         });
+      } else if (message.type === "sleep") {
+        published?.sleep(message.due);
+        sleeping = { due: message.due };
+      } else if (message.type === "humanSleep") {
+        const human = { ...message.request, requestId: randomUUID() };
+        published?.sleepForAnswer(human);
+        sleeping = { human };
       } else if (message.type === "humanRequest") {
         if (phase !== "running" || pendingHuman !== undefined) {
           fail(new Error("Machine host sent an unexpected Human request"));
@@ -388,10 +407,11 @@ function launchMachineHost(
         }
         phase = "completed";
         pendingHuman = undefined;
-        published?.finish({ state: message.state as StateValue, note: runOutputSummary(message.output) });
+        if (sleeping === undefined) published?.finish({ state: message.state as StateValue, note: runOutputSummary(message.output) });
         dispose();
         resolveResult({
           state: message.state as StateValue,
+          ...(sleeping === undefined ? {} : { sleeping }),
           ...(message.output === undefined ? {} : { output: message.output }),
         });
       } else {
@@ -417,6 +437,8 @@ function launchMachineHost(
         type: "launch",
         machine,
         ...(continuation ? { continueRun: continuation.checkpoint } : {}),
+        ...(continuation?.answer === undefined ? {} : { answer: continuation.answer }),
+        sleep,
         cwd,
         ...(options.input === undefined ? {} : { input: options.input }),
         ...(options.agents === undefined ? {} : { agents: options.agents }),
@@ -502,7 +524,7 @@ function runChildHost(): void {
 
   async function launch(message: Extract<ParentMessage, { type: "launch" }>) {
     try {
-      const { runId, reportStatus, ...launched } = message;
+      const { runId, reportStatus, sleep, answer, ...launched } = message;
       const prepared = await prepareMachineRun(launched);
       const ready = new Promise<string | undefined>((resolve) => { startRun = resolve; });
       send({
@@ -527,7 +549,19 @@ function runChildHost(): void {
       }));
       const checkpointDirectory = await ready;
       const result = await prepared.start({
-        ...(checkpointDirectory === undefined || runId === undefined ? {} : { checkpoint: { directory: checkpointDirectory, id: runId } }),
+        ...(checkpointDirectory === undefined || runId === undefined ? {} : { checkpoint: { directory: checkpointDirectory, id: runId, sleep } }),
+        ...(answer === undefined ? {} : { answer }),
+        ...(sleep ? {
+          onSleep(due: string) { send({ type: "sleep", due }); },
+          onHumanSleep(request: HumanRequest) {
+            send({ type: "humanSleep", request: {
+              prompt: request.prompt,
+              ...(request.discussion ? { discussion: true } : {}),
+              ...(request.choices === undefined ? {} : { choices: [...request.choices] }),
+              ...(request.suggestions === undefined ? {} : { suggestions: [...request.suggestions] }),
+            } });
+          },
+        } : {}),
         onAgentUpdate(update) {
           send({ type: "agentUpdate", update });
           observed?.onAgentUpdate(update);

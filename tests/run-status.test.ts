@@ -49,6 +49,18 @@ test("sleeping status records preserve their deadline and ignore later updates",
   assert.equal(await readFile(join(directory, "sleep.json"), "utf8"), before);
 });
 
+test("continuation keeps a sleeping run's host ownership", async (context) => {
+  const directory = await temporaryDirectory(context);
+  const environment = { MACHINES_RUN_STATUS_DIR: directory };
+  const publisher = createRunStatusPublisher({ ...run, id: "hosted-sleep", continuedBy: "host" }, environment);
+  publisher.sleep(new Date().toISOString());
+  const record = readRunStatuses(directory)[0]!;
+  assert.equal(record.continuedBy, "host");
+  const continued = createRunStatusPublisher({ ...run, id: record.id, continueRun: { record, machineChanged: false } }, environment);
+  continued.sleep(new Date(Date.now() + 60_000).toISOString());
+  assert.equal(readRunStatuses(directory)[0]?.continuedBy, "host");
+});
+
 test("a sleeping status record holds either a due time or a Human request, which may carry its answer", async (context) => {
   const directory = await temporaryDirectory(context);
   const publisher = createRunStatusPublisher({ ...run, id: "asleep" }, { MACHINES_RUN_STATUS_DIR: directory });
@@ -732,7 +744,7 @@ test("a settled record is pruned although a file of its run cannot be removed, a
 test("reading skips unreadable and malformed files", async (context) => {
   const directory = await temporaryDirectory(context);
   await writeRecord(directory, {
-    id: "valid", owner: "session", state: "review", agent: { harness: "claude" }, answeredBy: "host",
+    id: "valid", owner: "session", state: "review", agent: { harness: "claude" }, answeredBy: "host", continuedBy: "host",
   });
   await writeRecord(directory, { id: "valid-1", schemaVersion: 1, status: "waiting", human: { prompt: "Approve?" } });
   await writeRecord(directory, {
@@ -762,6 +774,7 @@ test("reading skips unreadable and malformed files", async (context) => {
     { human: { prompt: "Approve?", discussion: "yes" } },
     { deliveries: "delivery-1" },
     { answeredBy: "inbox" },
+    { continuedBy: "scheduler" },
     { owner: 7 },
     { limit: "soon" },
     { limit: { until: "2026-10-10T21:00:00Z" } },

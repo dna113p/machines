@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 
 import { randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { emitKeypressEvents, type Key } from "node:readline";
 import { inspect, stripVTControlCharacters } from "node:util";
+import { fileURLToPath } from "node:url";
 
 import yoctoSpinner from "yocto-spinner";
 import { bold, cyan, dim, green, magenta, red, yellow } from "yoctocolors";
@@ -74,6 +76,8 @@ try {
     console.log(await readFile(machinePath, "utf8"));
   } else if (command === "run" && selector !== undefined) {
     await runMachine(await resolveMachine(selector), argumentsAfterSelector);
+  } else if (command === "continue" && selector === "--due" && argumentsAfterSelector.length === 0) {
+    continueDueRuns();
   } else if (command === "continue" && selector !== undefined && argumentsAfterSelector.length === 0) {
     const continuation = claimContinuation(selector);
     try {
@@ -99,6 +103,7 @@ try {
       "  machine show <name-or-file>",
       "  machine run <name-or-file> [--sleep] [--agent role=preset]... [--input-file <file|->] [--] [input]",
       "  machine continue <run-id>",
+      "  machine continue --due",
       "  machine runs [--json] [--all]",
       "  machine runs --for [<session>] [--project <dir>] [--json] [--all]",
       "  machine respond [--question] <run-id> <request-id> [--] <response>",
@@ -120,6 +125,27 @@ try {
     console.log(`Then wake it with: machine continue ${selector}`);
   } else {
     console.error(cause instanceof Error ? cause.message : String(cause));
+    process.exitCode = 1;
+  }
+}
+
+function continueDueRuns(): void {
+  const now = Date.now();
+  const due = readRunStatuses(requireStatusDirectory()).filter((record) =>
+    record.status === "sleeping" && record.continuedBy !== "host"
+    && (record.human ? record.human.answer !== undefined : record.due !== undefined && Date.parse(record.due) <= now),
+  ).sort((left, right) => left.updatedAt.localeCompare(right.updatedAt));
+  if (due.length === 0) console.log("No sleeping runs are due.");
+  const failures: string[] = [];
+  for (const run of due) {
+    console.log(`Continuing run ${run.id}`);
+    const child = spawnSync(process.execPath, [...process.execArgv, fileURLToPath(import.meta.url), "continue", run.id], { stdio: "inherit" });
+    if (child.error) failures.push(`Run ${run.id} failed (${child.error.message})`);
+    else if (child.signal) failures.push(`Run ${run.id} failed (signal ${child.signal})`);
+    else if (child.status !== 0) failures.push(`Run ${run.id} failed (exit ${String(child.status)})`);
+  }
+  if (failures.length > 0) {
+    failures.forEach((failure) => console.error(failure));
     process.exitCode = 1;
   }
 }

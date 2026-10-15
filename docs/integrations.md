@@ -284,13 +284,24 @@ recorded as `failed` with the reason, and a run whose host is gone shows as
 is the id of its record; a session built on it, such as Pi's, reports that same
 id for the run, so it is the id to give `machine watch`.
 
-Such a record carries `"answeredBy": "host"`. Its Human requests are answered
+Without the sleep option, such a record carries `"answeredBy": "host"`. Its Human requests are answered
 only through the host's own `respond` and `ask`: the run reads no inbox, its
 `human` has no `requestId`, and `machine respond` refuses it. The field is absent
 from every other record and did not exist in earlier version 2 records. A caller
 that publishes its own record for the run, as the MCP server does so that its
 runs keep their inbox, passes `publishRunStatus: "caller"`: the host then writes
 nothing, and the run still hands its id down to the runs it starts.
+
+Use `startMachineHost({ machine, sleep: true, publishRunStatus: true })` to end
+the child process at a Human request or a future timed wait. Sleep requires
+publication to be on and the host to publish successfully; caller publication
+is not supported. `run.result` resolves with `{ state, sleeping: { human } }`
+or `{ state, sleeping: { due } }`. The Human request includes its `requestId`.
+The sleeping record publishes that request id, omits `answeredBy`, and carries
+`continuedBy: "host"` so `machine continue --due` skips it. Answer with
+`machine respond <run-id> <request-id> <response>` and wake it through its host
+with `startMachineHost({ continue: runId })`. Recording the answer never starts
+the run. Sleep requests do not call `onHumanRequest`.
 
 While an Agent state waits for a [usage limit](authoring.md#usage-limits) to
 reset, the record stays `running` and carries the wait in `limit`:
@@ -405,10 +416,16 @@ Human requests are answered while their process runs, as usual.
 Before a timed wait's deadline, `machine continue <run-id>` reports the due time, exits
 successfully, and changes nothing: it does not claim the run, import its Machine,
 or publish a status. Once due, it takes the wait's `due` transition. A sleeping
-run's recorded pid may have been reused and does not block continuation. Nothing
-wakes it automatically; arrange for an external scheduler to call
-`machine continue <run-id>` when needed. Without `--sleep`, the wait stays an
+run's recorded pid may have been reused and does not block continuation. Without `--sleep`, the wait stays an
 in-process timer, including when continued with time left on its saved deadline.
+
+An external scheduler or timer can call `machine continue --due`. It selects
+sleeping runs with a recorded Human answer or a timed wait whose deadline has
+passed, then continues them one after another in `updatedAt` order. It skips
+records with `continuedBy: "host"`; only their host wakes them. If a continuation
+fails, it goes on with the remaining runs, reports each failed run to stderr,
+and exits nonzero. No eligible runs is a successful no-op. Machines starts no
+background process or timer to call this command.
 
 Every published run keeps `<run-id>.checkpoint.json` beside its status record.
 It is private (`0600`) and replaced atomically at each state entry. A crash during
@@ -420,7 +437,7 @@ replacement leaves the previous checkpoint whole. It contains:
 - `state: { value, path, kind, enteredAt, due? }`, with the full XState state value,
   dotted active paths, a kind of `agent`, `operation`, `human`, `wait`, `final`, or
   `state`, and the wait's deadline in `due`;
-- `sleep: true` when the CLI was started with `--sleep`;
+- `sleep: true` when the CLI was started with `--sleep` or the host enabled `sleep`;
 - `data`, XState `context`, and `writtenAt`.
 
 No copy of the Machine source is stored. The checkpoint is removed when the run
@@ -464,6 +481,9 @@ The host loads the saved launch settings and keeps the same id and record.
 `run.continued.machineChanged` reports a changed Machine. Hosted continuation
 defaults to `publishRunStatus: true` so the host updates that record itself;
 explicitly disabling publication or assigning it to a caller is refused.
+It passes a sleeping run's recorded answer to the restored Human state without
+asking again. It keeps the checkpoint's `sleep` setting unless the host supplies
+`sleep` explicitly, and its result can resolve with `sleeping` again.
 
 ### Answering a waiting run from outside
 
@@ -552,8 +572,9 @@ what a script or a CI job gets as well. With publication off, or where the run
 could not be published, it fails at its first Human state with "Terminal input
 closed before a response": set `MACHINES_RUN_STATUS_DIR=off` for a run that
 should fail there instead of waiting.
-Runs hosted in any other program through `startMachineHost` are answered only
-through that program.
+Runs hosted in any other program through `startMachineHost` are answered through
+that program while active. With `sleep: true`, `machine respond` records an answer
+while sleeping, and the host continues the run.
 Runs hosted by the MCP server take a response from their own `machine_respond`
 tool or from the inbox. That tool is answer-only, so a question to a hosted
 request that allows discussion goes through the inbox with

@@ -223,7 +223,7 @@ waits for `machine respond` instead of failing. Anything running as the same use
 can answer a waiting run, including an approval; see
 [answering a waiting run from outside](docs/integrations.md#answering-a-waiting-run-from-outside).
 Runs hosted through `startMachineHost` publish too and are answered through their
-host. A session shows the runs it started; `machine watch` adds runs it did not,
+host while active. A session shows the runs it started; `machine watch` adds runs it did not,
 such as a ticket a daemon runs. See
 [watching other runs](docs/integrations.md#watching-other-runs).
 `machine runs --for` and the `@dna113p/machines/run-status` export answer which
@@ -258,8 +258,15 @@ questions (`--question`), and second answers are refused. An unanswered
 `machine continue` reports the request and how to answer it, changing nothing.
 After an answer, continuing uses it without asking again, checking the state's
 choices. Without `--sleep`, Human requests keep waiting in the running process.
-Nothing wakes a sleeping run automatically; an external scheduler or a person
-must call `machine continue`.
+An external scheduler or timer can call `machine continue --due` to wake every
+answered or due sleeping run in order. It skips runs started by a host, continues
+past failures, reports each failure and exits nonzero if any fail. Machines runs
+no background scheduler.
+
+Hosts can use `startMachineHost({ machine, sleep: true, publishRunStatus: true })`.
+Its result includes `sleeping.human` with a request id or `sleeping.due`.
+`machine respond` records a sleeping run's answer; its host wakes it with
+`startMachineHost({ continue: runId })`, retaining sleep for later waits.
 
 Machine definitions and Agent preset files are **trusted executable code**.
 Discovery imports them to inspect metadata, including their relative imports.
