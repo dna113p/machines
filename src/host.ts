@@ -8,6 +8,7 @@ import { assertJsonValue, isJsonValue, type JsonValue } from "./json.ts";
 import type { StateValue } from "xstate";
 
 import type { AgentUpdate, HumanRequest, HumanResponse } from "./index.ts";
+import { claimContinuation, type Continuation, type RunCheckpoint } from "./run-checkpoint.ts";
 import type { RunGraph } from "./run-graph.ts";
 import {
   prepareMachineRun,
@@ -25,7 +26,9 @@ export interface HostedHumanRequest extends HumanRequest {
   readonly requestId: string;
 }
 
-export interface MachineHostOptions extends PrepareMachineRunOptions {
+export interface MachineHostOptions extends Omit<PrepareMachineRunOptions, "machine" | "continueRun"> {
+  readonly machine?: string;
+  readonly continue?: string;
   readonly signal?: AbortSignal;
   /** What the run is for, in its published run status. `MACHINES_RUN_LABEL` applies when absent. */
   readonly label?: string;
@@ -60,6 +63,7 @@ export interface MachineHostRun {
    * them, whether or not this run is published. Absent for a Machine too large to draw.
    */
   readonly graph?: RunGraph;
+  readonly continued?: { readonly machineChanged: boolean };
   readonly result: Promise<MachineHostResult>;
   respond(response: string, requestId: string): Promise<void>;
   ask(question: string, requestId: string): Promise<void>;
@@ -109,6 +113,7 @@ const stateValueSchema = v.union([
 ]);
 
 const parentMessageSchema = v.variant("type", [
+  v.strictObject({ type: v.literal("start"), checkpointDirectory: v.optional(v.string()) }),
   v.strictObject({
     type: v.literal("launch"),
     machine: v.string(),
@@ -118,6 +123,7 @@ const parentMessageSchema = v.variant("type", [
     home: v.optional(v.string()),
     // Present while run status is published, by the host or by its caller, under this id.
     runId: v.optional(v.string()),
+    continueRun: v.optional(v.custom<RunCheckpoint>(isJsonValue)),
     // The host publishes the record itself and needs each change to it.
     reportStatus: v.optional(v.boolean()),
   }),
@@ -170,9 +176,24 @@ const childMessageSchema = v.variant("type", [
 type ParentMessage = v.InferOutput<typeof parentMessageSchema>;
 type ChildMessage = v.InferOutput<typeof childMessageSchema>;
 
-export function startMachineHost(
+export async function startMachineHost(options: MachineHostOptions): Promise<MachineHostRun> {
+  if (options.continue === undefined) return launchMachineHost(options);
+  if (options.publishRunStatus !== undefined && options.publishRunStatus !== true) {
+    throw new Error("Continuing a hosted run requires the host to publish its status");
+  }
+  const continuation = claimContinuation(options.continue);
+  const saved = continuation.checkpoint;
+  try {
+    return await launchMachineHost({ ...options, publishRunStatus: true, machine: saved.machine.path, input: saved.input, agents: saved.agents, cwd: saved.cwd, home: saved.home }, continuation);
+  } finally { continuation.release(); }
+}
+
+function launchMachineHost(
   options: MachineHostOptions,
+  continuation?: Continuation,
 ): Promise<MachineHostRun> {
+  if (options.machine === undefined) return Promise.reject(new Error("A Machine name or continue run id is required"));
+  const machine = options.machine;
   if (options.signal?.aborted) return Promise.reject(new Error("Machine host was terminated"));
   if (options.input !== undefined) {
     try {
@@ -188,7 +209,7 @@ export function startMachineHost(
   // carries this process's pid. While the host lives it settles the record
   // itself; when the host dies the child stops with it (see "disconnect"
   // below), so a reader that finds the pid gone rightly shows the run as lost.
-  const id = randomUUID();
+  const id = continuation?.record.id ?? randomUUID();
   const publication = runStatusDirectory() !== undefined;
   // An embedding program has to ask: its environment alone must not make its runs appear elsewhere.
   const publishes = publication && options.publishRunStatus === true;
@@ -258,10 +279,10 @@ export function startMachineHost(
           fail(new Error("Machine host sent an unexpected started message"));
           return;
         }
-        phase = "running";
         if (publishes) {
           published = createRunStatusPublisher({
             id,
+            ...(continuation ? { continueRun: continuation } : {}),
             machine: message.name,
             path: message.path,
             cwd: resolvePath(cwd),
@@ -270,8 +291,18 @@ export function startMachineHost(
             ...(options.owner === undefined ? {} : { owner: options.owner }),
             // Responses reach this run through `respond` and `ask` below, never through an inbox.
             answeredBy: "host",
-          });
+          }, continuation ? { ...process.env, MACHINES_RUN_STATUS_DIR: continuation.directory } : process.env);
         }
+        if (continuation && published?.directory === undefined) {
+          fail(new Error("Cannot continue: could not publish the run status"));
+          return;
+        }
+        phase = "running";
+        continuation?.release();
+        // The child may checkpoint only after the host has published its record.
+        const checkpointDirectory = publishes ? published?.directory : recorded ? runStatusDirectory() : undefined;
+        void sendChild(child, { type: "start", ...(checkpointDirectory === undefined ? {} : { checkpointDirectory }) })
+          .catch((cause: unknown) => fail(asError(cause)));
         resolveStarted({
           id,
           name: message.name,
@@ -280,6 +311,7 @@ export function startMachineHost(
           agentRoles: message.agentRoles,
           ...(message.graph === undefined ? {} : { graph: message.graph }),
           result,
+          ...(continuation ? { continued: { machineChanged: continuation.machineChanged } } : {}),
           async respond(response, requestId) {
             if (phase !== "running" || pendingHuman === undefined) {
               throw new Error("Machine host is not waiting for Human input");
@@ -383,7 +415,8 @@ export function startMachineHost(
       if (phase !== "starting") return;
       const launch: ParentMessage = {
         type: "launch",
-        machine: options.machine,
+        machine,
+        ...(continuation ? { continueRun: continuation.checkpoint } : {}),
         cwd,
         ...(options.input === undefined ? {} : { input: options.input }),
         ...(options.agents === undefined ? {} : { agents: options.agents }),
@@ -416,6 +449,7 @@ function terminateProcessTree(child: Pick<ChildProcess, "pid" | "kill">): void {
 }
 
 function runChildHost(): void {
+  let startRun: ((directory: string | undefined) => void) | undefined;
   let launched = false;
   let closing = false;
   let pendingHuman:
@@ -435,6 +469,11 @@ function runChildHost(): void {
       return;
     }
 
+    if (message.type === "start") {
+      startRun?.(message.checkpointDirectory);
+      startRun = undefined;
+      return;
+    }
     if (message.type === "respond" || message.type === "ask") {
       if (pendingHuman === undefined || pendingHuman.requestId !== message.requestId) {
         send({ type: "failed", message: "Machine host received an unexpected Human response" });
@@ -465,6 +504,7 @@ function runChildHost(): void {
     try {
       const { runId, reportStatus, ...launched } = message;
       const prepared = await prepareMachineRun(launched);
+      const ready = new Promise<string | undefined>((resolve) => { startRun = resolve; });
       send({
         type: "started",
         name: prepared.name,
@@ -485,7 +525,9 @@ function runChildHost(): void {
           ...("limit" in change ? { limit: change.limit ?? null } : {}),
         },
       }));
+      const checkpointDirectory = await ready;
       const result = await prepared.start({
+        ...(checkpointDirectory === undefined || runId === undefined ? {} : { checkpoint: { directory: checkpointDirectory, id: runId } }),
         onAgentUpdate(update) {
           send({ type: "agentUpdate", update });
           observed?.onAgentUpdate(update);

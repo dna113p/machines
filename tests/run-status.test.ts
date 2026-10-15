@@ -593,6 +593,16 @@ test("creating a publisher prunes settled records older than one hour", async (c
   ]);
 });
 
+test("pruning retains records with checkpoints and readers do not mistake checkpoints for records", async (context) => {
+  const directory = await temporaryDirectory(context);
+  const old = new Date(Date.now() - 61 * 60 * 1_000).toISOString();
+  await writeRecord(directory, { id: "saved", status: "failed", updatedAt: old });
+  await writeFile(join(directory, "saved.checkpoint.json"), JSON.stringify({ schemaVersion: 1, id: "saved", data: {} }));
+  createRunStatusPublisher({ ...run, id: "new" }, { MACHINES_RUN_STATUS_DIR: directory });
+  assert.deepEqual(readRunStatuses(directory).map((record) => record.id).sort(), ["new", "saved"]);
+  assert.ok((await readdir(directory)).includes("saved.checkpoint.json"));
+});
+
 test("creating a publisher removes what stopped processes and ended sessions left, and nothing else", async (context) => {
   const directory = await temporaryDirectory(context);
   const minute = 60 * 1_000;
@@ -1046,7 +1056,7 @@ test("a hosted run publishes what machine run does, from its first state to its 
   });
   assert.deepEqual(trail?.map((step) => step.state), ["prepare", "work"]);
   assert.ok(Date.parse(stateSince!) >= Date.parse(startedAt) && Date.parse(updatedAt) >= Date.parse(stateSince!));
-  assert.deepEqual(await readdir(directory), [`${id}.json`]);
+  assert.deepEqual((await readdir(directory)).sort(), [`${id}.checkpoint.json`, `${id}.json`]);
   assert.equal((await stat(join(directory, `${id}.json`))).mode & 0o777, 0o600);
 
   await writeFile(release, "");
@@ -1067,7 +1077,7 @@ test("a hosted run publishes what machine run does, from its first state to its 
   assert.equal(responded.status, 1);
   assert.match(responded.stderr, refused);
   assert.equal(published()!.status, "waiting");
-  assert.deepEqual(await readdir(directory), [`${id}.json`]);
+  assert.deepEqual((await readdir(directory)).sort(), [`${id}.checkpoint.json`, `${id}.json`]);
   const listed = spawnSync(process.execPath, [resolve("src/cli.ts"), "runs"], {
     encoding: "utf8", env: { ...process.env, MACHINES_RUN_STATUS_DIR: directory },
   });
@@ -1390,7 +1400,7 @@ test("a session's run is published under the id the session gives it, which anot
       human: { prompt: "Continue?" }, answeredBy: "host",
     },
   );
-  assert.deepEqual(await readdir(directory), [`${run.id}.json`]);
+  assert.deepEqual((await readdir(directory)).sort(), [`${run.id}.checkpoint.json`, `${run.id}.json`]);
 
   // The id a session reports for its run is the one to watch it by.
   const watcher = { PATH: process.env.PATH, MACHINES_RUN_STATUS_DIR: directory, MACHINES_RUN_OWNER: "watcher" };

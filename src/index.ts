@@ -1,5 +1,6 @@
 import { agentLimitOf, type AgentLimit } from "./agent-limit.ts";
 import { terminalHuman } from "./terminal-human.ts";
+import { jsonProblem } from "./json.ts";
 
 import {
   createActor,
@@ -9,6 +10,7 @@ import {
   type AnyStateMachine,
   type SnapshotFrom,
   type StateValue,
+  type AnyMachineSnapshot,
 } from "xstate";
 
 export interface Event {
@@ -124,7 +126,18 @@ export type AgentRunner = (
   report?: AgentReporter,
 ) => Event | Promise<Event>;
 
+export interface StateEntry {
+  readonly value: StateValue;
+  readonly context: unknown;
+  readonly kind: "agent" | "operation" | "human" | "final" | "state";
+  readonly enteredAt: string;
+}
+
 export interface RunOptions {
+  readonly onEnter?: (entry: StateEntry) => void;
+  /** Captures mutable working data before XState evaluates a step's input. */
+  readonly onBeforeStep?: (context: unknown) => void;
+  readonly continueAt?: { readonly value: StateValue; readonly context: unknown };
   readonly agents?: Readonly<Record<string, AgentRunner>>;
   readonly human?: HumanRunner;
   readonly onAgentUpdate?: AgentReporter;
@@ -295,7 +308,19 @@ export function final() {
   return { type: "final" } as const;
 }
 
+/** Initialize working data. The launcher's factory-scoped version also restores it. */
+export function data<T extends object>(initial: T): T {
+  if (initial === null || typeof initial !== "object" || Array.isArray(initial)
+    || (Object.getPrototypeOf(initial) !== Object.prototype && Object.getPrototypeOf(initial) !== null)) {
+    throw new Error("p.data() requires a plain object");
+  }
+  const problem = jsonProblem(initial, "data");
+  if (problem) throw new Error(`Cannot save ${problem}`);
+  return initial;
+}
+
 export interface MachinePrimitives {
+  readonly data: typeof data;
   readonly agent: typeof agent;
   readonly final: typeof final;
   readonly human: typeof human;
@@ -363,9 +388,51 @@ export function run<TMachine extends AnyStateMachine>(
           }),
       },
     }) as TMachine;
-    const actor = createActor(runnable);
+    // XState evaluates invoke inputs during the transition, before its microstep
+    // notification. Capture working data first without changing input timing.
+    if (options.onBeforeStep) {
+      const visit = (node: AnyStateMachine["root"]) => {
+        for (const invocation of node.invoke) {
+          const input = invocation.input as unknown;
+          invocation.input = (args: { context: unknown; event: Event; self: unknown }) => {
+            options.onBeforeStep?.(args.context);
+            return typeof input === "function" ? input(args) : input;
+          };
+        }
+        Object.values(node.states).forEach(visit);
+      };
+      visit(runnable.root);
+    }
+    const enter = (snapshot: AnyMachineSnapshot) => {
+      const nodes = snapshot._nodes;
+      const leaf = nodes.at(-1);
+      const kind: StateEntry["kind"] = snapshot.status === "done" ? "final"
+        : leaf?.meta?.[agentMetaKey] ? "agent"
+        : leaf?.invoke.some((invoke) => invoke.src === "human") ? "human"
+        : leaf?.invoke.length ? "operation" : "state";
+      options.onEnter?.({ value: snapshot.value, context: snapshot.context, kind, enteredAt: new Date().toISOString() });
+    };
+    let entered: string | undefined;
+    const actor = createActor(runnable as AnyStateMachine, {
+      ...(options.continueAt ? { snapshot: continuationSnapshot(runnable, options.continueAt) } : {}),
+      inspect(event) {
+        if (event.type !== "@xstate.microstep" || (event.actorRef as { logic?: unknown }).logic !== runnable) return;
+        const snapshot = event.snapshot as AnyMachineSnapshot;
+        const key = JSON.stringify(snapshot.value);
+        // Include reentry transitions, even when the state value stays the same.
+        if (key !== entered || event._transitions.some((transition) => transition.reenter)) {
+          enter(snapshot);
+          entered = key;
+        }
+      },
+    });
+    const initialSnapshot = actor.getSnapshot();
+    if (initialSnapshot.status === "error") {
+      reject(initialSnapshot.error);
+      return;
+    }
     const initialValue = (
-      actor.getSnapshot() as unknown as { readonly value: StateValue }
+      initialSnapshot as unknown as { readonly value: StateValue }
     ).value;
     let previousState = JSON.stringify(initialValue);
 
@@ -379,13 +446,40 @@ export function run<TMachine extends AnyStateMachine>(
         previousState = state;
         options.onState?.(value);
       },
-      complete: () => resolve(actor.getSnapshot()),
+      complete: () => resolve(actor.getSnapshot() as SnapshotFrom<TMachine>),
       error: reject,
     });
 
+    if (entered === undefined) enter(actor.getSnapshot());
+    entered = JSON.stringify(initialValue);
     options.onState?.(initialValue);
+    if (options.continueAt && actor.getSnapshot()._nodes.some((node) => node.invoke.some((invoke) => invoke.src === "human"))) {
+      options.onHumanInput?.(true);
+    }
     actor.start();
+    // xstate.init runs eventless transitions without selecting an external event
+    // handler. This also continues a checkpoint taken in a transient plain state.
+    if (options.continueAt && actor.getSnapshot().status === "active") actor.send({ type: "xstate.init" });
   });
+}
+
+/** Rebuild only active invokes. Restoring an active promise restarts it, without entry actions. */
+function continuationSnapshot(definition: AnyStateMachine, saved: NonNullable<RunOptions["continueAt"]>): AnyMachineSnapshot {
+  const snapshot = definition.resolveState({ value: saved.value, context: saved.context });
+  const persisted = definition.getPersistedSnapshot(snapshot) as unknown as { children: Record<string, unknown> };
+  for (const node of snapshot._nodes) {
+    for (const invocation of node.invoke) {
+      const input = typeof invocation.input === "function"
+        ? invocation.input({ context: saved.context, event: { type: "xstate.init" }, self: undefined as never })
+        : invocation.input;
+      persisted.children[invocation.id] = {
+        src: invocation.src,
+        snapshot: { status: "active", input },
+        syncSnapshot: false,
+      };
+    }
+  }
+  return persisted as unknown as AnyMachineSnapshot;
 }
 
 /** The event a state that names `onLimit` receives. It is plain JSON, so a Machine can keep or publish it. */

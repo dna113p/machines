@@ -39,6 +39,61 @@ Keep top-level evaluation free of side effects. Discovery imports the definition
 and its helpers to inspect metadata. Keep effects inside states: the launcher
 calls the factory before it finishes Agent preflight.
 
+## Saved working data
+
+Use `p.data()` once per factory call for mutable working data that must survive a
+stopped process. It returns a plain object; a continued run receives its saved
+values. Keep effects inside states as usual:
+
+```ts
+import type { Event, MachinePrimitives } from "@dna113p/machines";
+
+export default function review(p: MachinePrimitives, input: string) {
+  const s = p.data({ prUrl: "", feedback: "" });
+  return p.machine({
+    initial: "review",
+    states: {
+      review: p.human(() => `Review ${s.prUrl || input}`, {
+        submitted: {
+          target: "done",
+          actions: ({ event }: { event: Event }) => { s.feedback = String(event.value); },
+        },
+      }),
+      done: p.final(),
+    },
+  });
+}
+```
+
+Machines saves this object and XState `context` at each state entry while run
+status is published. A Machine using only `context` needs no `p.data()` call.
+Ordinary closure variables are not saved. Checkpoints capture data before the
+step's prompt or work starts; mutations made during an interrupted step are lost.
+
+Saveable `p.data()` values are `null`, strings, booleans, finite numbers, arrays of
+saveable values, and plain objects whose string keys hold saveable values. Functions,
+`undefined` (including array elements and holes), symbols, bigints, non-finite
+numbers, class instances such as `Date`, cyclic references, getters, and hidden
+properties are refused with the offending key's path. Use strings for dates and
+plain objects for domain data. Do not keep actor references or other runtime
+resources in saved data or `context`.
+
+Context uses JSON's normal conversion: undefined object properties and functions
+are omitted, dates become strings, and class instances become their enumerable
+properties. Continuing restores those JSON values, without their original types.
+If context cannot be serialized (for example, a cycle or bigint), the run keeps
+going but removes its checkpoint until it enters a state with serializable context.
+Use saveable values in context when you need reliable continuation.
+
+`machine continue <run-id>` reruns the saved state's Agent, Operation, or Human
+request from its start, without rerunning entry actions or earlier states. Step
+input is rebuilt with an `xstate.init` event, rather than the event that originally
+entered that state; keep inputs needed on continuation in saved data or context.
+A step may therefore repeat an external effect completed before interruption. Design
+such steps so repetition is safe. Parallel states can be checkpointed but cannot
+be continued yet. See [continuing runs](integrations.md#continuing-a-run) for the
+file format and process rules.
+
 ## Events and Human input
 
 An Operation or Agent returns `{ type: "eventName", ...data }`. Its state maps
