@@ -2,7 +2,7 @@ import { basename, dirname, isAbsolute, resolve } from "node:path";
 
 import type { AnyStateMachine, SnapshotFrom } from "xstate";
 
-import { assertJsonValue, type JsonValue } from "./json.ts";
+import { assertJsonValue, jsonProblem, type JsonValue } from "./json.ts";
 import { fallbackPresets, type AgentPreset } from "./agent-bindings.ts";
 import { createLimitMemory, defaultProbeMs, limitAwareRunner, type LimitPolicy } from "./agent-limits.ts";
 import { configuredAgentPresets, type LauncherLocation, type MachineSummary, type AgentPresetSummary } from "./catalog.ts";
@@ -12,6 +12,7 @@ export type { LauncherLocation, MachineSummary, AgentPresetSummary } from "./cat
 import { discoverMachines, machinesUserHome } from "./discovery.ts";
 import {
   agent,
+  data as initializeData,
   final,
   human,
   machine,
@@ -21,10 +22,12 @@ import {
   type AgentRunner,
   type RunOptions,
 } from "./index.ts";
-import { machineGraph, type RunGraph } from "./run-graph.ts";
+import { assertSavedState, machineSourceHash, removeCheckpoint, writeCheckpoint, type RunCheckpoint } from "./run-checkpoint.ts";
+import { machineGraph, statePaths, type RunGraph } from "./run-graph.ts";
 
 export interface PrepareMachineRunOptions extends LauncherLocation {
   readonly machine: string;
+  readonly continueRun?: RunCheckpoint;
   readonly input?: JsonValue;
   readonly agents?: Readonly<Record<string, string>>;
   /**
@@ -45,7 +48,7 @@ export interface PreparedMachineRun {
   readonly agentRoles: Readonly<Record<string, string>>;
   /** The definition's states and transitions, for run status; undefined when it is too large to draw. */
   readonly graph?: RunGraph;
-  start(options?: Omit<RunOptions, "agents">): Promise<SnapshotFrom<AnyStateMachine>>;
+  start(options?: Omit<RunOptions, "agents"> & { readonly checkpoint?: { readonly directory: string; readonly id: string } }): Promise<SnapshotFrom<AnyStateMachine>>;
 }
 
 export async function listMachines(location: LauncherLocation = {}): Promise<readonly MachineSummary[]> {
@@ -60,7 +63,7 @@ export async function prepareMachineRun(
   options: PrepareMachineRunOptions,
 ): Promise<PreparedMachineRun> {
   if (options.input !== undefined) assertJsonValue(options.input, "Machine input");
-  const cwd = options.cwd ?? process.cwd();
+  const cwd = resolve(options.cwd ?? process.cwd());
   const home = options.home ?? machinesUserHome();
   const path = await resolveMachine(options.machine, cwd, home);
   const loaded = await loadMachineModule(path);
@@ -71,10 +74,21 @@ export async function prepareMachineRun(
     throw new Error(`Machine "${path}" must default-export a factory`);
   }
 
+  let savedData: object = {};
+  let dataCalled = false;
+  const data = <T extends object>(initial: T): T => {
+    if (dataCalled) throw new Error("p.data() may only be called once per Machine factory");
+    dataCalled = true;
+    initializeData(initial);
+    savedData = options.continueRun ? structuredClone(options.continueRun.data) : initial;
+    return savedData as T;
+  };
   const definition = await loaded.default(
-    { agent, final, human, machine, operation },
+    { agent, final, human, machine, operation, data },
     options.input === undefined ? "" : options.input,
   ) as AnyStateMachine;
+  if (options.continueRun) assertSavedState(definition.root, options.continueRun.state.value);
+  const sourceHash = machineSourceHash(path);
   const configured = await configuredAgentPresets(cwd, home);
   const usedAgentRoles = requiredAgentNames(definition);
   const requiredRoles = new Set([...usedAgentRoles, ...Object.keys(agentRoles)]);
@@ -94,7 +108,54 @@ export async function prepareMachineRun(
     start(runOptions = {}) {
       if (started) throw new Error(`Prepared Machine "${path}" has already started`);
       started = true;
-      return run(definition, { ...runOptions, agents: { ...agents, ...limitAware } });
+      const { checkpoint, ...runtimeOptions } = runOptions;
+      // null means context could not be serialized; skip this checkpoint only.
+      let captured: { data: Record<string, JsonValue>; context: JsonValue } | null | undefined;
+      const capture = (context: unknown) => {
+        try {
+          const problem = jsonProblem(savedData, "data");
+          if (problem) throw new Error(`Cannot save checkpoint: ${problem}`);
+          const data = JSON.parse(JSON.stringify(savedData)) as Record<string, JsonValue>;
+          try {
+            // Context predates checkpoints and may contain runtime objects. Keep
+            // JSON's normal conversions without modifying the running context.
+            const saved = JSON.parse(JSON.stringify({ context })) as { context?: JsonValue };
+            captured = saved.context === undefined ? null : { data, context: saved.context };
+          } catch {
+            captured = null;
+          }
+        } catch (cause) {
+          if (checkpoint) removeCheckpoint(checkpoint.directory, checkpoint.id);
+          throw cause;
+        }
+      };
+      return run(definition, {
+        ...runtimeOptions,
+        agents: { ...agents, ...limitAware },
+        ...(options.continueRun ? { continueAt: { value: options.continueRun.state.value, context: options.continueRun.context } } : {}),
+        ...(checkpoint ? { onBeforeStep: capture, onEnter(entry) {
+          try {
+            if (captured === undefined) capture(entry.context);
+            if (entry.kind === "final" || captured === null) removeCheckpoint(checkpoint.directory, checkpoint.id);
+            else writeCheckpoint(checkpoint.directory, {
+              schemaVersion: 1,
+              id: checkpoint.id,
+              machine: { name: machineName(path), path, sourceHash },
+              input: options.input === undefined ? "" : options.input,
+              agents: options.agents ?? {}, home, cwd,
+              state: { value: entry.value, kind: entry.kind, enteredAt: entry.enteredAt, path: statePaths(entry.value).join(", ") },
+              data: captured!.data,
+              context: captured!.context,
+              writtenAt: new Date().toISOString(),
+            });
+          } catch (cause) {
+            removeCheckpoint(checkpoint.directory, checkpoint.id);
+            throw cause;
+          }
+          captured = undefined;
+          runtimeOptions.onEnter?.(entry);
+        } } : {}),
+      });
     },
   };
 }

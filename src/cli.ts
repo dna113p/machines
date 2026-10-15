@@ -18,6 +18,7 @@ import {
   listMachines,
   prepareMachineRun,
 } from "./launcher.ts";
+import { claimContinuation, type Continuation } from "./run-checkpoint.ts";
 import { inboxHuman, respondToRun } from "./run-inbox.ts";
 import {
   createRunStatusPublisher,
@@ -73,6 +74,12 @@ try {
     console.log(await readFile(machinePath, "utf8"));
   } else if (command === "run" && selector !== undefined) {
     await runMachine(await resolveMachine(selector), argumentsAfterSelector);
+  } else if (command === "continue" && selector !== undefined && argumentsAfterSelector.length === 0) {
+    const continuation = claimContinuation(selector);
+    try {
+      process.chdir(continuation.checkpoint.cwd);
+      await runMachine(continuation.checkpoint.machine.path, [], continuation);
+    } finally { continuation.release(); }
   } else if (listing !== undefined) {
     if (listing.viewer === undefined) listRuns(listing.json, listing.all);
     else listViewerRuns(listing.json, listing.all, listing.viewer);
@@ -91,6 +98,7 @@ try {
       "  machine agents",
       "  machine show <name-or-file>",
       "  machine run <name-or-file> [--agent role=preset]... [--input-file <file|->] [--] [input]",
+      "  machine continue <run-id>",
       "  machine runs [--json] [--all]",
       "  machine runs --for [<session>] [--project <dir>] [--json] [--all]",
       "  machine respond [--question] <run-id> <request-id> [--] <response>",
@@ -119,31 +127,40 @@ async function resolveMachine(selector: string) {
   return found.path;
 }
 
-async function runMachine(machinePath: string, args: string[]) {
-  const invocation = await parseRunArguments(args);
+async function runMachine(machinePath: string, args: string[], continuation?: Continuation) {
+  const invocation = continuation ? {
+    input: continuation.checkpoint.input,
+    agentOverrides: new Map(Object.entries(continuation.checkpoint.agents)),
+  } : await parseRunArguments(args);
   printMachineHeader(machinePath);
   const prepared = await prepareMachineRun({
     cwd: process.cwd(),
     machine: machinePath,
     input: invocation.input,
     agents: Object.fromEntries(invocation.agentOverrides),
+    ...(continuation ? { home: continuation.checkpoint.home, continueRun: continuation.checkpoint } : {}),
   });
   const status = createRunStatus(machinePath);
-  const runId = randomUUID();
+  const runId = continuation?.record.id ?? randomUUID();
   const published = createRunStatusPublisher({
     id: runId,
+    ...(continuation ? { continueRun: continuation } : {}),
     machine: prepared.name,
     path: prepared.path,
     cwd: process.cwd(),
     ...(prepared.graph === undefined ? {} : { graph: prepared.graph }),
-  });
+  }, continuation ? { ...process.env, MACHINES_RUN_STATUS_DIR: continuation.directory } : process.env);
   const statusDirectory = published.directory;
+  if (continuation && statusDirectory === undefined) throw new Error("Cannot continue: could not publish the run status");
+  continuation?.release();
+  if (continuation?.machineChanged) console.error("Continuing on a changed Machine file.");
   // Machines started by this run's Operations and Agents are its sub-runs.
   process.env.MACHINES_RUN_PARENT = runId;
   const observed = runStatusObserver((change) => published.update(change));
 
   try {
     const result = await prepared.start({
+      ...(statusDirectory === undefined ? {} : { checkpoint: { directory: statusDirectory, id: runId } }),
       onAgentUpdate(update) {
         observed.onAgentUpdate(update);
         status.onAgentUpdate(update);

@@ -337,12 +337,13 @@ Empty or whitespace-only summaries leave the field absent. The whole note,
 including its line breaks, is available in JSON. This optional field keeps
 `schemaVersion` at 2; readers should accept records with or without it.
 
-Machine input, output fields other than that summary, and Human responses are
-never recorded. A Human prompt and its choices are written to the `0600` file while the request is
+The status record omits Machine input, output fields other than that summary,
+and Human responses. The checkpoint described below does keep input, saved
+working data, and `context`, which may contain sensitive values. A Human prompt and its choices are written to the `0600` file while the request is
 waiting. The standard directory is private to you; one you name instead should
 be a directory only you can read and write.
 
-Publication cannot change a run. Where the directory cannot be created or
+The first status publication is best effort. Where the directory cannot be created or
 written, as in a read-only home, a sandbox, or a container, a run goes on
 exactly as one with publication off: it is not published, nothing is reported,
 and the directory is not tried again at each state. Reading a directory that
@@ -351,7 +352,7 @@ does not exist yet finds no runs; it is not an error.
 The directory does not grow without bound. Each run that starts removes:
 
 - the record of a run that finished, or whose process is gone, more than an hour
-  ago, with its inbox and any response left for it;
+  ago, with its inbox and any response left for it, unless it has a checkpoint;
 - what an interrupted write or delivery left behind more than an hour ago;
 - an inbox with no record beside it, left when a run was pruned without it,
   more than an hour after it was last written;
@@ -361,6 +362,62 @@ A running or waiting run keeps its record for as long as its process lives.
 Files Machines did not name are never removed, and nothing is removed while no
 run starts. A record whose process id now belongs to another process counts as
 running until that process ends.
+
+### Continuing a run
+
+```sh
+machine continue <run-id>
+```
+
+Every published run keeps `<run-id>.checkpoint.json` beside its status record.
+It is private (`0600`) and replaced atomically at each state entry. A crash during
+replacement leaves the previous checkpoint whole. It contains:
+
+- `schemaVersion: 1` and `id`;
+- `machine: { name, path, sourceHash }`, with the SHA-256 hash of the Machine file;
+- `input`, Agent override bindings in `agents`, `home`, and `cwd`;
+- `state: { value, path, kind, enteredAt }`, with the full XState state value,
+  dotted active paths, and a kind of `agent`, `operation`, `human`, `final`, or `state`;
+- `data`, XState `context`, and `writtenAt`.
+
+No copy of the Machine source is stored. The checkpoint is removed when the run
+reaches a final state; failed and interrupted runs keep theirs, and pruning keeps
+the associated record. Turning `MACHINES_RUN_STATUS_DIR` off also disables
+checkpoints. Once publication succeeds, invalid `p.data()` values or a checkpoint
+write failure fail the run and remove its stale checkpoint, with a diagnostic.
+Context uses normal JSON conversion; if that fails, the run continues and its
+checkpoint is removed until a later state has serializable context. Such a run
+cannot be continued while it has no checkpoint.
+
+Continuation accepts a failed record, or a running/waiting record whose pid is
+dead. A running or waiting run with a live pid, a completed run, and any run with
+no checkpoint are refused with a reason. A private claim prevents two processes
+from continuing the same run; a dead claim owner can be replaced immediately.
+Parallel state values with more than one active path are refused.
+
+The run uses the saved working directory, home, input, and Agent overrides. Its
+id, start time, owner, label, parent, and trail remain, its pid is updated, and a
+previous failure is cleared. The saved step runs again from its start, including
+asking a Human again, without rerunning entry actions. See
+[saved working data](authoring.md#saved-working-data) for serialization rules and
+repeatable steps.
+
+If the Machine file changed but the saved state still exists, continuation uses
+the new file and publishes `continued: { at, machineChanged: true }` in the status
+record. An unchanged file sets `machineChanged: false`. If the saved state is
+missing, continuation names it in an error before any step runs.
+
+A program can continue through the public host API:
+
+```ts
+const run = await startMachineHost({ continue: runId, publishRunStatus: true });
+const result = await run.result;
+```
+
+The host loads the saved launch settings and keeps the same id and record.
+`run.continued.machineChanged` reports a changed Machine. Hosted continuation
+defaults to `publishRunStatus: true` so the host updates that record itself;
+explicitly disabling publication or assigning it to a caller is refused.
 
 ### Answering a waiting run from outside
 

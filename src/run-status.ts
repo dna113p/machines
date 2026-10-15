@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import type { StateValue } from "xstate";
 
@@ -45,6 +45,7 @@ export interface RunStatusRecord {
   readonly trail?: readonly RunTrailStep[];
   readonly startedAt: string;
   readonly updatedAt: string;
+  readonly continued?: { readonly at: string; readonly machineChanged: boolean };
 }
 
 /** The pending Human request: what a surface needs to show it and to answer it. */
@@ -70,6 +71,7 @@ export interface RunStatusLimit {
 }
 
 export interface RunStatusRun {
+  readonly continueRun?: { readonly record: RunStatusRecord; readonly machineChanged: boolean };
   readonly id?: string;
   readonly machine: string;
   readonly path: string;
@@ -181,10 +183,12 @@ export function createRunStatusPublisher(
   const id = run.id ?? randomUUID();
   if (directory === undefined || !isFileSafeId(id)) return disabled;
 
-  const owner = (run.owner ?? runSessionId(environment)) || undefined;
-  const parent = environment.MACHINES_RUN_PARENT || undefined;
-  const label = formatLabel(run.label ?? environment.MACHINES_RUN_LABEL);
-  const startedAt = run.startedAt ?? new Date().toISOString();
+  const previous = run.continueRun?.record;
+  const continued = run.continueRun ? { at: new Date().toISOString(), machineChanged: run.continueRun.machineChanged } : undefined;
+  const owner = previous ? previous.owner : (run.owner ?? runSessionId(environment)) || undefined;
+  const parent = previous ? previous.parent : environment.MACHINES_RUN_PARENT || undefined;
+  const label = previous ? previous.label : formatLabel(run.label ?? environment.MACHINES_RUN_LABEL);
+  const startedAt = previous?.startedAt ?? run.startedAt ?? new Date().toISOString();
   let status: RunStatusRecord["status"] = "running";
   let state: string | undefined;
   let stateSince: string | undefined;
@@ -194,7 +198,7 @@ export function createRunStatusPublisher(
   let deliveries: ReadonlyArray<{ readonly id: string; readonly takenAt: number }> = [];
   let error: string | undefined;
   let note: string | undefined;
-  let trail: RunTrailStep[] = [];
+  let trail: RunTrailStep[] = [...previous?.trail ?? []];
   const enter = (entered: string | undefined, at: string) => {
     const path = entered === undefined ? "" : statePaths(entered).join(", ");
     if (path === "" || trail.at(-1)?.state === path) return;
@@ -204,6 +208,7 @@ export function createRunStatusPublisher(
   const publish = (): boolean => {
     const record: RunStatusRecord = {
       schemaVersion: 2,
+      ...(continued === undefined ? {} : { continued }),
       id,
       pid: process.pid,
       ...(owner === undefined ? {} : { owner }),
@@ -378,6 +383,7 @@ function pruneRunStatuses(directory: string): void {
     }
   };
   for (const { file, record } of readRecordFiles(directory)) {
+    if (existsSync(join(directory, `${record.id}.checkpoint.json`))) continue;
     const settled = record.status === "completed" || record.status === "failed" || !isProcessAlive(record.pid);
     if (!settled || now - Date.parse(record.updatedAt) <= staleAfterMilliseconds) continue;
     // A response nobody collected goes with the run it was meant for, under each
@@ -396,6 +402,10 @@ function pruneRunStatuses(directory: string): void {
   // removes its watch list. Other files are not ours.
   const names = new Set(listNames(directory));
   for (const name of names) {
+    if (/^\.[A-Za-z0-9_-][A-Za-z0-9._-]*\.claim$/u.test(name)) {
+      cleanDeadClaim(join(directory, name));
+      continue;
+    }
     const orphaned = inboxName.test(name) && !names.has(`${basename(name, ".inbox")}.json`);
     const kept = leftoverName.test(name) || orphaned
       ? staleAfterMilliseconds
@@ -408,6 +418,17 @@ function pruneRunStatuses(directory: string): void {
       // Another publisher may have pruned it first.
     }
   }
+}
+
+/** Removes only a dead owner's token; rmdir cannot remove a new, populated claim. */
+export function cleanDeadClaim(directory: string): void {
+  try {
+    for (const token of readdirSync(directory)) {
+      const match = /^(\d+)\.[a-f0-9-]+$/u.exec(token);
+      if (match && !isProcessAlive(Number(match[1]))) rmSync(join(directory, token), { force: true });
+    }
+    rmdirSync(directory);
+  } catch { /* A live owner, another cleaner, or an unrelated file. */ }
 }
 
 function listNames(directory: string): string[] {
@@ -445,7 +466,9 @@ function isRunStatusRecord(value: unknown): value is RunStatusRecord {
   const agent = record.agent as Record<string, unknown> | null | undefined;
   const human = record.human as Record<string, unknown> | null | undefined;
   const limit = record.limit as Record<string, unknown> | null | undefined;
-  return (record.schemaVersion === 1 || record.schemaVersion === 2)
+  const continued = record.continued as Record<string, unknown> | null | undefined;
+  return (continued === undefined || (continued !== null && typeof continued === "object" && isTimestamp(continued.at) && typeof continued.machineChanged === "boolean"))
+    && (record.schemaVersion === 1 || record.schemaVersion === 2)
     && typeof record.id === "string" && record.id !== ""
     && Number.isSafeInteger(record.pid) && (record.pid as number) > 0
     && isOptionalString(record.owner)

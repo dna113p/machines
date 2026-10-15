@@ -245,8 +245,13 @@ Operations and configured Agents run with the launching process's available acce
 and can modify files or contact external services.
 
 Pi and MCP runs belong to the current session. Closing or reloading that session
-terminates its owned hosts; runs are not persisted or resumable. Process shutdown
-does not undo files or Git changes. A Machine owns its own retry, approval, merge,
+terminates its owned hosts. Published runs save a checkpoint at each state entry;
+`machine continue <run-id>` continues an unfinished run after its process stops,
+using the same id and trail. The saved step runs again from its start. Use
+[`p.data()` or XState context](docs/authoring.md#saved-working-data) for data that
+must survive, and see [continuing runs](docs/integrations.md#continuing-a-run) for
+checkpoint files and refusal rules. Process shutdown does not undo files or Git
+changes. A Machine owns its own retry, approval, merge,
 and cleanup decisions. See [Architecture](docs/architecture.md) for ownership and
 process-lifecycle limits.
 

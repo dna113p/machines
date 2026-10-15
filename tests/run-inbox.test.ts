@@ -129,11 +129,13 @@ test("a response that cannot be delivered is refused and delivers nothing", asyn
   const record = await waitingRecord(directory);
   const requestId = record.human!.requestId!;
   const refuse = async (args: readonly string[], message: RegExp, target = directory) => {
+    const completed = readRunStatuses(directory).find((current) => current.id === record.id)?.status === "completed";
+    const files = completed ? [`${record.id}.json`] : [`${record.id}.checkpoint.json`, `${record.id}.json`];
     const refused = machine(target, "respond", ...args);
     assert.equal(refused.status, 1, args.join(" "));
     assert.equal(refused.stdout, "");
     assert.match(refused.stderr, message);
-    assert.deepEqual(await readdir(directory), [`${record.id}.json`]);
+    assert.deepEqual((await readdir(directory)).sort(), files);
   };
 
   await refuse(["unknown-run", requestId, "approve"], /Machine run "unknown-run" is not published in /u);
