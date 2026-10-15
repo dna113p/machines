@@ -11,7 +11,7 @@ import * as primitives from "../src/index.ts";
 import type { MachinePrimitives } from "../src/index.ts";
 import { jsonProblem } from "../src/json.ts";
 import { prepareMachineRun } from "../src/launcher.ts";
-import { checkpointPath, claimContinuation, type RunCheckpoint } from "../src/run-checkpoint.ts";
+import { checkpointPath, claimContinuation, RunNotDueError, writeCheckpoint, type RunCheckpoint } from "../src/run-checkpoint.ts";
 import { createRunStatusPublisher, readRunStatuses } from "../src/run-status.ts";
 
 test("the public module supplies all factory primitives, including validated data", () => {
@@ -20,6 +20,54 @@ test("the public module supplies all factory primitives, including validated dat
   assert.equal(factoryPrimitives.data(initial), initial);
   assert.throws(() => factoryPrimitives.data([]), /plain object/u);
   assert.throws(() => factoryPrimitives.data({ badKey: () => 1 }), /data.badKey/u);
+});
+
+test("a sleeping wait checkpoint round-trips, and an early claim leaves its files untouched", (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "checkpoint-wait-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const path = join(directory, "machine.ts");
+  const now = Date.now();
+  const due = new Date(now + 60_000).toISOString();
+  const saved: RunCheckpoint = {
+    schemaVersion: 1, id: "wait", machine: { name: "machine", path, sourceHash: "old" },
+    input: "", agents: {}, cwd: directory, home: directory, sleep: true,
+    state: { value: "rest", path: "rest", kind: "wait", due, enteredAt: new Date(now).toISOString() },
+    data: {}, context: {}, writtenAt: new Date(now).toISOString(),
+  };
+  writeCheckpoint(directory, saved);
+  const publisher = createRunStatusPublisher({ id: "wait", machine: "machine", path, cwd: directory }, { MACHINES_RUN_STATUS_DIR: directory });
+  publisher.update({ state: "rest" });
+  publisher.sleep(due);
+  const before = readFileSync(checkpointPath(directory, "wait"), "utf8");
+  const status = readFileSync(join(directory, "wait.json"), "utf8");
+  // The Machine file does not even exist: early continuation must not hash/import it.
+  assert.throws(() => claimContinuation("wait", directory, now), (cause: unknown) => cause instanceof RunNotDueError && cause.due === due);
+  assert.equal(existsSync(join(directory, ".wait.claim")), false);
+  assert.equal(readFileSync(checkpointPath(directory, "wait"), "utf8"), before);
+  assert.equal(readFileSync(join(directory, "wait.json"), "utf8"), status);
+  writeFileSync(path, "source");
+  const continuation = claimContinuation("wait", directory, now + 60_000);
+  try {
+    assert.deepEqual(continuation.checkpoint, saved);
+    assert.equal(continuation.record.status, "sleeping");
+    assert.equal(continuation.record.pid, process.pid);
+  } finally { continuation.release(); }
+});
+
+test("a prepared run cannot sleep after its context invalidates the checkpoint", async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "checkpoint-wait-context-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const path = join(directory, "machine.ts");
+  writeFileSync(path, `export const description = "Cannot save this context.";
+export default (p) => p.machine({ context: { value: 1n }, initial: "rest", states: {
+  rest: p.wait({ every: "1d" }, { due: "done" }), done: p.final()
+} });`);
+  const prepared = await prepareMachineRun({ machine: path, cwd: directory, home: directory });
+  await assert.rejects(prepared.start({
+    checkpoint: { directory, id: "wait", sleep: true },
+    onSleep() { assert.fail("run slept without a checkpoint"); },
+  }), /Cannot sleep without a saved checkpoint/u);
+  assert.equal(existsSync(checkpointPath(directory, "wait")), false);
 });
 
 for (const kind of ["operation", "agent", "human"] as const) {

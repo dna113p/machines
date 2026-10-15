@@ -236,7 +236,8 @@ directory is created by the first write, as `0700`, and each file is `0600`:
 }
 ```
 
-`status` is `running`, `waiting`, `completed`, or `failed`. `state` is the current
+`status` is `running`, `waiting`, `sleeping`, `completed`, or `failed`. A sleeping
+run has a `due` timestamp; see [continuing a run](#continuing-a-run). `state` is the current
 state as a string (JSON for a nested state). `agent` is present while an Agent
 state has reported its identity, and `error` after a failure. `owner` is
 `MACHINES_RUN_OWNER` when set, otherwise the session id the coding agent gives
@@ -369,6 +370,21 @@ running until that process ends.
 machine continue <run-id>
 ```
 
+For waits that can last days, start with `machine run <name> --sleep`. At a
+future [timed wait](authoring.md#timed-waits), the CLI writes status `sleeping`
+with an ISO `due` time and ends its process successfully. The checkpoint keeps
+`sleep: true`; every CLI continuation keeps sleeping at subsequent waits. Human
+requests continue to wait in the process. `--sleep` is refused when publication
+is off or the initial status record cannot be written.
+
+Before the deadline, `machine continue <run-id>` reports the due time, exits
+successfully, and changes nothing: it does not claim the run, import its Machine,
+or publish a status. Once due, it takes the wait's `due` transition. A sleeping
+run's recorded pid may have been reused and does not block continuation. Nothing
+wakes it automatically; arrange for an external scheduler to call
+`machine continue <run-id>` when needed. Without `--sleep`, the wait stays an
+in-process timer, including when continued with time left on its saved deadline.
+
 Every published run keeps `<run-id>.checkpoint.json` beside its status record.
 It is private (`0600`) and replaced atomically at each state entry. A crash during
 replacement leaves the previous checkpoint whole. It contains:
@@ -376,8 +392,10 @@ replacement leaves the previous checkpoint whole. It contains:
 - `schemaVersion: 1` and `id`;
 - `machine: { name, path, sourceHash }`, with the SHA-256 hash of the Machine file;
 - `input`, Agent override bindings in `agents`, `home`, and `cwd`;
-- `state: { value, path, kind, enteredAt }`, with the full XState state value,
-  dotted active paths, and a kind of `agent`, `operation`, `human`, `final`, or `state`;
+- `state: { value, path, kind, enteredAt, due? }`, with the full XState state value,
+  dotted active paths, a kind of `agent`, `operation`, `human`, `wait`, `final`, or
+  `state`, and the wait's deadline in `due`;
+- `sleep: true` when the CLI was started with `--sleep`;
 - `data`, XState `context`, and `writtenAt`.
 
 No copy of the Machine source is stored. The checkpoint is removed when the run
@@ -389,8 +407,8 @@ Context uses normal JSON conversion; if that fails, the run continues and its
 checkpoint is removed until a later state has serializable context. Such a run
 cannot be continued while it has no checkpoint.
 
-Continuation accepts a failed record, or a running/waiting record whose pid is
-dead. A running or waiting run with a live pid, a completed run, and any run with
+Continuation accepts a due sleeping record, a failed record, or a running/waiting
+record whose pid is dead. A running or waiting run with a live pid, a completed run, and any run with
 no checkpoint are refused with a reason. A private claim prevents two processes
 from continuing the same run; a dead claim owner can be replaced immediately.
 Parallel state values with more than one active path are refused.

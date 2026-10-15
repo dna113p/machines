@@ -1,4 +1,5 @@
 import { basename, dirname, isAbsolute, resolve } from "node:path";
+import { existsSync } from "node:fs";
 
 import type { AnyStateMachine, SnapshotFrom } from "xstate";
 
@@ -19,10 +20,11 @@ import {
   operation,
   requiredAgentNames,
   run,
+  wait,
   type AgentRunner,
   type RunOptions,
 } from "./index.ts";
-import { assertSavedState, machineSourceHash, removeCheckpoint, writeCheckpoint, type RunCheckpoint } from "./run-checkpoint.ts";
+import { assertSavedState, checkpointPath, machineSourceHash, removeCheckpoint, writeCheckpoint, type RunCheckpoint } from "./run-checkpoint.ts";
 import { machineGraph, statePaths, type RunGraph } from "./run-graph.ts";
 
 export interface PrepareMachineRunOptions extends LauncherLocation {
@@ -48,7 +50,7 @@ export interface PreparedMachineRun {
   readonly agentRoles: Readonly<Record<string, string>>;
   /** The definition's states and transitions, for run status; undefined when it is too large to draw. */
   readonly graph?: RunGraph;
-  start(options?: Omit<RunOptions, "agents"> & { readonly checkpoint?: { readonly directory: string; readonly id: string } }): Promise<SnapshotFrom<AnyStateMachine>>;
+  start(options?: Omit<RunOptions, "agents"> & { readonly checkpoint?: { readonly directory: string; readonly id: string; readonly sleep?: boolean } }): Promise<SnapshotFrom<AnyStateMachine>>;
 }
 
 export async function listMachines(location: LauncherLocation = {}): Promise<readonly MachineSummary[]> {
@@ -84,7 +86,7 @@ export async function prepareMachineRun(
     return savedData as T;
   };
   const definition = await loaded.default(
-    { agent, final, human, machine, operation, data },
+    { agent, final, human, machine, operation, wait, data },
     options.input === undefined ? "" : options.input,
   ) as AnyStateMachine;
   if (options.continueRun) assertSavedState(definition.root, options.continueRun.state.value);
@@ -109,6 +111,7 @@ export async function prepareMachineRun(
       if (started) throw new Error(`Prepared Machine "${path}" has already started`);
       started = true;
       const { checkpoint, ...runtimeOptions } = runOptions;
+      if (runtimeOptions.onSleep && !checkpoint) throw new Error("Sleeping requires a checkpoint");
       // null means context could not be serialized; skip this checkpoint only.
       let captured: { data: Record<string, JsonValue>; context: JsonValue } | null | undefined;
       const capture = (context: unknown) => {
@@ -131,8 +134,15 @@ export async function prepareMachineRun(
       };
       return run(definition, {
         ...runtimeOptions,
+        ...(runtimeOptions.onSleep ? { onSleep(due: string) {
+          if (!checkpoint || !existsSync(checkpointPath(checkpoint.directory, checkpoint.id))) {
+            throw new Error("Cannot sleep without a saved checkpoint");
+          }
+          runtimeOptions.onSleep?.(due);
+        } } : {}),
         agents: { ...agents, ...limitAware },
-        ...(options.continueRun ? { continueAt: { value: options.continueRun.state.value, context: options.continueRun.context } } : {}),
+        ...(options.continueRun ? { continueAt: { value: options.continueRun.state.value, context: options.continueRun.context,
+          ...(options.continueRun.state.due === undefined ? {} : { due: options.continueRun.state.due }) } } : {}),
         ...(checkpoint ? { onBeforeStep: capture, onEnter(entry) {
           try {
             if (captured === undefined) capture(entry.context);
@@ -143,7 +153,9 @@ export async function prepareMachineRun(
               machine: { name: machineName(path), path, sourceHash },
               input: options.input === undefined ? "" : options.input,
               agents: options.agents ?? {}, home, cwd,
-              state: { value: entry.value, kind: entry.kind, enteredAt: entry.enteredAt, path: statePaths(entry.value).join(", ") },
+              ...(checkpoint.sleep ? { sleep: true } : {}),
+              state: { value: entry.value, kind: entry.kind, enteredAt: entry.enteredAt, path: statePaths(entry.value).join(", "),
+                ...(entry.due === undefined ? {} : { due: entry.due }) },
               data: captured!.data,
               context: captured!.context,
               writtenAt: new Date().toISOString(),

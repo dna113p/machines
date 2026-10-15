@@ -1,6 +1,7 @@
 import { agentLimitOf, type AgentLimit } from "./agent-limit.ts";
 import { terminalHuman } from "./terminal-human.ts";
 import { jsonProblem } from "./json.ts";
+import { setTimeout as delay } from "node:timers/promises";
 
 import {
   createActor,
@@ -129,15 +130,18 @@ export type AgentRunner = (
 export interface StateEntry {
   readonly value: StateValue;
   readonly context: unknown;
-  readonly kind: "agent" | "operation" | "human" | "final" | "state";
+  readonly kind: "agent" | "operation" | "human" | "wait" | "final" | "state";
   readonly enteredAt: string;
+  readonly due?: string;
 }
 
 export interface RunOptions {
   readonly onEnter?: (entry: StateEntry) => void;
   /** Captures mutable working data before XState evaluates a step's input. */
   readonly onBeforeStep?: (context: unknown) => void;
-  readonly continueAt?: { readonly value: StateValue; readonly context: unknown };
+  readonly continueAt?: { readonly value: StateValue; readonly context: unknown; readonly due?: string };
+  /** Stop at a future timed wait, after its entry has been checkpointed. */
+  readonly onSleep?: (due: string) => void;
   readonly agents?: Readonly<Record<string, AgentRunner>>;
   readonly human?: HumanRunner;
   readonly onAgentUpdate?: AgentReporter;
@@ -156,6 +160,9 @@ const machines = setup({
     humanInputStarted: () => {},
   },
   actors: {
+    wait: fromPromise<Event>(async () => {
+      throw new Error("Timed waits require run()");
+    }),
     agent: fromPromise<Event, AgentInvocation>(async () => {
       throw new Error("This Machine reached an Agent state, but no Agent runner was supplied");
     }),
@@ -166,8 +173,31 @@ const machines = setup({
 });
 
 const agentMetaKey = "machines.agent";
+const waitMetaKey = "machines.wait";
 
 export const machine = machines.createMachine;
+
+/** A timed state whose due event follows a positive interval. */
+export function wait<const TTransitions extends Readonly<Record<string, unknown>>>(
+  options: { readonly every: number | string },
+  on: TTransitions,
+) {
+  const units: Record<string, number> = { ms: 1, s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 };
+  const duration = typeof options.every === "string" ? /^(\d+(?:\.\d+)?)(ms|s|m|h|d)$/u.exec(options.every) : null;
+  const ms = typeof options.every === "number" ? options.every
+    : duration ? Number(duration[1]) * units[duration[2]!]! : Number.NaN;
+  if (!Number.isFinite(ms) || ms < 1 || ms > 8.64e15 - Date.now()) {
+    throw new Error("Wait every must be positive milliseconds or a duration such as 10m");
+  }
+  if (!Object.hasOwn(on, "due") || on.due === undefined) {
+    throw new Error("Timed waits must handle a due event");
+  }
+  return {
+    meta: { [waitMetaKey]: { ms } },
+    invoke: { src: "wait", ...actorLifecycle("Wait", on) },
+    on,
+  } as const;
+}
 
 export function operation<const TTransitions extends Readonly<Record<string, unknown>>>(
   runOperation: () => Event | Promise<Event>,
@@ -260,7 +290,7 @@ export function agent<const TTransitions extends Readonly<Record<string, unknown
 }
 
 function actorLifecycle(
-  actorName: "Agent" | "Human" | "Operation",
+  actorName: "Agent" | "Human" | "Operation" | "Wait",
   on: Readonly<Record<string, unknown>>,
 ) {
   return {
@@ -326,6 +356,7 @@ export interface MachinePrimitives {
   readonly human: typeof human;
   readonly machine: typeof machine;
   readonly operation: typeof operation;
+  readonly wait: typeof wait;
 }
 
 export function requiredAgentNames(
@@ -347,12 +378,33 @@ export function run<TMachine extends AnyStateMachine>(
     const agentRunners = options.agents ?? {};
     assertAgentRunners(agentRunners);
     assertRequiredAgentRunners(definition, agentRunners);
+    let waitDue: string | undefined;
     const runnable = definition.provide({
       actions: {
         humanInputFinished: () => options.onHumanInput?.(false),
         humanInputStarted: () => options.onHumanInput?.(true),
       },
       actors: {
+        wait: fromPromise<Event>(async ({ signal }) => {
+          // Initial invokes and restored invokes start before entry actions.
+          // The entry observer has set and saved the due time by this microtask.
+          await Promise.resolve();
+          signal.throwIfAborted();
+          const due = waitDue;
+          if (due === undefined) throw new Error("Timed wait has no due time");
+          if (options.onSleep && Date.parse(due) > Date.now()) {
+            options.onSleep(due);
+            queueMicrotask(() => actor.stop());
+            await new Promise<void>((done) => signal.addEventListener("abort", () => done(), { once: true }));
+          } else {
+            // Node timers cap at about 25 days. Recheck the deadline after each
+            // chunk so even longer waits never fire early or overflow.
+            while (Date.parse(due) > Date.now()) {
+              await delay(Math.min(Date.parse(due) - Date.now(), 2_147_483_647), undefined, { signal });
+            }
+          }
+          return { type: "due" };
+        }),
         human: fromPromise<Event, HumanRequest>(async ({ input }) =>
           submittedHumanEvent(input, options.human ?? terminalHuman)
         ),
@@ -403,14 +455,22 @@ export function run<TMachine extends AnyStateMachine>(
       };
       visit(runnable.root);
     }
+    let firstEntry = true;
     const enter = (snapshot: AnyMachineSnapshot) => {
       const nodes = snapshot._nodes;
       const leaf = nodes.at(-1);
       const kind: StateEntry["kind"] = snapshot.status === "done" ? "final"
         : leaf?.meta?.[agentMetaKey] ? "agent"
         : leaf?.invoke.some((invoke) => invoke.src === "human") ? "human"
+        : leaf?.meta?.[waitMetaKey] ? "wait"
         : leaf?.invoke.length ? "operation" : "state";
-      options.onEnter?.({ value: snapshot.value, context: snapshot.context, kind, enteredAt: new Date().toISOString() });
+      const enteredAt = new Date().toISOString();
+      const ms = (leaf?.meta?.[waitMetaKey] as { ms: number } | undefined)?.ms;
+      waitDue = kind === "wait" ? (firstEntry ? options.continueAt?.due : undefined)
+        ?? new Date(Date.parse(enteredAt) + ms!).toISOString() : undefined;
+      firstEntry = false;
+      options.onEnter?.({ value: snapshot.value, context: snapshot.context, kind, enteredAt,
+        ...(waitDue === undefined ? {} : { due: waitDue }) });
     };
     let entered: string | undefined;
     const actor = createActor(runnable as AnyStateMachine, {
@@ -547,7 +607,7 @@ function assertRequiredAgentRunners(
 }
 
 function assertHandledEvent(
-  actorName: "Agent" | "Human" | "Operation",
+  actorName: "Agent" | "Human" | "Operation" | "Wait",
   event: unknown,
   transitions: Readonly<Record<string, unknown>>,
   state: StateValue,
@@ -567,7 +627,7 @@ function assertHandledEvent(
 }
 
 function actorError(
-  actorName: "Agent" | "Human" | "Operation",
+  actorName: "Agent" | "Human" | "Operation" | "Wait",
   cause: unknown,
   state: StateValue,
 ): Error {

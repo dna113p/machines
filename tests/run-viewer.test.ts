@@ -192,7 +192,7 @@ test("the status line's own copy of the rule shows the same runs in the same ord
     [], [{ text: "org-9" }], [{ text: "r00" }], [{ dir: "/elsewhere" }], [{ dir: "/work/project/" }],
     [{ text: "org-90" }, { dir: "/elsewhere/child" }, { text: "r0010" }, { text: "org-90" }], [{ dir: "elsewhere" }],
   ];
-  const symbols = { running: "●", waiting: "◆", completed: "✓", failed: "✕", lost: "✕" } satisfies Record<ViewerRun["status"], string>;
+  const symbols = { running: "●", waiting: "◆", sleeping: "●", completed: "✓", failed: "✕", lost: "✕" } satisfies Record<ViewerRun["status"], string>;
   const isAlive = (pid: number) => pid !== 4242;
   let compared = 0;
   let shown = 0;

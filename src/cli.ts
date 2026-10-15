@@ -18,7 +18,7 @@ import {
   listMachines,
   prepareMachineRun,
 } from "./launcher.ts";
-import { claimContinuation, type Continuation } from "./run-checkpoint.ts";
+import { claimContinuation, RunNotDueError, type Continuation } from "./run-checkpoint.ts";
 import { inboxHuman, respondToRun } from "./run-inbox.ts";
 import {
   createRunStatusPublisher,
@@ -97,7 +97,7 @@ try {
       "  machine list",
       "  machine agents",
       "  machine show <name-or-file>",
-      "  machine run <name-or-file> [--agent role=preset]... [--input-file <file|->] [--] [input]",
+      "  machine run <name-or-file> [--sleep] [--agent role=preset]... [--input-file <file|->] [--] [input]",
       "  machine continue <run-id>",
       "  machine runs [--json] [--all]",
       "  machine runs --for [<session>] [--project <dir>] [--json] [--all]",
@@ -110,8 +110,12 @@ try {
     ].join("\n"));
   }
 } catch (cause) {
-  console.error(cause instanceof Error ? cause.message : String(cause));
-  process.exitCode = 1;
+  if (command === "continue" && cause instanceof RunNotDueError) {
+    console.log(`Run ${selector} is not due until ${cause.due}.`);
+  } else {
+    console.error(cause instanceof Error ? cause.message : String(cause));
+    process.exitCode = 1;
+  }
 }
 
 async function resolveMachine(selector: string) {
@@ -131,7 +135,9 @@ async function runMachine(machinePath: string, args: string[], continuation?: Co
   const invocation = continuation ? {
     input: continuation.checkpoint.input,
     agentOverrides: new Map(Object.entries(continuation.checkpoint.agents)),
+    sleep: continuation.checkpoint.sleep === true,
   } : await parseRunArguments(args);
+  if (invocation.sleep) requireStatusDirectory();
   printMachineHeader(machinePath);
   const prepared = await prepareMachineRun({
     cwd: process.cwd(),
@@ -152,15 +158,21 @@ async function runMachine(machinePath: string, args: string[], continuation?: Co
   }, continuation ? { ...process.env, MACHINES_RUN_STATUS_DIR: continuation.directory } : process.env);
   const statusDirectory = published.directory;
   if (continuation && statusDirectory === undefined) throw new Error("Cannot continue: could not publish the run status");
+  if (invocation.sleep && statusDirectory === undefined) throw new Error("Cannot sleep: could not publish the run status");
   continuation?.release();
   if (continuation?.machineChanged) console.error("Continuing on a changed Machine file.");
   // Machines started by this run's Operations and Agents are its sub-runs.
   process.env.MACHINES_RUN_PARENT = runId;
   const observed = runStatusObserver((change) => published.update(change));
+  let sleptUntil: string | undefined;
 
   try {
     const result = await prepared.start({
-      ...(statusDirectory === undefined ? {} : { checkpoint: { directory: statusDirectory, id: runId } }),
+      ...(statusDirectory === undefined ? {} : { checkpoint: { directory: statusDirectory, id: runId, sleep: invocation.sleep } }),
+      ...(invocation.sleep ? { onSleep(due: string) {
+        published.sleep(due);
+        sleptUntil = due;
+      } } : {}),
       onAgentUpdate(update) {
         observed.onAgentUpdate(update);
         status.onAgentUpdate(update);
@@ -190,6 +202,10 @@ async function runMachine(machinePath: string, args: string[], continuation?: Co
       },
     });
 
+    if (sleptUntil !== undefined) {
+      console.log(`--> sleeping in ${formatState(result.value)} until ${sleptUntil}. Continue with: machine continue ${runId}`);
+      return;
+    }
     published.finish({ state: result.value, note: runOutputSummary(result.output) });
     status.succeed();
     console.log(`--> ${String(result.value)}`);
@@ -444,6 +460,7 @@ function requireStatusDirectory() {
 
 async function parseRunArguments(args: string[]) {
   let inputFile: string | undefined;
+  let sleep = false;
   const agentOverrides = new Map<string, string>();
   let index = 0;
 
@@ -457,6 +474,11 @@ async function parseRunArguments(args: string[]) {
       if (inputFile !== undefined || args[index + 1] === undefined) throw new Error("Expected one --input-file <file|->");
       inputFile = args[index + 1];
       index += 2;
+      continue;
+    }
+    if (argument === "--sleep") {
+      sleep = true;
+      index += 1;
       continue;
     }
     if (argument !== "--agent") break;
@@ -496,7 +518,7 @@ async function parseRunArguments(args: string[]) {
     assertJsonValue(parsed, "Machine input");
     input = parsed;
   }
-  return { agentOverrides, input };
+  return { agentOverrides, input, sleep };
 }
 
 function printMachineListing(found: MachineSummary, separate: boolean) {
