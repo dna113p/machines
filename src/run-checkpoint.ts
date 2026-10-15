@@ -20,6 +20,16 @@ export interface RunCheckpoint {
   readonly data: Record<string, JsonValue>;
   readonly context: JsonValue;
   readonly writtenAt: string;
+  readonly sleep?: true;
+}
+
+/** An early continuation is read-only, including for callers other than the CLI. */
+export class RunNotDueError extends Error {
+  readonly due: string;
+  constructor(due: string) {
+    super(`Run is not due until ${due}.`);
+    this.due = due;
+  }
 }
 
 export interface Continuation {
@@ -62,7 +72,7 @@ export function removeCheckpoint(directory: string, id: string): void {
 }
 
 /** Claim before importing the Machine or doing any of its work. Dead claim owners can be replaced. */
-export function claimContinuation(id: string, directory = runStatusDirectory()): Continuation {
+export function claimContinuation(id: string, directory = runStatusDirectory(), now = Date.now()): Continuation {
   if (directory === undefined) throw new Error("Cannot continue: run status publication is off");
   if (!isFileSafeId(id)) throw new Error(`Invalid run id "${id}"`);
   const claim = join(directory, `.${id}.claim`);
@@ -71,7 +81,10 @@ export function claimContinuation(id: string, directory = runStatusDirectory()):
   const file = checkpointPath(directory, id);
   if (!existsSync(file)) throw new Error(`Cannot continue run "${id}": no checkpoint (the run may have reached a final state)`);
   if (record.status === "completed") throw new Error(`Cannot continue run "${id}": it completed`);
-  if (record.status !== "failed" && isProcessAlive(record.pid)) {
+  if (record.status === "sleeping" && record.due && Date.parse(record.due) > now) {
+    throw new RunNotDueError(record.due);
+  }
+  if (record.status !== "failed" && record.status !== "sleeping" && isProcessAlive(record.pid)) {
     throw new Error(`Cannot continue run "${id}": its process ${record.pid} is still alive`);
   }
   const token = `${process.pid}.${randomUUID()}`;
@@ -100,8 +113,12 @@ export function claimContinuation(id: string, directory = runStatusDirectory()):
     const checkpoint = readCheckpoint(file, id);
     // A concurrent continuation may have published its pid before we acquired the claim.
     const current = readRunStatuses(directory).find((candidate) => candidate.id === id);
-    if (!current || (current.status !== "failed" && isProcessAlive(current.pid))) {
+    if (!current || (current.status !== "failed" && current.status !== "sleeping" && isProcessAlive(current.pid))) {
       throw new Error(`Cannot continue run "${id}": its process is still alive`);
+    }
+    // A preceding continuation may have slept again before we took the claim.
+    if (current.status === "sleeping" && current.due && Date.parse(current.due) > now) {
+      throw new RunNotDueError(current.due);
     }
     return { directory, checkpoint, record: current, machineChanged: machineSourceHash(checkpoint.machine.path) !== checkpoint.machine.sourceHash, release };
   } catch (cause) {
@@ -117,7 +134,10 @@ function readCheckpoint(file: string, id: string): RunCheckpoint {
     || typeof c.machine.name !== "string" || typeof c.machine.path !== "string" || typeof c.machine.sourceHash !== "string"
     || typeof c.cwd !== "string" || typeof c.home !== "string" || !c.state || typeof c.state !== "object" || !("value" in c.state)
     || typeof c.state.path !== "string" || typeof c.state.enteredAt !== "string" || !Number.isFinite(Date.parse(c.state.enteredAt))
-    || !["agent", "operation", "human", "final", "state"].includes(c.state.kind)
+    || !["agent", "operation", "human", "wait", "final", "state"].includes(c.state.kind)
+    || (c.state.due !== undefined && (typeof c.state.due !== "string" || !Number.isFinite(Date.parse(c.state.due))))
+    || (c.state.kind === "wait" && c.state.due === undefined)
+    || (c.sleep !== undefined && c.sleep !== true)
     || typeof c.writtenAt !== "string" || !Number.isFinite(Date.parse(c.writtenAt))
     || !c.data || Array.isArray(c.data) || typeof c.data !== "object" || !("context" in c) || !("input" in c)
     || !c.agents || typeof c.agents !== "object" || Array.isArray(c.agents) || Object.values(c.agents).some((value) => typeof value !== "string")) {

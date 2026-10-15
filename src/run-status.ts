@@ -21,7 +21,9 @@ export interface RunStatusRecord {
   readonly machine: string;
   readonly path: string;
   readonly cwd: string;
-  readonly status: "running" | "waiting" | "completed" | "failed";
+  readonly status: "running" | "waiting" | "sleeping" | "completed" | "failed";
+  /** When a sleeping timed wait is due, in ISO format. */
+  readonly due?: string;
   readonly state?: string;
   /** When the current state was entered. */
   readonly stateSince?: string;
@@ -108,6 +110,7 @@ export interface RunStatusPublisher {
    */
   readonly directory: string | undefined;
   update(change: RunStatusChange): void;
+  sleep(due: string): void;
   finish(outcome: RunStatusOutcome): void;
 }
 
@@ -124,7 +127,7 @@ export const watchListName = /^\.watch\..+\.json$/u;
 const leftoverName = /^\.[A-Za-z0-9._-]+\.(?:\d+\.\d+\.tmp|[A-Za-z0-9_-]+\.inbox\.(?:sent|taken))$/u;
 // A run's inbox, which goes with its record: one without a record belongs to a run that was pruned.
 const inboxName = /^[A-Za-z0-9_-][A-Za-z0-9._-]*\.inbox$/u;
-const disabled: RunStatusPublisher = { directory: undefined, update() {}, finish() {} };
+const disabled: RunStatusPublisher = { directory: undefined, update() {}, sleep() {}, finish() {} };
 let temporaryFiles = 0;
 
 /**
@@ -190,6 +193,7 @@ export function createRunStatusPublisher(
   const label = previous ? previous.label : formatLabel(run.label ?? environment.MACHINES_RUN_LABEL);
   const startedAt = previous?.startedAt ?? run.startedAt ?? new Date().toISOString();
   let status: RunStatusRecord["status"] = "running";
+  let due: string | undefined;
   let state: string | undefined;
   let stateSince: string | undefined;
   let agent: RunStatusAgent | undefined;
@@ -218,6 +222,7 @@ export function createRunStatusPublisher(
       path: run.path,
       cwd: run.cwd,
       status,
+      ...(due === undefined ? {} : { due }),
       ...(state === undefined ? {} : { state }),
       ...(stateSince === undefined ? {} : { stateSince }),
       ...(agent === undefined ? {} : { agent }),
@@ -262,7 +267,7 @@ export function createRunStatusPublisher(
   return {
     directory,
     update(change) {
-      if (status === "completed" || status === "failed") return;
+      if (status === "completed" || status === "failed" || status === "sleeping") return;
       const nextState = "state" in change ? formatState(change.state) : state;
       const next = {
         status: change.status ?? status,
@@ -286,8 +291,17 @@ export function createRunStatusPublisher(
       ({ status, state, agent, limit, human, deliveries } = next);
       publish();
     },
+    sleep(until) {
+      if (status === "completed" || status === "failed" || status === "sleeping") return;
+      status = "sleeping";
+      due = until;
+      agent = undefined;
+      limit = undefined;
+      human = undefined;
+      publish();
+    },
     finish(outcome) {
-      if (status === "completed" || status === "failed") return;
+      if (status === "completed" || status === "failed" || status === "sleeping") return;
       if ("error" in outcome) {
         status = "failed";
         error = outcome.error;
@@ -475,11 +489,13 @@ function isRunStatusRecord(value: unknown): value is RunStatusRecord {
     && isOptionalString(record.parent)
     && isOptionalString(record.label)
     && (record.stateSince === undefined || isTimestamp(record.stateSince))
+    && (record.due === undefined || isTimestamp(record.due))
+    && (record.status !== "sleeping" || isTimestamp(record.due))
     && typeof record.machine === "string"
     && typeof record.path === "string"
     && typeof record.cwd === "string"
     && (record.status === "running" || record.status === "waiting"
-      || record.status === "completed" || record.status === "failed")
+      || record.status === "sleeping" || record.status === "completed" || record.status === "failed")
     && isOptionalString(record.state)
     && (agent === undefined || (agent !== null && typeof agent === "object" && typeof agent.harness === "string"
       && isOptionalString(agent.model) && isOptionalString(agent.thinking)))

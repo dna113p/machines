@@ -31,6 +31,24 @@ const structured = resolve("tests/fixtures/structured.machine.ts");
 /** Where a run publishes when nothing says where, under the home it is given. */
 const standardDirectory = (home: string) => join(home, ".local", "state", "machines", "runs");
 
+test("sleeping status records preserve their deadline and ignore later updates", async (context) => {
+  const directory = await temporaryDirectory(context);
+  const publisher = createRunStatusPublisher({ ...run, id: "sleep" }, { MACHINES_RUN_STATUS_DIR: directory });
+  publisher.update({ state: "rest", limit: { text: "old limit" }, human: { prompt: "old request" } });
+  const due = new Date(Date.now() + 60_000).toISOString();
+  publisher.sleep(due);
+  const [record] = readRunStatuses(directory);
+  assert.equal(record?.status, "sleeping");
+  assert.equal(record.due, due);
+  assert.equal(record.state, "rest");
+  assert.equal(record.human, undefined);
+  assert.equal(record.limit, undefined);
+  const before = await readFile(join(directory, "sleep.json"), "utf8");
+  publisher.update({ status: "running", state: "wrong" });
+  publisher.finish({ state: "wrong" });
+  assert.equal(await readFile(join(directory, "sleep.json"), "utf8"), before);
+});
+
 test("the directory is the user's own unless MACHINES_RUN_STATUS_DIR moves it or turns publication off", (context) => {
   const cases: ReadonlyArray<readonly [NodeJS.ProcessEnv, string | undefined]> = [
     [{}, standardDirectory(homedir())],
@@ -1435,7 +1453,7 @@ test("the integrations guide describes a finished run's note for hosts that read
     guide.indexOf("\n## Run status for host status lines\n"),
     guide.indexOf("\n### Answering a waiting run from outside\n"),
   );
-  assert.match(described, /`status` is `running`, `waiting`, `completed`, or `failed`/u);
+  assert.match(described, /`status` is `running`, `waiting`, `sleeping`, `completed`, or `failed`/u);
   const paragraphs = described.split(/\n{2,}/u).filter((paragraph) => paragraph.includes("`note`"));
   assert.notDeepEqual(paragraphs, [], "the record description names `note`");
   // What a host needs to use it: where it comes from, and how long it can be.

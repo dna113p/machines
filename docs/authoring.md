@@ -94,6 +94,28 @@ such steps so repetition is safe. Parallel states can be checkpointed but cannot
 be continued yet. See [continuing runs](integrations.md#continuing-a-run) for the
 file format and process rules.
 
+## Timed waits
+
+Use `p.wait({ every }, { due: target })` to wait before taking the `due`
+transition:
+
+```ts
+rest: p.wait({ every: "10m" }, { due: "check" }),
+```
+
+`every` is a positive number of milliseconds (at least 1), or a number followed
+by `ms`, `s`, `m`, `h`, or `d`, such as `500ms`, `10m`, or `1d`. Each entry starts
+a new interval from that entry's time. The checkpoint records kind `wait` and an
+absolute ISO `due` time. Continuing a wait uses that saved deadline, waits only
+for the time left, and takes `due` immediately if the deadline has passed.
+
+By default the timer keeps the process running. Start with
+`machine run <name> --sleep` to end the process at each future timed wait;
+`machine continue <run-id>` wakes it once due. Continuations keep this option.
+Run status publication must be on. Nothing wakes a sleeping run automatically;
+an external scheduler can call `machine continue`. Human requests keep their
+normal in-process behavior. See [continuing runs](integrations.md#continuing-a-run).
+
 ## Events and Human input
 
 An Operation or Agent returns `{ type: "eventName", ...data }`. Its state maps

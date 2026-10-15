@@ -193,7 +193,7 @@ npx machine list
 ```
 
 The package contains JavaScript and TypeScript declarations. Application code can
-import `{ machine, agent, human, operation, final, run }` from `"@dna113p/machines"`.
+import `{ machine, agent, human, operation, wait, final, run }` from `"@dna113p/machines"`.
 Workflow definitions remain ordinary TypeScript outside `node_modules`.
 
 For **Codex MCP**, **the portable Codex plugin**, or **the Pi extension**, follow
@@ -236,6 +236,20 @@ showing a project's own panels; see
 [watching runs in a browser](docs/integrations.md#watching-runs-in-a-browser).
 
 ## Execution model and limitations
+
+Use `p.wait({ every: "10m" }, { due: "check" })` for a
+[timed wait](docs/authoring.md#timed-waits). By default its timer keeps the process
+running. To sleep between checks without keeping a process open:
+
+```sh
+machine run my-workflow --sleep
+machine continue <run-id>
+```
+
+`--sleep` requires run status publication. A sleeping run records its `due` time;
+continuing before then reports that time and changes nothing. Once due, it takes
+the `due` transition, keeping `--sleep` for the next wait. Nothing wakes the run
+automatically: an external scheduler can call `machine continue`.
 
 Machine definitions and Agent preset files are **trusted executable code**.
 Discovery imports them to inspect metadata, including their relative imports.
