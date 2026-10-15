@@ -9,7 +9,7 @@ import { inspect, stripVTControlCharacters } from "node:util";
 import { fileURLToPath } from "node:url";
 
 import yoctoSpinner from "yocto-spinner";
-import { bold, cyan, dim, green, magenta, red, yellow } from "yoctocolors";
+import { blue, bold, cyan, dim, green, magenta, red, yellow } from "yoctocolors";
 
 import { assertJsonValue, isJsonValue, type JsonValue } from "./json.ts";
 import { discoverMachines, machinesUserHome } from "./discovery.ts";
@@ -41,7 +41,7 @@ import {
   writeRunWatches,
   type RunWatch,
 } from "./run-watch.ts";
-import { runsForViewer, type ViewerRun } from "./run-viewer.ts";
+import { runSleep, runsForViewer, type ViewerRun } from "./run-viewer.ts";
 import { startRunUi, uiProjectDir } from "./run-ui.ts";
 
 import type { StateValue } from "xstate";
@@ -197,7 +197,7 @@ async function runMachine(machinePath: string, args: string[], continuation?: Co
   process.env.MACHINES_RUN_PARENT = runId;
   const observed = runStatusObserver((change) => published.update(change));
   let sleptUntil: string | undefined;
-  let sleptForAnswer = false;
+  let sleptForAnswer: string | undefined;
 
   try {
     const result = await prepared.start({
@@ -209,9 +209,7 @@ async function runMachine(machinePath: string, args: string[], continuation?: Co
       }, onHumanSleep(request) {
         const requestId = randomUUID();
         published.sleepForAnswer({ ...request, requestId });
-        sleptForAnswer = true;
-        console.log(`--> sleeping for an answer. Answer with: machine respond ${runId} ${requestId} <response>`);
-        console.log(`Then wake it with: machine continue ${runId}`);
+        sleptForAnswer = requestId;
       } } : {}),
       onAgentUpdate(update) {
         observed.onAgentUpdate(update);
@@ -242,7 +240,11 @@ async function runMachine(machinePath: string, args: string[], continuation?: Co
       },
     });
 
-    if (sleptForAnswer) return;
+    if (sleptForAnswer !== undefined) {
+      console.log(`--> sleeping in ${formatState(result.value)} for an answer. Answer with: machine respond ${runId} ${sleptForAnswer} <response>`);
+      console.log(`Then wake it with: machine continue ${runId}`);
+      return;
+    }
     if (sleptUntil !== undefined) {
       console.log(`--> sleeping in ${formatState(result.value)} until ${sleptUntil}. Continue with: machine continue ${runId}`);
       return;
@@ -268,10 +270,14 @@ function listRuns(json: boolean, all: boolean) {
   // Without --all, only the runs that can still change or be answered.
   const runs = all ? published : published.filter(isActiveRun);
   if (json) {
-    console.log(JSON.stringify(runs, null, 2));
+    const now = Date.now();
+    console.log(JSON.stringify(runs.map((record) => {
+      const sleep = runSleep(record, now);
+      return sleep === undefined ? record : { ...record, sleep };
+    }), null, 2));
     return;
   }
-  if (runs.length === 0) console.log(all ? "No Machine runs are published." : "No Machine runs are running or waiting.");
+  if (runs.length === 0) console.log(all ? "No Machine runs are published." : "No Machine runs are running, waiting or sleeping.");
   const session = runSessionId();
   const watches = session === undefined ? [] : readRunWatches(directory, session);
   runs.forEach((record, index) => {
@@ -347,12 +353,12 @@ function publishedRuns(directory: string) {
 function runStatus(record: RunStatusRecord | ViewerRun) {
   // A viewer's run already has the status its process leaves it.
   if ("shown" in record) return record.status;
-  return record.status !== "completed" && record.status !== "failed" && !isProcessAlive(record.pid) ? "lost" : record.status;
+  return (record.status === "running" || record.status === "waiting") && !isProcessAlive(record.pid) ? "lost" : record.status;
 }
 
 function isActiveRun(record: RunStatusRecord) {
   const status = runStatus(record);
-  return status === "running" || status === "waiting";
+  return status === "running" || status === "waiting" || status === "sleeping";
 }
 
 function watch(given: string[]) {
@@ -627,7 +633,8 @@ function finishedRunNote(record: RunStatusRecord | ViewerRun): string | undefine
 function printRunListing(record: RunStatusRecord | ViewerRun, separate: boolean, watched: boolean) {
   const state = record.state ?? "starting";
   const recorded = runStatus(record);
-  const human = recorded === "waiting" ? record.human : undefined;
+  const sleep = runSleep(record);
+  const human = recorded === "waiting" || sleep?.for === "answer" ? record.human : undefined;
   // A run that finished or lost its process is no longer waiting for anything.
   const limit = recorded === "running" || recorded === "waiting" ? record.limit : undefined;
   const details = human === undefined ? (limit === undefined ? [] : [plain(limit.text)]) : [
@@ -636,8 +643,14 @@ function printRunListing(record: RunStatusRecord | ViewerRun, separate: boolean,
     ...(record.answeredBy === "host" ? ["answered through its host"] : []),
     ...(human.choices === undefined ? [] : [`choices: ${human.choices.map(plain).join(", ")}`]),
     ...(human.suggestions === undefined ? [] : [`suggestions: ${human.suggestions.map(plain).join(", ")}`]),
-    ...(human.discussion === true ? ["discussion: questions allowed"] : []),
+    ...(human.discussion === true && recorded === "waiting" ? ["discussion: questions allowed"] : []),
   ];
+  if (sleep?.for === "time") details.push(`due: ${plain(sleep.due)}${sleep.isDue ? " (due now)" : ""}`);
+  if (sleep?.for === "answer") {
+    details.push(sleep.answered
+      ? `answered; wakes with ${record.continuedBy === "host" ? "its host" : `machine continue ${plain(record.id)}`}`
+      : `answer with: machine respond ${plain(record.id)} ${plain(sleep.requestId)} <response>`);
+  }
   const note = finishedRunNote(record);
   if (note !== undefined) details.push(note);
 
@@ -652,7 +665,7 @@ function printRunListing(record: RunStatusRecord | ViewerRun, separate: boolean,
   if (separate) console.log();
   const status = recorded === "waiting"
     ? yellow(recorded)
-    : recorded === "running" ? cyan(recorded) : recorded === "completed" ? green(recorded) : red(recorded);
+    : recorded === "sleeping" ? blue(recorded) : recorded === "running" ? cyan(recorded) : recorded === "completed" ? green(recorded) : red(recorded);
   console.log(
     `${bold(plain(record.id))}  ${bold(cyan(plain(record.machine)))} › ${status} · ${plain(state)}${
       watched ? ` · ${dim("watched")}` : ""
@@ -660,7 +673,7 @@ function printRunListing(record: RunStatusRecord | ViewerRun, separate: boolean,
   );
   if (record.label !== undefined && plain(record.label) !== "") console.log(`  ${plain(record.label)}`);
   for (const line of details) {
-    console.log(`  ${line.startsWith("request: ") || line === "answered through its host" ? dim(line) : line}`);
+    console.log(`  ${line.startsWith("request: ") || line.startsWith("answered;") || line === "answered through its host" ? dim(line) : line}`);
   }
 }
 

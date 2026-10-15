@@ -7,12 +7,15 @@ import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test, type TestContext } from "node:test";
+import { createContext, runInContext } from "node:vm";
 
 import { createMachine, fromPromise } from "xstate";
 
 // The package's own entry, which any tool that holds a definition can read its graph from.
 import { agent, final, human, machine, machineGraph, operation, statePaths } from "../src/index.ts";
+import { respondToRun } from "../src/run-inbox.ts";
 import { createRunStatusPublisher, readRunStatuses, trailLimit } from "../src/run-status.ts";
+import { runUiPage } from "../src/run-ui-page.ts";
 import { parsePanelOutput, readPanelSources, startRunUi, uiProjectDir, uiRuns } from "../src/run-ui.ts";
 
 const run = { machine: "ticket", path: "/work/.machines/ticket.ts", cwd: "/work" };
@@ -233,4 +236,241 @@ test("the page serves its runs and panels, refuses other host names, and answers
   const reply = await answered;
   assert.equal(reply.status, 409);
   assert.match(JSON.parse(reply.body).error, /not confirmed/u);
+});
+
+/** Just enough of a browser document for the page script to draw into. */
+class FakeNode {
+  readonly children: FakeNode[] = [];
+  readonly attributes = new Map<string, string>();
+  readonly listeners = new Map<string, Array<(event: unknown) => void>>();
+  parent: FakeNode | undefined;
+  className = "";
+  value = "";
+  checked = false;
+  disabled = false;
+  readonly dataset: Record<string, string> = {};
+  readonly clientWidth = 800;
+  readonly clientHeight = 600;
+  readonly classList = { add() {}, remove() {} };
+  private text = "";
+  readonly tagName: string;
+  readonly document: FakeDocument;
+
+  constructor(tagName: string, document: FakeDocument) {
+    this.tagName = tagName;
+    this.document = document;
+  }
+
+  get textContent(): string {
+    return this.tagName === "#text" ? this.text : this.children.map((child) => child.textContent).join("");
+  }
+
+  set textContent(value: string) {
+    if (this.tagName === "#text") this.text = value;
+    else this.replaceChildren(this.document.createTextNode(String(value)));
+  }
+
+  get id(): string { return this.attributes.get("id") ?? ""; }
+
+  setAttribute(name: string, value: unknown) {
+    this.attributes.set(name, String(value));
+    if (name === "class") this.className = String(value);
+  }
+
+  getAttribute(name: string) { return this.attributes.get(name) ?? null; }
+  addEventListener(name: string, listener: (event: unknown) => void) { this.listeners.set(name, [...this.listeners.get(name) ?? [], listener]); }
+  appendChild(child: FakeNode) { child.parent = this; this.children.push(child); return child; }
+  replaceChildren(...children: FakeNode[]) { this.children.length = 0; for (const child of children) this.appendChild(child); }
+  contains(other: FakeNode | null): boolean { return other === this || this.children.some((child) => child.contains(other)); }
+  focus() {}
+  setPointerCapture() {}
+  getBoundingClientRect() { return { left: 0, top: 0, width: this.clientWidth, height: this.clientHeight }; }
+  click() { for (const listener of this.listeners.get("click") ?? []) listener({ preventDefault() {} }); }
+
+  /** Every element below, in document order. */
+  descendants(): FakeNode[] { return this.children.flatMap((child) => [child, ...child.descendants()]); }
+
+  querySelectorAll(selector: string): FakeNode[] {
+    const tags = selector.split(",").map((part) => part.trim());
+    return this.descendants().filter((node) => tags.some((tag) =>
+      tag.startsWith("[") ? node.attributes.has(tag.slice(1, -1)) : node.tagName === tag));
+  }
+
+  querySelector(selector: string): FakeNode | null { return this.querySelectorAll(selector)[0] ?? null; }
+  hasClass(name: string) { return this.className.split(" ").includes(name); }
+}
+
+class FakeDocument {
+  readonly body = new FakeNode("body", this);
+  readonly activeElement = null;
+  title = "";
+
+  constructor() {
+    for (const id of ["project", "counts", "live", "runs", "detail", "panels"]) {
+      this.body.appendChild(this.createElement("div")).setAttribute("id", id);
+    }
+  }
+
+  createElement(tag: string) { return new FakeNode(tag, this); }
+  createElementNS(_namespace: string, tag: string) { return new FakeNode(tag, this); }
+  createTextNode(text: string) { const node = new FakeNode("#text", this); node.textContent = text; return node; }
+  getElementById(id: string) { return this.body.descendants().find((node) => node.id === id) ?? null; }
+  querySelectorAll(selector: string) { return this.body.querySelectorAll(selector); }
+  querySelector(selector: string) { return this.body.querySelector(selector); }
+}
+
+/** Runs the served page's script against a fake document, sending its requests to the page's server. */
+function openPage(html: string, url: string, send = (path: string, init: RequestInit) => fetch(new URL(path, url), init)) {
+  const script = /<script>([\s\S]*)<\/script>/u.exec(html)?.[1];
+  assert.ok(script, "the page has its script");
+  const document = new FakeDocument();
+  const sources: Array<{ onmessage?: (event: { data: string }) => void }> = [];
+  const context = createContext({
+    document,
+    window: { addEventListener() {} },
+    location: { hash: "" },
+    history: { replaceState() {} },
+    EventSource: class { constructor() { sources.push(this); } },
+    fetch: send,
+    setInterval() { return 0; },
+    setTimeout,
+    console,
+  });
+  runInContext(script, context);
+  return {
+    document,
+    show(state: unknown) { for (const source of sources) source.onmessage?.({ data: JSON.stringify(state) }); },
+  };
+}
+
+/** The run list's sections by title, each with the titles of the runs it holds and their cards. */
+function runSections(document: FakeDocument) {
+  const sections = new Map<string, Map<string, FakeNode>>();
+  for (const section of document.getElementById("runs")!.children) {
+    const heading = section.children.find((node) => node.hasClass("section-title"));
+    if (heading === undefined) continue;
+    const cards = section.children.filter((node) => node.hasClass("run"));
+    sections.set(heading.children[0]!.textContent, new Map(cards.map((card) => [
+      card.children.find((node) => node.hasClass("title"))!.textContent, card,
+    ])));
+  }
+  return sections;
+}
+
+function clock(iso: string) {
+  return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+test("the sleeping form sends only plain answers and explains host continuation after recording", async () => {
+  const requests: Array<{ path: string; init: RequestInit }> = [];
+  const page = openPage(runUiPage("page-token"), "http://localhost/", async (path, init) => {
+    requests.push({ path, init });
+    return new Response("{}", { status: 200 });
+  });
+  const stamp = new Date().toISOString();
+  const asking = {
+    ...run, id: "asking", label: "Asking", status: "sleeping", continuedBy: "host",
+    human: { prompt: "What next?", requestId: "open-request", discussion: true, suggestions: ["Review"] },
+    startedAt: stamp, updatedAt: stamp,
+  };
+  const resting = { ...run, id: "resting", label: "Resting", status: "sleeping", due: stamp, startedAt: stamp, updatedAt: stamp };
+  const snapshot = (request: unknown) => ({
+    project: { name: "test" }, directory: "/tmp", panels: [],
+    runs: [resting, { ...run, id: "running", status: "running", startedAt: stamp, updatedAt: stamp }, request],
+  });
+  page.show(snapshot(asking));
+  const detail = page.document.getElementById("detail")!;
+  assert.match(detail.textContent, /What next\?/u, "an unanswered sleeping request is selected before running or timed runs");
+  assert.deepEqual(detail.querySelectorAll("input"), [], "sleeping requests cannot take discussion questions");
+  assert.deepEqual(detail.querySelectorAll("[data-since]"), [], "sleeping does not draw a live running timer");
+  detail.querySelectorAll("textarea")[0]!.value = "Review";
+  detail.querySelectorAll("button").find((button) => button.textContent === "Send")!.click();
+  await new Promise((resolveTurn) => setImmediate(resolveTurn));
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0]!.path, "/api/respond");
+  assert.equal(requests[0]!.init.method, "POST");
+  assert.deepEqual(JSON.parse(String(requests[0]!.init.body)), {
+    runId: "asking", requestId: "open-request", response: "Review", question: false,
+  });
+  assert.match(detail.textContent, /Answer recorded\. The run wakes when its host continues it\./u);
+  page.show(snapshot({ ...asking, human: { ...asking.human, answer: "Review" } }));
+  assert.match(detail.textContent, /Answer recorded\. The run wakes when its host continues it\./u);
+  assert.match(detail.textContent, /request: open-request/u);
+  assert.deepEqual(detail.querySelectorAll("textarea"), []);
+  assert.ok(!detail.querySelectorAll("button").some((button) => /wake|continue/iu.test(button.textContent)));
+  const sections = runSections(page.document);
+  assert.equal(sections.has("Waiting on you"), false);
+  const timed = [...sections.get("Sleeping")!.values()].find((card) => card.textContent.includes("due "))!;
+  timed.click();
+  assert.match(detail.textContent, /Sleeping until .*\(due now\)/u);
+  assert.deepEqual(detail.querySelectorAll("textarea"), []);
+});
+
+test("the page shows sleeping runs with their request or due time, and answers a sleeping request without waking it", async (context) => {
+  const directory = await temporary(context);
+  const project = await temporary(context);
+  const environment = { MACHINES_RUN_STATUS_DIR: directory };
+  const due = new Date(Date.now() + 3_600_000).toISOString();
+  const request = { prompt: "Ship the release?", requestId: "request-1", choices: ["approve", "deny"] };
+  createRunStatusPublisher({ ...run, id: "asking-run", label: "org-1: Asking" }, environment).sleepForAnswer(request);
+  createRunStatusPublisher({ ...run, id: "answered-run", label: "org-2: Answered" }, environment).sleepForAnswer({ ...request, requestId: "request-2" });
+  assert.equal(await respondToRun({ directory, runId: "answered-run", requestId: "request-2", response: "deny" }), "recorded");
+  createRunStatusPublisher({ ...run, id: "resting-run", label: "org-3: Resting" }, environment).sleep(due);
+
+  // A sleeping run's process has ended on purpose: it is never shown as lost.
+  assert.deepEqual(
+    Object.fromEntries(uiRuns(directory, () => false).map((found) => [found.id, found.status])),
+    { "asking-run": "sleeping", "answered-run": "sleeping", "resting-run": "sleeping" },
+  );
+
+  const ui = await startRunUi({ directory, projectDir: project, port: 0, pollMilliseconds: 50 });
+  context.after(() => ui.close());
+  const page = openPage((await call(ui.url)).body, ui.url);
+  page.show(JSON.parse((await call(`${ui.url}api/state`)).body));
+  const { document } = page;
+
+  // The one waiting for an answer is with the runs waiting on a person; the others sleep, with their note.
+  const sections = runSections(document);
+  assert.ok(sections.get("Waiting on you")?.has("org-1: Asking"), JSON.stringify([...sections.keys()]));
+  assert.ok(sections.get("Sleeping")?.has("org-3: Resting"), JSON.stringify([...sections.keys()]));
+  assert.ok(sections.get("Sleeping")?.has("org-2: Answered"), JSON.stringify([...sections.keys()]));
+  assert.equal(sections.has("Lost"), false);
+  assert.match(sections.get("Sleeping")!.get("org-3: Resting")!.textContent, new RegExp(clock(due), "u"));
+  assert.match(sections.get("Sleeping")!.get("org-2: Answered")!.textContent, /answered/u);
+  const waitingCount = document.getElementById("counts")!.children.find((chip) => chip.textContent.endsWith("waiting on you"));
+  assert.equal(waitingCount?.textContent, "1waiting on you");
+
+  const detail = () => document.getElementById("detail")!;
+  const buttons = () => detail().querySelectorAll("button").map((button) => button.textContent);
+  const open = (title: string) => {
+    for (const cards of runSections(document).values()) cards.get(title)?.click();
+    // Nothing on the page wakes a run.
+    assert.ok(!buttons().some((text) => /wake|continue/iu.test(text)), buttons().join(", "));
+  };
+
+  // A timed wait says when it is due and takes no answer.
+  open("org-3: Resting");
+  assert.match(detail().textContent, new RegExp(`Sleeping until ${clock(due)}`, "u"));
+  assert.deepEqual(detail().querySelectorAll("textarea"), []);
+  assert.ok(!buttons().includes("approve"));
+
+  // An answered request says its answer is recorded and how the run wakes, with no form.
+  open("org-2: Answered");
+  assert.match(detail().textContent, /Answer recorded/u);
+  assert.match(detail().textContent, /machine continue answered-run/u);
+  assert.ok(!buttons().includes("approve") && !buttons().includes("deny"), buttons().join(", "));
+
+  // An unanswered request has the answer form; the answer is recorded, and the run stays asleep.
+  open("org-1: Asking");
+  assert.match(detail().textContent, /Ship the release\?/u);
+  assert.deepEqual(detail().querySelectorAll("input"), []);
+  detail().querySelectorAll("button").find((button) => button.textContent === "approve")!.click();
+  for (let tries = 0; !/Answer recorded/u.test(detail().textContent) && tries < 100; tries += 1) {
+    await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+  }
+  assert.match(detail().textContent, /Answer recorded/u);
+  assert.match(detail().textContent, /machine continue asking-run/u);
+  const recorded = readRunStatuses(directory).find((found) => found.id === "asking-run");
+  assert.equal(recorded?.status, "sleeping");
+  assert.equal(recorded?.human?.answer, "approve");
 });

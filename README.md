@@ -209,7 +209,7 @@ directory to move it. A published run that is waiting for a Human can be
 answered from outside its own terminal:
 
 ```bash
-machine runs [--json] [--all]                      # running and waiting runs; --all adds finished and lost ones
+machine runs [--json] [--all]                      # running, waiting and sleeping runs; --all adds finished and lost ones
 machine runs --for [<session>] [--project <dir>] [--json] [--all]   # the runs one viewer shows
 machine respond <run-id> <request-id> <response>   # answer a waiting run
 machine watch [<run-id-or-label-start> | --dir <path>]     # show other runs on this session's status line
@@ -258,6 +258,16 @@ questions (`--question`), and second answers are refused. An unanswered
 `machine continue` reports the request and how to answer it, changing nothing.
 After an answer, continuing uses it without asking again, checking the state's
 choices. Without `--sleep`, Human requests keep waiting in the running process.
+
+`machine runs`, `machine ui`, and the Claude status line keep sleeping runs
+visible even though their process has ended. They show the Human request or
+the due time; `machine runs --json` includes a `sleep` field with the same
+details and whether the request is answered or the wait is due. In the UI,
+an unanswered request has an answer form. Sending records the answer and says
+how the run wakes; there is no wake button. On the status line, an unanswered
+request needs attention just like a waiting run; an answered request or timed
+wait uses a calm style with `answered` or its due time.
+
 An external scheduler or timer can call `machine continue --due` to wake every
 answered or due sleeping run in order. It skips runs started by a host, continues
 past failures, reports each failure and exits nonzero if any fail. Machines runs

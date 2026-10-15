@@ -187,6 +187,63 @@ test("an active record whose process is gone is shown as lost for thirty seconds
   assert.match(runStatusLines([record({ pid: process.pid, owner: "session", state: "work" })], probed)[0]!, /› work · /u);
 });
 
+test("a sleeping run waiting for an answer reads as a waiting run does; once answered, or at a timed wait, it is calm", () => {
+  // A sleeping run's process ended on purpose: it is never lost, and stays however long ago it slept.
+  const options = { ...alive, isAlive: () => false };
+  const asking = record({
+    id: "asking-run", pid: 4242, status: "sleeping", state: "ask", startedAt: ago(3_000), updatedAt: ago(3_600_000),
+    human: { prompt: "\nShip the release?\nIt tags main.", requestId: "request-1", choices: ["approve", "deny"] },
+  });
+  const waiting = { ...asking, pid: 1, status: "waiting" as const, updatedAt: ago(0) };
+  assert.deepEqual(runStatusLines([asking], options), ["◆ asking-r  ticket › input needed · 3s", "  Ship the release?"]);
+  assert.deepEqual(runStatusLines([asking], options), runStatusLines([waiting], alive));
+  assert.deepEqual(runStatusLines([asking], { ...options, color: true }), runStatusLines([waiting], { ...alive, color: true }));
+
+  // Answered: nothing is left for a person to do, so it is calm and says so, without the prompt.
+  const answered = { ...asking, human: { ...asking.human!, answer: "approve" } };
+  const calm = runStatusLines([answered], options);
+  assert.equal(calm.length, 1, calm.join("\n"));
+  assert.match(calm[0]!, /^◇ asking-r  ticket › ask · answered\b/u);
+  const colored = runStatusLines([answered], { ...options, color: true });
+  assert.deepEqual(colored.map(stripVTControlCharacters), calm);
+  assert.ok(!colored[0]!.includes("\x1b[33m") && !colored[0]!.includes("\x1b[31m"), JSON.stringify(colored));
+
+  // A timed wait says when it is due, and that it is due once it is.
+  const resting = record({ id: "resting-run", pid: 4242, status: "sleeping", state: "rest", due: ago(-250_000), updatedAt: ago(3_600_000) });
+  const ahead = runStatusLines([resting], options);
+  assert.equal(ahead.length, 1, ahead.join("\n"));
+  assert.match(ahead[0]!, /^◇ resting-  ticket › rest · due in 4m 10s\b/u);
+  assert.match(runStatusLines([{ ...resting, due: ago(1_000) }], options)[0]!, /^◇ resting-  ticket › rest · due now\b/u);
+  const restingColored = runStatusLines([resting], { ...options, color: true });
+  assert.ok(!restingColored[0]!.includes("\x1b[33m") && !restingColored[0]!.includes("\x1b[31m"), JSON.stringify(restingColored));
+
+  // Each stays with the runs that can still change, ahead of one that settled since, and none is lost.
+  const done = record({ id: "done-run", status: "completed", state: "done", updatedAt: ago(1_000) });
+  const lines = runStatusLines([done, resting, answered, asking], options);
+  assert.deepEqual(lines.filter((line) => !line.startsWith("  ")).map((line) => line.split(" ")[1]), ["resting-", "asking-r", "asking-r", "done-run"]);
+  assert.doesNotMatch(lines.join("\n"), /lost/u);
+});
+
+test("the script shows a sleeping run whose process has ended", async (context) => {
+  const directory = await temporaryDirectory(context);
+  const exited = spawnSync(process.execPath, ["-e", ""]).pid;
+  const slept = new Date(Date.now() - 3_600_000).toISOString();
+  await writeFile(join(directory, "asking.json"), JSON.stringify(record({
+    id: "asking-run", owner: "session", pid: exited, status: "sleeping", state: "ask", startedAt: slept, updatedAt: slept,
+    human: { prompt: "Ship the release?", requestId: "request-1", choices: ["approve", "deny"] },
+  })));
+  await writeFile(join(directory, "resting.json"), JSON.stringify(record({
+    id: "resting-run", owner: "session", pid: exited, status: "sleeping", state: "rest", startedAt: slept, updatedAt: slept,
+    due: new Date(Date.now() + 3_600_000).toISOString(),
+  })));
+  const shown = runScript(JSON.stringify({ session_id: "session", cwd: "/elsewhere" }), { MACHINES_RUN_STATUS_DIR: directory, NO_COLOR: "1" });
+  assert.equal(shown.status, 0, shown.stderr);
+  const lines = shown.stdout.trimEnd().split("\n");
+  assert.ok(lines.some((line) => line.startsWith("◆ asking-r  ticket › input needed · ")), shown.stdout);
+  assert.ok(lines.includes("  Ship the release?"), shown.stdout);
+  assert.ok(lines.some((line) => line.startsWith("◇ resting-  ticket › rest · due in ")), shown.stdout);
+});
+
 test("at most five runs are shown, active first and then most recently updated", () => {
   const records = [
     record({ id: "done-new", status: "completed", updatedAt: ago(1_000) }),
