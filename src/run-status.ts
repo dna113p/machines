@@ -36,6 +36,8 @@ export interface RunStatusRecord {
    * the run has no inbox, and `machine respond` refuses it. Absent otherwise.
    */
   readonly answeredBy?: "host";
+  /** Sleeping runs with this marker are woken by their host, not `machine continue --due`. */
+  readonly continuedBy?: "host";
   /** Names the inbox responses the run took lately, so that each sender can tell; never a response. */
   readonly deliveries?: readonly string[];
   readonly error?: string;
@@ -86,6 +88,7 @@ export interface RunStatusRun {
   /** Replaces `MACHINES_RUN_LABEL`, and is shortened as it is. */
   readonly label?: string;
   readonly answeredBy?: "host";
+  readonly continuedBy?: "host";
   readonly graph?: RunGraph;
 }
 
@@ -190,6 +193,7 @@ export function createRunStatusPublisher(
   if (directory === undefined || !isFileSafeId(id)) return disabled;
 
   const previous = run.continueRun?.record;
+  const continuedBy = run.continuedBy ?? previous?.continuedBy;
   const continued = run.continueRun ? { at: new Date().toISOString(), machineChanged: run.continueRun.machineChanged } : undefined;
   const owner = previous ? previous.owner : (run.owner ?? runSessionId(environment)) || undefined;
   const parent = previous ? previous.parent : environment.MACHINES_RUN_PARENT || undefined;
@@ -232,6 +236,7 @@ export function createRunStatusPublisher(
       ...(limit === undefined ? {} : { limit }),
       ...(human === undefined ? {} : { human }),
       ...(run.answeredBy === undefined ? {} : { answeredBy: run.answeredBy }),
+      ...(continuedBy === undefined ? {} : { continuedBy }),
       ...(deliveries.length === 0 ? {} : { deliveries: deliveries.map((delivery) => delivery.id) }),
       ...(error === undefined ? {} : { error }),
       ...(note === undefined ? {} : { note }),
@@ -524,6 +529,7 @@ function isRunStatusRecord(value: unknown): value is RunStatusRecord {
     && (limit === undefined || (limit !== null && typeof limit === "object" && typeof limit.text === "string"
       && isOptionalString(limit.until)))
     && (record.answeredBy === undefined || record.answeredBy === "host")
+    && (record.continuedBy === undefined || record.continuedBy === "host")
     && isOptionalStrings(record.deliveries)
     && isOptionalString(record.error)
     && isOptionalString(record.note)
