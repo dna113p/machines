@@ -18,7 +18,7 @@ import {
   listMachines,
   prepareMachineRun,
 } from "./launcher.ts";
-import { claimContinuation, RunNotDueError, type Continuation } from "./run-checkpoint.ts";
+import { claimContinuation, RunNotAnsweredError, RunNotDueError, type Continuation } from "./run-checkpoint.ts";
 import { inboxHuman, respondToRun } from "./run-inbox.ts";
 import {
   createRunStatusPublisher,
@@ -112,6 +112,12 @@ try {
 } catch (cause) {
   if (command === "continue" && cause instanceof RunNotDueError) {
     console.log(`Run ${selector} is not due until ${cause.due}.`);
+  } else if (command === "continue" && cause instanceof RunNotAnsweredError) {
+    const { human } = cause;
+    console.log(`Run ${selector} is waiting for an answer to: ${human.prompt}`);
+    if (human.choices !== undefined) console.log(`Choices: ${human.choices.join(", ")}`);
+    console.log(`Answer with: machine respond ${selector} ${human.requestId} <response>`);
+    console.log(`Then wake it with: machine continue ${selector}`);
   } else {
     console.error(cause instanceof Error ? cause.message : String(cause));
     process.exitCode = 1;
@@ -165,13 +171,21 @@ async function runMachine(machinePath: string, args: string[], continuation?: Co
   process.env.MACHINES_RUN_PARENT = runId;
   const observed = runStatusObserver((change) => published.update(change));
   let sleptUntil: string | undefined;
+  let sleptForAnswer = false;
 
   try {
     const result = await prepared.start({
       ...(statusDirectory === undefined ? {} : { checkpoint: { directory: statusDirectory, id: runId, sleep: invocation.sleep } }),
+      ...(continuation?.answer === undefined ? {} : { answer: continuation.answer }),
       ...(invocation.sleep ? { onSleep(due: string) {
         published.sleep(due);
         sleptUntil = due;
+      }, onHumanSleep(request) {
+        const requestId = randomUUID();
+        published.sleepForAnswer({ ...request, requestId });
+        sleptForAnswer = true;
+        console.log(`--> sleeping for an answer. Answer with: machine respond ${runId} ${requestId} <response>`);
+        console.log(`Then wake it with: machine continue ${runId}`);
       } } : {}),
       onAgentUpdate(update) {
         observed.onAgentUpdate(update);
@@ -202,6 +216,7 @@ async function runMachine(machinePath: string, args: string[], continuation?: Co
       },
     });
 
+    if (sleptForAnswer) return;
     if (sleptUntil !== undefined) {
       console.log(`--> sleeping in ${formatState(result.value)} until ${sleptUntil}. Continue with: machine continue ${runId}`);
       return;
@@ -411,13 +426,15 @@ async function respond(args: string[]) {
     throw new Error("Usage: machine respond [--question] <run-id> <request-id> [--] <response>");
   }
   const text = words.join(" ");
-  await respondToRun({
+  const result = await respondToRun({
     directory: requireStatusDirectory(),
     runId,
     requestId,
     response: question ? { type: "question", text } : text,
   });
-  console.log(`Machine run ${runId} took the ${question ? "question" : "response"}.`);
+  console.log(result === "recorded"
+    ? `Recorded the answer; run ${runId} is still sleeping. Wake it with: machine continue ${runId}`
+    : `Machine run ${runId} took the ${question ? "question" : "response"}.`);
 }
 
 /** Serves the live page of published runs until interrupted. */

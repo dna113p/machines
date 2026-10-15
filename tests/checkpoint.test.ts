@@ -189,7 +189,14 @@ async function checkpointFiles(directory: string): Promise<string[]> {
 /** Runs the Machine until its Agent hangs, then stops the process, leaving the run where it was. */
 async function stopInAgent(context: TestContext, project: Project): Promise<RunStatusRecord> {
   const started = startRun(context, project);
-  await eventually(() => assert.deepEqual(logLines(project), ["first", "agent"], started.output()));
+  await eventually(() => {
+    assert.deepEqual(logLines(project), ["first", "agent"], started.output());
+    const [current] = readRunStatuses(project.status);
+    // The Agent logs before XState's observer publishes the state. Wait for
+    // publication too, so stopping the process cannot interrupt that work.
+    assert.equal(current?.state, "work");
+    assert.equal(readCheckpoint(project, current.id).state.value, "work");
+  });
   const [record, ...others] = readRunStatuses(project.status);
   assert.ok(record, started.output());
   assert.deepEqual(others, []);
@@ -202,7 +209,12 @@ async function stopInAgent(context: TestContext, project: Project): Promise<RunS
 test("a run stopped while its Agent runs continues as the same run: the Agent runs again, then the second Operation once", async (context) => {
   const project = await createProject(context);
   const started = startRun(context, project);
-  await eventually(() => assert.deepEqual(logLines(project), ["first", "agent"], started.output()));
+  await eventually(() => {
+    assert.deepEqual(logLines(project), ["first", "agent"], started.output());
+    const [current] = readRunStatuses(project.status);
+    assert.equal(current?.state, "work");
+    assert.equal(readCheckpoint(project, current.id).state.value, "work");
+  });
 
   const [before] = readRunStatuses(project.status);
   assert.ok(before);

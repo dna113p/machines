@@ -246,10 +246,20 @@ machine run my-workflow --sleep
 machine continue <run-id>
 ```
 
-`--sleep` requires run status publication. A sleeping run records its `due` time;
-continuing before then reports that time and changes nothing. Once due, it takes
-the `due` transition, keeping `--sleep` for the next wait. Nothing wakes the run
-automatically: an external scheduler can call `machine continue`.
+`--sleep` requires run status publication. At a timed wait, a sleeping run records
+its `due` time; continuing before then reports that time and changes nothing.
+Once due, it takes the `due` transition, keeping `--sleep` for the next wait.
+
+At a Human request, `--sleep` also ends the process. The sleeping record holds
+`human` with the prompt, request id and choices, without `due`. Answer it with
+`machine respond <run-id> <request-id> <response>`; this records `human.answer`
+and leaves the run sleeping. Wrong request ids, unoffered choices, discussion
+questions (`--question`), and second answers are refused. An unanswered
+`machine continue` reports the request and how to answer it, changing nothing.
+After an answer, continuing uses it without asking again, checking the state's
+choices. Without `--sleep`, Human requests keep waiting in the running process.
+Nothing wakes a sleeping run automatically; an external scheduler or a person
+must call `machine continue`.
 
 Machine definitions and Agent preset files are **trusted executable code**.
 Discovery imports them to inspect metadata, including their relative imports.

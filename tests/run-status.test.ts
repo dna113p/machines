@@ -49,6 +49,28 @@ test("sleeping status records preserve their deadline and ignore later updates",
   assert.equal(await readFile(join(directory, "sleep.json"), "utf8"), before);
 });
 
+test("a sleeping status record holds either a due time or a Human request, which may carry its answer", async (context) => {
+  const directory = await temporaryDirectory(context);
+  const publisher = createRunStatusPublisher({ ...run, id: "asleep" }, { MACHINES_RUN_STATUS_DIR: directory });
+  publisher.update({ state: "ask" });
+  publisher.sleep(new Date(Date.now() + 60_000).toISOString());
+  const file = join(directory, "asleep.json");
+  const base = JSON.parse(await readFile(file, "utf8")) as Record<string, unknown>;
+  delete base.due;
+  const human = { prompt: "Ship it?", requestId: "request-1", choices: ["approve", "deny"] };
+  const read = async (record: Record<string, unknown>) => {
+    await writeFile(file, JSON.stringify(record));
+    return readRunStatuses(directory) as Array<RunStatusRecord & { readonly human?: { readonly answer?: string } }>;
+  };
+
+  const [unanswered] = await read({ ...base, human });
+  assert.deepEqual({ status: unanswered?.status, due: unanswered?.due, human: unanswered?.human }, { status: "sleeping", due: undefined, human });
+  const [answered] = await read({ ...base, human: { ...human, answer: "approve" } });
+  assert.equal(answered?.human?.answer, "approve");
+  assert.deepEqual(await read({ ...base, human: { ...human, answer: 1 } }), []);
+  assert.deepEqual(await read(base), []);
+});
+
 test("the directory is the user's own unless MACHINES_RUN_STATUS_DIR moves it or turns publication off", (context) => {
   const cases: ReadonlyArray<readonly [NodeJS.ProcessEnv, string | undefined]> = [
     [{}, standardDirectory(homedir())],

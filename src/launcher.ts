@@ -111,7 +111,7 @@ export async function prepareMachineRun(
       if (started) throw new Error(`Prepared Machine "${path}" has already started`);
       started = true;
       const { checkpoint, ...runtimeOptions } = runOptions;
-      if (runtimeOptions.onSleep && !checkpoint) throw new Error("Sleeping requires a checkpoint");
+      if ((runtimeOptions.onSleep || runtimeOptions.onHumanSleep) && !checkpoint) throw new Error("Sleeping requires a checkpoint");
       // null means context could not be serialized; skip this checkpoint only.
       let captured: { data: Record<string, JsonValue>; context: JsonValue } | null | undefined;
       const capture = (context: unknown) => {
@@ -139,6 +139,12 @@ export async function prepareMachineRun(
             throw new Error("Cannot sleep without a saved checkpoint");
           }
           runtimeOptions.onSleep?.(due);
+        } } : {}),
+        ...(runtimeOptions.onHumanSleep ? { onHumanSleep(request) {
+          if (!checkpoint || !existsSync(checkpointPath(checkpoint.directory, checkpoint.id))) {
+            throw new Error("Cannot sleep without a saved checkpoint");
+          }
+          runtimeOptions.onHumanSleep?.(request);
         } } : {}),
         agents: { ...agents, ...limitAware },
         ...(options.continueRun ? { continueAt: { value: options.continueRun.state.value, context: options.continueRun.context,

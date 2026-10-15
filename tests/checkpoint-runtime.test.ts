@@ -54,6 +54,47 @@ test("a sleeping wait checkpoint round-trips, and an early claim leaves its file
   } finally { continuation.release(); }
 });
 
+test("an unanswered run sleeping at a Human request is reported, not claimed, and an answered one is claimed with its answer", (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "checkpoint-human-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const path = join(directory, "machine.ts");
+  const now = new Date().toISOString();
+  const saved: RunCheckpoint = {
+    schemaVersion: 1, id: "ask", machine: { name: "machine", path, sourceHash: "old" },
+    input: "", agents: {}, cwd: directory, home: directory, sleep: true,
+    state: { value: "ask", path: "ask", kind: "human", enteredAt: now },
+    data: {}, context: {}, writtenAt: now,
+  };
+  writeCheckpoint(directory, saved);
+  const publisher = createRunStatusPublisher({ id: "ask", machine: "machine", path, cwd: directory }, { MACHINES_RUN_STATUS_DIR: directory });
+  publisher.update({ state: "ask" });
+  publisher.sleep(new Date(Date.now() + 60_000).toISOString());
+  // A run asleep at a Human request: its record holds the request and no due time.
+  const file = join(directory, "ask.json");
+  const record = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+  delete record.due;
+  const human = { prompt: "Ship it?", requestId: "request-1", choices: ["approve", "deny"] };
+  writeFileSync(file, JSON.stringify({ ...record, human }));
+  const before = readFileSync(checkpointPath(directory, "ask"), "utf8");
+  const status = readFileSync(file, "utf8");
+
+  // The Machine file does not even exist: an unanswered run must not hash/import it.
+  assert.throws(() => claimContinuation("ask", directory), (cause: unknown) => (
+    cause instanceof Error && (cause as Error & { human?: { requestId?: string } }).human?.requestId === "request-1"
+  ));
+  assert.equal(existsSync(join(directory, ".ask.claim")), false);
+  assert.equal(readFileSync(checkpointPath(directory, "ask"), "utf8"), before);
+  assert.equal(readFileSync(file, "utf8"), status);
+
+  writeFileSync(file, JSON.stringify({ ...record, human: { ...human, answer: "approve" } }));
+  writeFileSync(path, "source");
+  const continuation = claimContinuation("ask", directory) as ReturnType<typeof claimContinuation> & { readonly answer?: string };
+  try {
+    assert.deepEqual(continuation.checkpoint, saved);
+    assert.equal(continuation.answer, "approve");
+  } finally { continuation.release(); }
+});
+
 test("a prepared run cannot sleep after its context invalidates the checkpoint", async (t) => {
   const directory = mkdtempSync(join(tmpdir(), "checkpoint-wait-context-"));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
@@ -68,6 +109,63 @@ export default (p) => p.machine({ context: { value: 1n }, initial: "rest", state
     onSleep() { assert.fail("run slept without a checkpoint"); },
   }), /Cannot sleep without a saved checkpoint/u);
   assert.equal(existsSync(checkpointPath(directory, "wait")), false);
+});
+
+test("a continued Human answer is validated, used once, and the next request sleeps", async () => {
+  const definition = machine({ initial: "ask", states: {
+    work: operation(() => ({ type: "done" }), { done: "ask" }),
+    ask: human("First decision?", { submitted: "again" }, { choices: ["approve", "deny"] }),
+    again: human("Second decision?", { submitted: "finished" }),
+    finished: final(),
+  } });
+  const continueAt = { value: "ask", context: {} };
+  const requests: string[] = [];
+  const entered: unknown[] = [];
+  const snapshot = await run(definition, {
+    continueAt, answer: "approve",
+    human() { assert.fail("continued run asked for terminal input"); },
+    onHumanSleep(request) { requests.push(request.prompt); },
+    onEnter(entry) { entered.push(entry.value); },
+  });
+  assert.equal(snapshot.value, "again");
+  assert.deepEqual(requests, ["Second decision?"]);
+  assert.deepEqual(entered, ["ask", "again"]);
+
+  await assert.rejects(run(definition, {
+    continueAt, answer: "maybe",
+    human() { assert.fail("invalid saved answer asked for terminal input"); },
+    onHumanSleep() { assert.fail("invalid saved answer slept again"); },
+  }), /Expected one of: approve, deny/u);
+
+  // An answer belongs only to the restored request, even if its state was
+  // changed into an Operation before continuation.
+  requests.length = 0;
+  const changed = await run(definition, {
+    continueAt: { value: "work", context: {} }, answer: "approve",
+    human() { assert.fail("continued run asked for terminal input"); },
+    onHumanSleep(request) { requests.push(request.prompt); },
+  });
+  assert.equal(changed.value, "ask");
+  assert.deepEqual(requests, ["First decision?"]);
+});
+
+test("a prepared run refuses Human sleep without a saved checkpoint", async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "checkpoint-human-context-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const path = join(directory, "machine.ts");
+  writeFileSync(path, `export const description = "Cannot save this Human context.";
+export default (p) => p.machine({ context: { value: 1n }, initial: "ask", states: {
+  ask: p.human("Ship it?", { submitted: "done" }), done: p.final()
+} });`);
+  const prepare = () => prepareMachineRun({ machine: path, cwd: directory, home: directory });
+  const noCheckpoint = await prepare();
+  assert.throws(() => noCheckpoint.start({ onHumanSleep() {} }), /Sleeping requires a checkpoint/u);
+  const unsaveable = await prepare();
+  await assert.rejects(unsaveable.start({
+    checkpoint: { directory, id: "ask", sleep: true },
+    onHumanSleep() { assert.fail("Human request slept without a checkpoint"); },
+  }), /Cannot sleep without a saved checkpoint/u);
+  assert.equal(existsSync(checkpointPath(directory, "ask")), false);
 });
 
 for (const kind of ["operation", "agent", "human"] as const) {

@@ -10,6 +10,7 @@ import { join, resolve } from "node:path";
 import { mock, test, type TestContext } from "node:test";
 
 import type { HumanRequest } from "../src/index.ts";
+import { claimRun } from "../src/run-checkpoint.ts";
 import { inboxHuman, respondToRun, watchRunInbox } from "../src/run-inbox.ts";
 import {
   createRunStatusPublisher,
@@ -25,6 +26,39 @@ const cli = resolve("src/cli.ts");
 const fixture = resolve("tests/fixtures/human-inbox.machine.ts");
 const prompt = "Approve the plan?\nIt changes three files.";
 const publicationOff = /^Run status publication is off: unset MACHINES_RUN_STATUS_DIR to use the standard directory, or set it /u;
+
+test("a sleeping Human answer uses the continuation claim and only records one valid plain response", async (context) => {
+  const directory = await temporaryDirectory(context);
+  const publisher = createRunStatusPublisher({
+    id: "sleeper", machine: "asker", path: "/work/asker.ts", cwd: "/work",
+  }, { MACHINES_RUN_STATUS_DIR: directory });
+  publisher.update({ state: "ask" });
+  publisher.sleepForAnswer({ prompt, requestId: "request", choices: ["approve", "deny"], discussion: true });
+  const file = join(directory, "sleeper.json");
+  const before = readFileSync(file, "utf8");
+  const response = { directory, runId: "sleeper", requestId: "request", response: "approve" };
+  await assert.rejects(respondToRun({ ...response, requestId: "wrong" }), /not "wrong"/u);
+  await assert.rejects(respondToRun({ ...response, response: "maybe" }), /approve, deny/u);
+  await assert.rejects(respondToRun({ ...response, response: { type: "question", text: "Why?" } }), /plain response/u);
+  const release = claimRun(directory, "sleeper");
+  try {
+    await assert.rejects(respondToRun(response), /another process has claimed it/u);
+    assert.equal(readFileSync(file, "utf8"), before);
+  } finally { release(); }
+
+  assert.equal(await respondToRun(response), "recorded");
+  const [answered] = readRunStatuses(directory);
+  assert.equal(answered!.status, "sleeping");
+  assert.equal(answered!.human?.answer, "approve");
+  assert.equal(answered!.pid, process.pid);
+  assert.equal((await stat(file)).mode & 0o777, 0o600);
+  assert.deepEqual((await readdir(directory)), ["sleeper.json"]);
+  const recorded = readFileSync(file, "utf8");
+  await assert.rejects(respondToRun(response), /already answered/u);
+  await assert.rejects(respondToRun({ ...response, response: "deny" }), /already answered/u);
+  publisher.finish({ state: "finished" });
+  assert.equal(readFileSync(file, "utf8"), recorded);
+});
 
 test("a waiting run publishes what is needed to show and to answer its request", async (context) => {
   const expected = {
