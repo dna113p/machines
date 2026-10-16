@@ -211,6 +211,7 @@ async function runMachine(machinePath: string, args: string[], continuation?: Co
         published.sleepForAnswer({ ...request, requestId });
         sleptForAnswer = requestId;
       } } : {}),
+      onEnter(entry) { observed.onEnter(entry); },
       onAgentUpdate(update) {
         observed.onAgentUpdate(update);
         status.onAgentUpdate(update);
@@ -645,6 +646,7 @@ function printRunListing(record: RunStatusRecord | ViewerRun, separate: boolean,
     ...(human.suggestions === undefined ? [] : [`suggestions: ${human.suggestions.map(plain).join(", ")}`]),
     ...(human.discussion === true && recorded === "waiting" ? ["discussion: questions allowed"] : []),
   ];
+  if (record.retry) details.push(`retry: attempt ${record.retry.attempt} of ${record.retry.of}, due ${plain(record.retry.due)}`);
   if (sleep?.for === "time") details.push(`due: ${plain(sleep.due)}${sleep.isDue ? " (due now)" : ""}`);
   if (sleep?.for === "answer") {
     details.push(sleep.answered

@@ -160,6 +160,10 @@ function readCheckpoint(file: string, id: string): RunCheckpoint {
     || typeof c.state.path !== "string" || typeof c.state.enteredAt !== "string" || !Number.isFinite(Date.parse(c.state.enteredAt))
     || !["agent", "operation", "human", "wait", "final", "state"].includes(c.state.kind)
     || (c.state.due !== undefined && (typeof c.state.due !== "string" || !Number.isFinite(Date.parse(c.state.due))))
+    || (c.state.retry !== undefined && (c.state.kind !== "operation" || c.state.due === undefined
+      || c.state.retry === null || typeof c.state.retry !== "object" || Array.isArray(c.state.retry)
+      || !Number.isInteger(c.state.retry.attempt) || !Number.isInteger(c.state.retry.of)
+      || c.state.retry.attempt < 2 || c.state.retry.attempt > c.state.retry.of || c.state.retry.of > 11))
     || (c.state.kind === "wait" && c.state.due === undefined)
     || (c.sleep !== undefined && c.sleep !== true)
     || typeof c.writtenAt !== "string" || !Number.isFinite(Date.parse(c.writtenAt))

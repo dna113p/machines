@@ -140,8 +140,8 @@ Structured input: `machine run <name> --input-file file.json`, or
 `--input-file -` for stdin. Positional string input still works.
 
 Next: [Authoring Machines](docs/authoring.md) covers Human input, Agent roles
-and presets, feedback loops, saved data, timed waits, structured input and
-output, and the programmatic launcher.
+and presets, feedback loops, saved data, timed waits, Operation retries,
+structured input and output, and the programmatic launcher.
 
 ## Delegate work through Machines
 

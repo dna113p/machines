@@ -148,6 +148,7 @@ export async function prepareMachineRun(
         } } : {}),
         agents: { ...agents, ...limitAware },
         ...(options.continueRun ? { continueAt: { value: options.continueRun.state.value, context: options.continueRun.context,
+          ...(options.continueRun.state.retry === undefined ? {} : { retry: options.continueRun.state.retry }),
           ...(options.continueRun.state.due === undefined ? {} : { due: options.continueRun.state.due }) } } : {}),
         ...(checkpoint ? { onBeforeStep: capture, onEnter(entry) {
           try {
@@ -161,6 +162,7 @@ export async function prepareMachineRun(
               agents: options.agents ?? {}, home, cwd,
               ...(checkpoint.sleep ? { sleep: true } : {}),
               state: { value: entry.value, kind: entry.kind, enteredAt: entry.enteredAt, path: statePaths(entry.value).join(", "),
+                ...(entry.retry === undefined ? {} : { retry: entry.retry }),
                 ...(entry.due === undefined ? {} : { due: entry.due }) },
               data: captured!.data,
               context: captured!.context,

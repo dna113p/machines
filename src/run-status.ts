@@ -4,7 +4,7 @@ import { basename, isAbsolute, join, resolve } from "node:path";
 import type { StateValue } from "xstate";
 
 import { machinesUserHome } from "./discovery.ts";
-import type { AgentUpdate } from "./index.ts";
+import type { AgentUpdate, StateEntry } from "./index.ts";
 import { statePaths, type RunGraph, type RunTrailStep } from "./run-graph.ts";
 
 /** One published run, stored as `<id>.json` in the run-status directory. */
@@ -30,6 +30,7 @@ export interface RunStatusRecord {
   readonly agent?: RunStatusAgent;
   /** Present while the current Agent state waits for a usage limit to reset; `status` stays `running`. */
   readonly limit?: RunStatusLimit;
+  readonly retry?: RunStatusRetry;
   readonly human?: RunStatusHuman;
   /**
    * `host` when the program hosting the run answers its Human requests itself:
@@ -70,6 +71,13 @@ export interface RunStatusAgent {
   readonly thinking?: string;
 }
 
+/** The next Operation attempt and the deadline before it starts. */
+export interface RunStatusRetry {
+  readonly attempt: number;
+  readonly of: number;
+  readonly due: string;
+}
+
 /** A wait for an Agent usage limit: a one-line summary, and when the wait is expected to end. */
 export interface RunStatusLimit {
   readonly text: string;
@@ -99,6 +107,7 @@ export interface RunStatusChange {
   readonly agent?: RunStatusAgent;
   /** Leaving the state clears it as well. */
   readonly limit?: RunStatusLimit;
+  readonly retry?: RunStatusRetry;
   readonly human?: RunStatusHuman;
   /** Names an inbox response the run took, in addition to those its record already names. */
   readonly delivery?: string;
@@ -205,6 +214,7 @@ export function createRunStatusPublisher(
   let stateSince: string | undefined;
   let agent: RunStatusAgent | undefined;
   let limit: RunStatusLimit | undefined;
+  let retry: RunStatusRetry | undefined;
   let human: RunStatusHuman | undefined;
   let deliveries: ReadonlyArray<{ readonly id: string; readonly takenAt: number }> = [];
   let error: string | undefined;
@@ -234,6 +244,7 @@ export function createRunStatusPublisher(
       ...(stateSince === undefined ? {} : { stateSince }),
       ...(agent === undefined ? {} : { agent }),
       ...(limit === undefined ? {} : { limit }),
+      ...(retry === undefined ? {} : { retry }),
       ...(human === undefined ? {} : { human }),
       ...(run.answeredBy === undefined ? {} : { answeredBy: run.answeredBy }),
       ...(continuedBy === undefined ? {} : { continuedBy }),
@@ -274,6 +285,7 @@ export function createRunStatusPublisher(
         agent: "agent" in change ? pickAgent(change.agent) : agent,
         // A wait belongs to the state whose Agent is waiting.
         limit: "limit" in change ? pickLimit(change.limit) : nextState === state ? limit : undefined,
+        retry: "retry" in change ? change.retry : nextState === state ? retry : undefined,
         human: "human" in change ? pickHuman(change.human) : human,
         // A later response must not hide an earlier one from a sender that has yet to look.
         deliveries: change.delivery === undefined ? deliveries : [
@@ -282,12 +294,12 @@ export function createRunStatusPublisher(
         ],
       };
       // Repeated notifications for an unchanged run do not need another write.
-      if (JSON.stringify(next) === JSON.stringify({ status, state, agent, limit, human, deliveries })) return;
+      if (JSON.stringify(next) === JSON.stringify({ status, state, agent, limit, retry, human, deliveries })) return;
       if (next.state !== state) {
         stateSince = new Date().toISOString();
         enter(next.state, stateSince);
       }
-      ({ status, state, agent, limit, human, deliveries } = next);
+      ({ status, state, agent, limit, retry, human, deliveries } = next);
       publish();
     },
     sleep(until) {
@@ -319,6 +331,7 @@ export function createRunStatusPublisher(
         note = formatNote(outcome.note);
         enter(state, new Date().toISOString());
       }
+      retry = undefined;
       stateSince = undefined;
       agent = undefined;
       limit = undefined;
@@ -354,13 +367,20 @@ export function writeRunStatusRecord(directory: string, record: RunStatusRecord)
  */
 export function runStatusObserver(
   update: (change: RunStatusChange) => void,
-): { onAgentUpdate(update: AgentUpdate): void; onState(state: StateValue): void } {
+): { onAgentUpdate(update: AgentUpdate): void; onState(state: StateValue): void; onEnter(entry: StateEntry): void } {
   let publishedState: string | undefined;
   // A runner reports its identity as it starts. For a state entered by a
   // transition that is before the state is announced, so an identity is held
   // for the rest of the tick and published with the state it belongs to.
   let arriving: Extract<AgentUpdate, { type: "identity" }> | undefined;
   return {
+    onEnter(entry) {
+      // On continuation this precedes onState; publish the state with its retry
+      // so that the first state announcement cannot clear the restored count.
+      update(entry.retry && entry.due
+        ? { state: entry.value, retry: { ...entry.retry, due: entry.due } }
+        : { retry: undefined });
+    },
     onAgentUpdate(agent) {
       if (agent.type === "identity") {
         arriving = agent;
@@ -537,7 +557,15 @@ function isRunStatusRecord(value: unknown): value is RunStatusRecord {
     && (record.trail === undefined || (Array.isArray(record.trail) && record.trail.every((step) =>
       step !== null && typeof step === "object" && typeof step.state === "string" && isTimestamp(step.at))))
     && isTimestamp(record.startedAt)
+    && (record.retry === undefined || isRetry(record.retry))
     && isTimestamp(record.updatedAt);
+}
+
+function isRetry(value: unknown): boolean {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const retry = value as Partial<RunStatusRetry>;
+  return Number.isInteger(retry.attempt) && Number.isInteger(retry.of)
+    && retry.attempt! >= 2 && retry.attempt! <= retry.of! && retry.of! <= 11 && isTimestamp(retry.due);
 }
 
 function isGraph(value: unknown): boolean {
