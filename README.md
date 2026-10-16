@@ -1,11 +1,10 @@
 # Machines
 
-Reusable workflows that coordinate agents, local operations, and human decisions.
+Reusable workflows that coordinate Agents, local operations and human decisions.
 
-A Machine makes a repeatable process explicit: ask an Agent to implement a change,
-run an Operation to check it, and ask a Human to approve or provide feedback. Each
-state returns an event; the Machine decides what happens next. XState handles the
-transitions, while the same workflow can run from a terminal, Pi, or Codex.
+A Machine writes a repeatable process down as states. An Agent implements a
+change, an Operation checks it, a Human approves it or sends feedback. Each
+state returns an event, and the Machine decides what happens next.
 
 ```text
 implement (Agent) → check (Operation) → review (Human) → done
@@ -13,15 +12,18 @@ implement (Agent) → check (Operation) → review (Human) → done
         └──────────── feedback ────────────┘
 ```
 
-Use Machines when sequencing, verification, retries, or Human decisions improve
-a task, even a one-off. Agents should discover and use a suitable Machine before
-delegating or reconstructing a multi-step workflow manually; users need not name
-Machines first. Tiny edits, simple answers, and single commands remain direct.
-See [agent defaults](docs/integrations.md#agent-defaults) for the integration policy.
+XState runs the transitions. The same workflow runs from a terminal, Pi or
+Codex.
+
+**When to use one:** whenever sequencing, verification, retries or a Human
+decision would help, even for a one-off task. Tiny edits, simple answers and
+single commands stay direct. Agents should look for a suitable Machine before
+delegating or rebuilding a multi-step workflow by hand; users don't have to
+name Machines first. See [agent defaults](docs/integrations.md#agent-defaults).
 
 ## Quickstart
 
-Requires **Node.js 24 or later** and npm. From a checkout of this repository:
+Needs **Node.js 24 or later** and npm. From a checkout:
 
 ```bash
 npm ci
@@ -29,13 +31,14 @@ npm run check
 npm run example
 ```
 
-The deterministic example needs no credentials or Agent installation and prints:
+The example needs no credentials or Agent and prints:
 
 ```text
 calculate --completed--> done
 ```
 
-Here is its complete implementation, runnable as `demo.ts` in the checkout root:
+This is all of it. Save it as `demo.ts` in the checkout root and run
+`node demo.ts`; no build is needed.
 
 ```ts
 import { final, machine, operation, run } from "./src/index.ts";
@@ -55,25 +58,36 @@ const result = await run(workflow);
 console.log(`calculate --completed--> ${String(result.value)}`);
 ```
 
-Run it with `node demo.ts`. No build is needed to develop against the source.
+### More examples
 
-| Example | Command | Requirements |
+Offline, Node only:
+
+| Example | Command |
+| --- | --- |
+| Deterministic Operation | `npm run example` |
+| Human input (needs a terminal) | `node examples/human.ts` |
+| Suggestions and choices (needs a terminal) | `node examples/choices.ts` |
+| Agent contract, with a fake runner | `node examples/agent.ts` |
+| Agent escalation, with fake runners | `npm run example:agents` |
+| Child host and Human response | `npm run example:host` |
+| Decision-based failure triage, from a fixture | `npm run example:decision` |
+
+With a real Agent. These may use the network and your model plan or credits:
+
+| Agent | Command | Needs |
 | --- | --- | --- |
-| Deterministic Operation | `npm run example` | Node only |
-| Human input | `node examples/human.ts` | Terminal input |
-| Suggestions and choices | `node examples/choices.ts` | Terminal input |
-| Agent contract | `node examples/agent.ts` | Built-in fake runner |
-| Decision-based failure triage | `npm run example:decision` | Offline fixture; opt-in `-- --live --provider NAME`: `jev`, `openrouter`, `laya`, or `von` (self-hosted for Laya/Von) |
-| Agent escalation | `npm run example:agents` | Built-in fake runners |
-| Child host and Human response | `npm run example:host` | Node only |
-| Real Agent writes and verifies a file | `npm run example:pi` | Configured Pi through `pi-acp`; may use network and model credits |
-| Real AGY writes and verifies a file | `npm run example:agy` | Configured Antigravity CLI (`agy`); may use network and model credits |
-| Real Claude Code writes and verifies a file | `npm run example:claude` | Installed, logged-in Claude Code CLI (`claude`); uses your Claude plan or API credits |
-| Real Codex writes and verifies a file | `npm run example:codex` | Configured Codex CLI; may use network and model credits |
-| Real ChatGPT web writes through rig-bridge | `npm run example:chatgpt-web` | rig-bridge connected to ChatGPT, a signed-in automation browser profile; uses your ChatGPT plan |
-| Real DeepSeek Harness writes and verifies a file | `npm run example:deepseek` | Installed `dsh` with a configured ACP profile; may use network and model credits |
+| Pi | `npm run example:pi` | Pi configured through `pi-acp` |
+| Antigravity | `npm run example:agy` | The `agy` CLI configured |
+| Claude Code | `npm run example:claude` | The `claude` CLI, logged in |
+| Codex | `npm run example:codex` | The Codex CLI configured |
+| ChatGPT web | `npm run example:chatgpt-web` | rig-bridge connected to ChatGPT, in a signed-in automation browser profile |
+| DeepSeek Harness | `npm run example:deepseek` | `dsh` with a configured ACP profile |
 
-## Run your own workflows
+Each real-Agent example writes a file and verifies it. The decision example
+also runs live with `-- --live --provider NAME`, where `NAME` is `jev`,
+`openrouter`, `laya` or `von` (Laya and Von are self-hosted).
+
+## Write your own Machine
 
 Save this as `.machines/hello.ts` in your project:
 
@@ -99,7 +113,7 @@ export default function hello(
 }
 ```
 
-From the checkout, run:
+Then, from the checkout:
 
 ```bash
 ./machine list
@@ -107,274 +121,159 @@ From the checkout, run:
 ./machine run hello "Hello from Machines."
 ```
 
-The command reports the Machine path and state progress, then prints `--> done`.
-In another project, use the checkout's absolute `machine` path or install the npm
-package below. The `MachinePrimitives` import is type-only; executing this definition
-uses the primitives supplied by the launcher.
+It prints the Machine's path and each state, then `--> done`. From another
+project, use the checkout's absolute `machine` path or install the npm package.
+The `MachinePrimitives` import is type-only: the launcher supplies the real
+primitives.
 
-Discovery checks the nearest project `.machines/` and then `~/.machines/`.
-Project definitions replace global definitions with the same name. Files can be
-`name.ts` or `name/index.ts`; the single file wins if both exist. `agents.ts` is
-reserved for Agent presets. Invalid definitions remain visible with their own
-diagnostics; other valid Machines remain usable.
+How Machines are found:
 
-Read [Authoring Machines](docs/authoring.md) for Human input, Agent roles and
-presets, feedback loops, and the programmatic launcher.
+- The nearest project `.machines/` first, then `~/.machines/`. A project
+  Machine replaces a global one with the same name.
+- A Machine is `name.ts` or `name/index.ts`; if both exist, the single file
+  wins.
+- `agents.ts` is reserved for Agent presets.
+- A broken definition stays listed with its own error, and the others keep
+  working.
 
-## Set up a project for Machine delegation
+Structured input: `machine run <name> --input-file file.json`, or
+`--input-file -` for stdin. Positional string input still works.
 
-Use [machine-project-setup](skills/machine-project-setup/SKILL.md) as the project
-orchestrator's entry point. It inspects the project's major work, reuses or builds
-useful project-specific Machines, verifies them, and records delegation routes in
-`.machines/README.md` or the existing project equivalent. It produces working
-workflows rather than only recommendations, without imposing a fixed suite.
+Next: [Authoring Machines](docs/authoring.md) covers Human input, Agent roles
+and presets, feedback loops, saved data, timed waits, structured input and
+output, and the programmatic launcher.
+
+## Delegate work through Machines
+
+Three skills teach coding agents to use Machines. They ship in the npm package
+and the portable plugin.
+
+| Skill | What it does |
+| --- | --- |
+| [machine-project-setup](skills/machine-project-setup/SKILL.md) | The project orchestrator's entry point. Inspects the project's major work, reuses or builds the Machines it needs, verifies them, and records delegation routes in `.machines/README.md` (or the project's equivalent). |
+| [machine-delegation](skills/machine-delegation/SKILL.md) | Has a coordinating agent run Machines instead of native sub-agents: find or create a workflow, launch it, supervise it, collect its result. |
+| [machine-builder](skills/machine-builder/SKILL.md) | Creates a task-specific Machine when no existing one fits. |
+
+Example prompts:
 
 > Set up this project's Machines as its orchestrator. Build the workflows that
 > support its major work, verify the safe paths, and establish delegation routes.
 
-Use setup for onboarding or meaningful coverage gaps, not every assignment.
-The orchestrator owns the map; workers execute their assigned Machine state.
-Existing budgets, execution permissions, and Human approvals remain in force.
-
-## Delegate agent work through Machines
-
-The [machine-delegation skill](skills/machine-delegation/SKILL.md) directs a coordinating agent
-to prefer Machine runs in place of native sub-agents: discover a suitable workflow,
-or create a task-specific one with [machine-builder](skills/machine-builder/SKILL.md),
-launch it, supervise it, and collect its result. For example:
-
 > Use machine-delegation to review the parser and its tests. Reuse an existing
 > Machine if one fits, or create one for this task, then bring back the findings.
 
-Delegated workers receive explicit task context and produce result artifacts the
-coordinating agent can read. Runs remain session-scoped; the skill does not add
-durable sessions or arbitrary messaging between agents. All three skills ship in the
-npm package and portable plugin. To make them available in every project for
-Claude Code, Codex, Pi, and Antigravity, install them at user level:
+A few rules of thumb:
+
+- Run setup when onboarding a project or when coverage has a real gap, not for
+  every assignment. It builds working workflows, not just recommendations, and
+  doesn't impose a fixed suite.
+- The orchestrator owns the map. Workers carry out the Machine state they were
+  given.
+- Existing budgets, permissions and Human approvals stay in force.
+- Delegated runs belong to the session that started them. The skills add no
+  durable sessions and no free-form messaging between agents.
+
+Install the skills for Claude Code, Codex, Pi and Antigravity in every project:
 
 ```bash
 npx skills add dna113p/machines --global --skill '*' \
   --agent claude-code codex pi antigravity
 ```
 
-[Integrations](docs/integrations.md#install-the-skills-for-every-agent) covers
-linking them from a checkout instead.
+To link them from a checkout instead, see
+[Integrations](docs/integrations.md#install-the-skills-for-every-agent).
 
 ## Install from npm
-
-Install the package in your project:
 
 ```bash
 npm install @dna113p/machines
 npx machine list
 ```
 
-Or run the CLI without adding a project dependency:
+Other ways:
 
-```bash
-npx @dna113p/machines list
-```
+- Without a project dependency: `npx @dna113p/machines list`.
+- Globally: `npm install --global @dna113p/machines`, then `machine list`.
+- From a checkout: `npm ci && npm pack`, then
+  `npm install /absolute/path/to/machines/dna113p-machines-0.4.0.tgz`.
 
-The command is still named `machine`. For a global installation, run
-`npm install --global @dna113p/machines`, then use `machine list` or `machine run`.
+The command is always `machine`. The package ships JavaScript and TypeScript
+declarations; import `{ machine, agent, human, operation, wait, final, run }`
+from `"@dna113p/machines"`. Keep your workflow definitions as ordinary
+TypeScript outside `node_modules`.
 
-To install a build from a checkout instead:
+For **Codex MCP**, the **portable Codex plugin** or the **Pi extension**, see
+[Integrations](docs/integrations.md). The direct MCP setup needs no personal
+marketplace or developer-only install script.
 
-```bash
-npm ci
-npm pack
-```
+## Watch and answer runs
 
-Then install the generated `dna113p-machines-0.4.0.tgz` into a project:
+Every run the `machine` command starts publishes its status to a private
+per-user directory (`~/.local/state/machines/runs`, or under
+`XDG_STATE_HOME`). Nothing needs configuring. Set `MACHINES_RUN_STATUS_DIR` to `off` to turn it off, or to a
+directory to move it.
 
-```bash
-npm install /absolute/path/to/machines/dna113p-machines-0.4.0.tgz
-npx machine list
-```
+| Command | What it does |
+| --- | --- |
+| `machine runs` | Running, waiting and sleeping runs, with each waiting run's prompt, request id and choices |
+| `machine respond <run-id> <request-id> <response>` | Answer a waiting run from anywhere |
+| `machine ui` | A live local page of every run, drawing its Machine as a graph |
+| `machine watch <run>` | Show a run this session didn't start (say, a daemon's ticket) on its status line |
+| `machine continue <run-id>` | Continue a run whose process stopped, from its last checkpoint |
 
-The package contains JavaScript and TypeScript declarations. Application code can
-import `{ machine, agent, human, operation, wait, final, run }` from `"@dna113p/machines"`.
-Workflow definitions remain ordinary TypeScript outside `node_modules`.
+A run with no terminal, for example one started by an agent or a script, waits
+for `machine respond` instead of failing. Anything running as the same user
+can answer a waiting run, approvals included.
 
-For **Codex MCP**, **the portable Codex plugin**, or **the Pi extension**, follow
-[Integrations](docs/integrations.md). No personal marketplace or developer-only
-installation script is required for the direct MCP setup.
-Hosts that only run a status-line command, such as Claude Code, can show running
-Machines through [run status publication](docs/integrations.md#run-status-for-host-status-lines).
+Status-line hosts such as Claude Code can show running Machines too: see
+[run status for host status lines](docs/integrations.md#run-status-for-host-status-lines).
 
-Publication is on by default, in a private per-user directory
-(`~/.local/state/machines/runs`, or under `XDG_STATE_HOME`), so nothing has to be
-configured. Set `MACHINES_RUN_STATUS_DIR` to `off` to turn it off, or to a
-directory to move it. A published run that is waiting for a Human can be
-answered from outside its own terminal:
+Every flag, sleeping runs, and how continuation works are in
+[Running, watching and continuing runs](docs/running.md).
 
-```bash
-machine runs [--json] [--all]                      # running, waiting and sleeping runs; --all adds finished and lost ones
-machine runs --for [<session>] [--project <dir>] [--json] [--all]   # the runs one viewer shows
-machine respond <run-id> <request-id> <response>   # answer a waiting run
-machine watch [<run-id-or-label-start> | --dir <path>]     # show other runs on this session's status line
-machine unwatch <run-id-or-label-start> | --dir <path> | --all
-machine ui [--port <port>] [--project <dir>]       # a live page of every run, with its Machine drawn as a graph
-```
+## Good to know
 
-`machine runs` shows each waiting run's prompt, request id, and choices. A run
-started without a terminal, for example by a coordinating agent or a script,
-waits for `machine respond` instead of failing. Anything running as the same user
-can answer a waiting run, including an approval; see
-[answering a waiting run from outside](docs/integrations.md#answering-a-waiting-run-from-outside).
-Runs hosted through `startMachineHost` publish too and are answered through their
-host while active. A session shows the runs it started; `machine watch` adds runs it did not,
-such as a ticket a daemon runs. See
-[watching other runs](docs/integrations.md#watching-other-runs).
-`machine runs --for` and the `@dna113p/machines/run-status` export answer which
-runs one session shows, so any application can
-[draw its own widgets](docs/integrations.md#drawing-your-own-widgets); `watch`
-and `unwatch` take `--for <session>` first to manage that session's list.
-`machine ui` serves a local page of every published run, drawing each run's
-Machine with its current state and the path it took, answering waiting runs, and
-showing a project's own panels; see
-[watching runs in a browser](docs/integrations.md#watching-runs-in-a-browser).
+- **Machine files are trusted code.** Discovery imports them, and their
+  relative imports, to read their metadata. Operations and Agents run with
+  your access and can change files or reach external services. Discovery
+  workers are not a sandbox.
+- **A Machine owns its own decisions:** retries, approvals, merges and
+  cleanup. Stopping a process does not undo file or Git changes.
+- **Runs can sleep.** `machine run <name> --sleep` ends the process at a timed
+  wait or a Human request, and `machine continue` picks it up later. Machines
+  runs no background scheduler.
+- **ACP permission requests aren't supported yet:** they fail the Agent state.
+  Pick a harness configuration that can do the bounded task, and put decisions
+  in Human states.
+- **Agents default to Pi** (`npx -y pi-acp`). Built-in presets select Claude
+  Code, Codex, Antigravity, ChatGPT web, DeepSeek Harness or a decision
+  provider instead; see [Agent presets](docs/running.md#agent-presets).
 
-## Execution model and limitations
-
-Use `p.wait({ every: "10m" }, { due: "check" })` for a
-[timed wait](docs/authoring.md#timed-waits). By default its timer keeps the process
-running. To sleep between checks without keeping a process open:
-
-```sh
-machine run my-workflow --sleep
-machine continue <run-id>
-```
-
-`--sleep` requires run status publication. At a timed wait, a sleeping run records
-its `due` time; continuing before then reports that time and changes nothing.
-Once due, it takes the `due` transition, keeping `--sleep` for the next wait.
-
-At a Human request, `--sleep` also ends the process. The sleeping record holds
-`human` with the prompt, request id and choices, without `due`. Answer it with
-`machine respond <run-id> <request-id> <response>`; this records `human.answer`
-and leaves the run sleeping. Wrong request ids, unoffered choices, discussion
-questions (`--question`), and second answers are refused. An unanswered
-`machine continue` reports the request and how to answer it, changing nothing.
-After an answer, continuing uses it without asking again, checking the state's
-choices. Without `--sleep`, Human requests keep waiting in the running process.
-
-`machine runs`, `machine ui`, and the Claude status line keep sleeping runs
-visible even though their process has ended. They show the Human request or
-the due time; `machine runs --json` includes a `sleep` field with the same
-details and whether the request is answered or the wait is due. In the UI,
-an unanswered request has an answer form. Sending records the answer and says
-how the run wakes; there is no wake button. On the status line, an unanswered
-request needs attention just like a waiting run; an answered request or timed
-wait uses a calm style with `answered` or its due time.
-
-An external scheduler or timer can call `machine continue --due` to wake every
-answered or due sleeping run in order. It skips runs started by a host, continues
-past failures, reports each failure and exits nonzero if any fail. Machines runs
-no background scheduler.
-
-Hosts can use `startMachineHost({ machine, sleep: true, publishRunStatus: true })`.
-Its result includes `sleeping.human` with a request id or `sleeping.due`.
-`machine respond` records a sleeping run's answer; its host wakes it with
-`startMachineHost({ continue: runId })`, retaining sleep for later waits.
-
-Machine definitions and Agent preset files are **trusted executable code**.
-Discovery imports them to inspect metadata, including their relative imports.
-Keep module initialization free of side effects and do work inside states.
-Disposable discovery workers refresh imported metadata; they are not a sandbox.
-Operations and configured Agents run with the launching process's available access
-and can modify files or contact external services.
-
-Pi and MCP runs belong to the current session. Closing or reloading that session
-terminates its owned hosts. Published runs save a checkpoint at each state entry;
-`machine continue <run-id>` continues an unfinished run after its process stops,
-using the same id and trail. The saved step runs again from its start. Use
-[`p.data()` or XState context](docs/authoring.md#saved-working-data) for data that
-must survive, and see [continuing runs](docs/integrations.md#continuing-a-run) for
-checkpoint files and refusal rules. Process shutdown does not undo files or Git
-changes. A Machine owns its own retry, approval, merge,
-and cleanup decisions. See [Architecture](docs/architecture.md) for ownership and
-process-lifecycle limits.
-
-ACP permission requests are currently unsupported and fail the Agent state. Choose
-a harness configuration that can carry out the intended bounded task and put
-workflow decisions in Human states. The launcher defaults unnamed Agents to
-`npx -y pi-acp`; [Agent presets](docs/authoring.md#agent-presets) let you select
-another ACP command or runner explicitly.
-
-The built-in `agy` preset selects the Antigravity CLI with AGY permission checks
-enabled. [AGY configuration](docs/authoring.md#antigravity-agy) explains runner
-settings and explicit opt-in to automatic tool approval. `npm run example:agy`
-opts in for its temporary-directory demonstration.
-
-The built-in `claude` preset runs the installed Claude Code CLI headlessly with
-its existing login. Tools run only where Claude Code's own permission rules
-already allow them; nothing prompts. See [Claude Code configuration](docs/authoring.md#claude-code)
-for model, effort, and tool-restriction presets.
-
-The built-in `codex` preset runs the Codex CLI in a read-only sandbox. See
-[Codex configuration](docs/authoring.md#codex) for a preset that permits workspace
-edits and options for running outside a Git repository.
-
-The built-in `chatgpt-web` preset opens a new ChatGPT web conversation in a
-dedicated Chromium profile and directs it to work in the Agent's directory
-through rig-bridge. See [ChatGPT Web configuration](docs/authoring.md#chatgpt-web)
-for the one-time connector and browser login setup.
-
-The provider-neutral `decisionAgent(provider)` turns a classification into an
-Agent event without changing the runtime. Use `jevProvider()` / preset `jev`
-for direct TypeSafe access, or `openRouterDecisionProvider()` / preset
-`openrouter-decision` with `OPENROUTER_API_KEY`. Self-hosted `layaProvider()` /
-preset `laya` and `vonProvider()` / preset `von` use the same interface. All evaluate
-only explicitly supplied evidence; none is a coding agent. See
-[Self-hosted Laya/Von setup](docs/local-decisions.md) for the opt-in Python service
-and deployment limitations, and
-[Decision runners](docs/authoring.md#decision-runners) for provider swapping,
-confidence-aware workflow routing, and the opt-in live example.
-
-The built-in `deepseek` preset runs DeepSeek Harness through `dsh --profile acp`,
-reusing the ACP runner and preserving DSH's configured permissions. Select it with
-`machine run my-workflow --agent default=deepseek -- "Do the task"`. See
-[DeepSeek Harness configuration](docs/authoring.md#deepseek-harness-dsh) for setup,
-custom profiles, and configuration overlays.
+[Architecture](docs/architecture.md) covers ownership and process lifecycle.
 
 ## Checks
 
 ```bash
-npm run check          # typecheck and behavior tests
-npm run test:laya-service # optional Python bridge tests via uv; no model weights
-npm run build          # JavaScript, declarations, examples, and UI assets
-npm run smoke:package  # install a tarball in a temporary project and exercise it
+npm run check              # typecheck and behaviour tests
+npm run test:laya-service  # optional Python bridge tests via uv; no model weights
+npm run build              # JavaScript, declarations, examples and UI assets
+npm run smoke:package      # install a tarball in a temporary project and exercise it
 npm run build:plugin
-npm run smoke:plugin   # exercise a relocated standalone plugin
+npm run smoke:plugin       # exercise a relocated standalone plugin
 ```
 
 ## Releasing
 
-The [publishing workflow](.github/workflows/publish.yml) uses a standard GitHub
-runner and npm trusted publishing, without an npm token stored in GitHub.
-A release is a change to the version in `package.json`. When `main` receives a
-stable version that npm does not have yet, the workflow runs the checks above,
-publishes to npm if they pass, and tags the commit `vX.Y.Z`. Every other push to
-`main` publishes nothing.
+Bump the version in `package.json` on a branch and merge it. When `main` gets
+a stable version npm doesn't have, CI runs the checks, publishes to npm and
+tags the commit `vX.Y.Z`. Details in [Releasing](docs/releasing.md).
 
-For example, to release the next minor version, bump it on a branch and merge
-that branch:
+## For applications
 
-```bash
-npm version minor --no-git-tag-version
-git commit -am "Release X.Y.0"
-```
-
-Pushing a `vX.Y.Z` tag yourself still publishes that version if npm lacks it;
-the tag must match the stable version in `package.json`. Running **Publish to
-npm** manually in GitHub Actions performs the checks and a publishing dry run;
-it does not publish a package.
+- `@dna113p/machines/host` runs a Machine under your own lifecycle; hosted
+  results include optional JSON workflow output.
+- `@dna113p/machines/run-status` and `machine runs --for` tell you which runs
+  one session shows, so you can
+  [draw your own widgets](docs/integrations.md#drawing-your-own-widgets).
 
 Licensed under the [MIT License](LICENSE).
-
-Structured launch input is supported with `machine run <name> --input-file file.json`
-(or `--input-file -` for stdin), and directly through MCP/Pi tools. Existing
-positional string inputs still work. See [authoring](docs/authoring.md#structured-input-and-workflow-output).
-Applications that need their own execution lifecycle can use the supported
-`@dna113p/machines/host` export; hosted results include optional JSON workflow output.

@@ -100,6 +100,8 @@
     "docs/authoring.md",
     "docs/integrations.md",
     "docs/local-decisions.md",
+    "docs/releasing.md",
+    "docs/running.md",
     "services/laya/server.py",
     "skills",
     "LICENSE",
