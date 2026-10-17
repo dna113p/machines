@@ -1642,3 +1642,116 @@ test("run status readers reject malformed retry fields but accept additional ret
   await writeFile(file, JSON.stringify({ ...base, retry: { attempt: 2, of: 4, due, extra: true } }));
   assert.equal(readRunStatuses(directory).length, 1);
 });
+
+test("attempt status names the current role and clears stale identity, waits, and finished attempts", async (context) => {
+  const directory = await temporaryDirectory(context);
+  const publisher = createRunStatusPublisher({ ...run, id: "attempt" }, { MACHINES_RUN_STATUS_DIR: directory });
+  const observer = runStatusObserver((change) => publisher.update(change));
+  observer.onState("work");
+  observer.onAgentUpdate({ type: "identity", harness: "old" });
+  observer.onAgentUpdate({ type: "limit", status: "waiting", agent: "old", text: "Waiting" });
+  observer.onAgentUpdate({ type: "attempt", role: "spare", text: "Using fallback role: spare" });
+  await Promise.resolve();
+  const record = () => readRunStatuses(directory)[0]!;
+  assert.deepEqual(record().attempt, { role: "spare", text: "Using fallback role: spare" });
+  assert.equal(record().agent, undefined);
+  assert.equal(record().limit, undefined);
+  observer.onAgentUpdate({ type: "identity", harness: "new" });
+  await Promise.resolve();
+  assert.deepEqual(record().agent, { harness: "new" });
+  assert.equal(record().attempt?.role, "spare");
+  observer.onState("review");
+  assert.equal(record().attempt, undefined);
+  observer.onAgentUpdate({ type: "attempt", role: "reviewer", text: "Asking again: reviewer" });
+  publisher.finish({ error: "crashed" });
+  assert.equal(record().attempt, undefined);
+});
+
+test("run status readers reject malformed attempt fields", async (context) => {
+  const directory = await temporaryDirectory(context);
+  const publisher = createRunStatusPublisher({ ...run, id: "attempt-shape" }, { MACHINES_RUN_STATUS_DIR: directory });
+  const file = join(directory, "attempt-shape.json");
+  const base = JSON.parse(await readFile(file, "utf8"));
+  for (const attempt of [null, "spare", {}, { role: "spare" }, { role: 7, text: "bad" }]) {
+    await writeFile(file, JSON.stringify({ ...base, attempt }));
+    assert.deepEqual(readRunStatuses(directory), []);
+  }
+  publisher.update({ attempt: { role: "spare", text: "Trying spare" } });
+  assert.deepEqual(readRunStatuses(directory)[0]?.attempt, { role: "spare", text: "Trying spare" });
+});
+
+for (const surface of ["host", "session", "cli"] as const) {
+  test(`Agent recovery publishes the fallback role through ${surface}`, async (context) => {
+    const root = await temporaryDirectory(context);
+    const directory = join(root, "status");
+    const release = join(root, "release");
+    await mkdir(join(root, ".machines"));
+    await writeFile(join(root, ".machines", "agents.ts"), [
+      'import { existsSync } from "node:fs";',
+      'export default () => ({',
+      '  worker: { description: "Fails", runner: () => { throw new Error("worker crashed"); } },',
+      '  spare: { description: "Answers", runner: async (_request, report) => {',
+      '    report?.({ type: "identity", harness: "spare-harness" });',
+      `    while (!existsSync(${JSON.stringify(release)})) await new Promise((resolve) => setTimeout(resolve, 10));`,
+      '    return { type: "completed" };',
+      '  } },',
+      '});',
+    ].join("\n"));
+    await writeFile(join(root, ".machines", "work.ts"), [
+      'export const description = "Exercises recovery visibility.";',
+      'export const agentRoles = { worker: "Works", spare: "Takes over" };',
+      'export default ({ machine, agent, final, operation }) => machine({ initial: "prepare", states: {',
+      '  prepare: operation(() => ({ type: "ready" }), { ready: "work" }),',
+      '  work: agent("Work", { completed: "done" }, { using: "worker", fallback: "spare" }),',
+      '  done: final(),',
+      '} });',
+    ].join("\n"));
+    publishFrom(context, { MACHINES_RUN_STATUS_DIR: directory });
+    const options = { cwd: root, home: join(root, "home"), machine: "work", publishRunStatus: true };
+    const updates: import("../src/index.ts").AgentUpdate[] = [];
+    let session: MachineSession | undefined;
+    let stderr = "";
+    let finished: Promise<unknown>;
+    if (surface === "host") {
+      const host = await startMachineHost({ ...options, onAgentUpdate: (update) => updates.push(update) });
+      context.after(() => host.terminate());
+      finished = host.result;
+    } else if (surface === "session") {
+      session = new MachineSession();
+      context.after(() => session!.close());
+      const started = await session.start(options);
+      finished = Promise.resolve(started);
+    } else {
+      const child = spawn(process.execPath, [resolve("src/cli.ts"), "run", "work"], {
+        cwd: root, env: { ...process.env, MACHINES_USER_HOME: options.home }, stdio: ["ignore", "pipe", "pipe"],
+      });
+      context.after(() => child.kill());
+      child.stderr.on("data", (chunk) => { stderr += String(chunk); });
+      finished = new Promise((resolve, reject) => {
+        child.once("error", reject);
+        child.once("close", (code) => code === 0 ? resolve(code) : reject(new Error(stderr)));
+      });
+    }
+    // Keep a failing child from becoming an unhandled rejection before the status assertion.
+    void finished.catch(() => {});
+    const record = () => readRunStatuses(directory)[0];
+    await eventually(() => assert.equal(record()?.attempt?.role, "spare"));
+    await eventually(() => assert.deepEqual(record()?.agent, { harness: "spare-harness" }));
+    assert.match(record()!.attempt!.text, /Using fallback role: spare; last attempt returned no outcome: worker crashed/u);
+    if (surface === "host") {
+      assert.deepEqual(updates.filter((update) => update.type === "attempt").map((update) => update.role), ["worker", "spare"]);
+    } else if (session) {
+      await eventually(() => assert.deepEqual(session!.status()[0]?.attempt, record()!.attempt));
+    } else {
+      await eventually(() => {
+        assert.match(stderr, /Asking again: worker/u);
+        assert.match(stderr, /Using fallback role: spare/u);
+      });
+    }
+    await writeFile(release, "go");
+    await finished;
+    await eventually(() => assert.equal(record()?.status, "completed"));
+    assert.equal(record()?.attempt, undefined);
+    if (session) await eventually(() => assert.equal(session!.status()[0]?.attempt, undefined));
+  });
+}

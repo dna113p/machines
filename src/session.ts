@@ -20,6 +20,8 @@ export interface RunSnapshot {
   readonly updatedAt: string;
   readonly elapsedSeconds: number;
   readonly agent?: Extract<AgentUpdate, { type: "identity" }>;
+  /** Latest further Agent attempt in this state. */
+  readonly attempt?: Pick<Extract<AgentUpdate, { type: "attempt" }>, "role" | "text">;
   /** Present while the current Agent state waits for a usage limit to reset; `status` stays `running`. */
   readonly limit?: { readonly text: string; readonly until?: string };
   readonly human?: HostedHumanRequest;
@@ -38,6 +40,7 @@ interface RunRecord {
   human?: HostedHumanRequest;
   agent?: Extract<AgentUpdate, { type: "identity" }>;
   limit?: RunSnapshot["limit"];
+  attempt?: RunSnapshot["attempt"];
   error?: string;
 }
 
@@ -83,11 +86,17 @@ export class MachineSession {
           if (JSON.stringify(run.state) !== JSON.stringify(state)) {
             run.agent = undefined;
             run.limit = undefined;
+            run.attempt = undefined;
           }
           run.state = state;
         }),
         onAgentUpdate: (agent) => {
           if (agent.type === "identity") update("updated", (run) => { run.agent = agent; });
+          else if (agent.type === "attempt") update("updated", (run) => {
+            run.attempt = { role: agent.role, text: agent.text };
+            run.agent = undefined;
+            run.limit = undefined;
+          });
           // A swap while every preset is being tried again leaves the wait as it is shown.
           else if (agent.type === "limit" && agent.status !== "swapped") {
             update("updated", (run) => {
@@ -213,6 +222,7 @@ export class MachineSession {
     run.human = undefined;
     run.agent = undefined;
     run.limit = undefined;
+    run.attempt = undefined;
     run.updatedAt = Date.now();
     const terminal = [...this.#runs.values()]
       .filter((item) => !isActive(item.status))
@@ -251,6 +261,7 @@ function snapshot(run: RunRecord): RunSnapshot {
     updatedAt: new Date(run.updatedAt).toISOString(),
     elapsedSeconds: Math.floor(((isActive(run.status) ? Date.now() : run.updatedAt) - run.startedAt) / 1_000),
     ...(run.agent === undefined ? {} : { agent: { ...run.agent } }),
+    ...(run.attempt === undefined ? {} : { attempt: { ...run.attempt } }),
     ...(run.limit === undefined ? {} : { limit: { ...run.limit } }),
     ...(run.human === undefined ? {} : { human: structuredClone(run.human) }),
     ...(run.error === undefined ? {} : { error: run.error }),
