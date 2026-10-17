@@ -180,6 +180,9 @@ const machines = setup({
     humanInputStarted: () => {},
   },
   actors: {
+    use: fromPromise<Event, { readonly selector: string; readonly input: unknown }>(async () => {
+      throw new Error("Machine states require prepareMachineRun; run() cannot load a child Machine");
+    }),
     retry: fromPromise<Event, RetryInvocation>(async () => {
       throw new Error("Operation retries require run()");
     }),
@@ -276,6 +279,25 @@ export function operation<const TTransitions extends Readonly<Record<string, unk
   } as const;
 }
 
+/** Run a prepared child Machine and route on its declared ending. */
+export function use<const TTransitions extends Readonly<Record<string, unknown>>>(
+  selector: string,
+  options: { readonly input: () => unknown; readonly on: TTransitions },
+) {
+  if (typeof selector !== "string" || selector.trim() === "" || selector !== selector.trim()) {
+    throw new Error("Machine use selector must be a non-empty trimmed string");
+  }
+  return {
+    meta: { "machines.use": { selector } },
+    invoke: {
+      src: "use",
+      input: () => ({ selector, input: options.input() }),
+      ...actorLifecycle("Machine", options.on),
+    },
+    on: options.on,
+  } as const;
+}
+
 export function human<const TTransitions extends Readonly<Record<string, unknown>>>(
   prompt: HumanPrompt,
   on: TTransitions,
@@ -354,7 +376,7 @@ export function agent<const TTransitions extends Readonly<Record<string, unknown
 }
 
 function actorLifecycle(
-  actorName: "Agent" | "Human" | "Operation" | "Wait",
+  actorName: "Agent" | "Human" | "Operation" | "Wait" | "Machine",
   on: Readonly<Record<string, unknown>>,
 ) {
   return {
@@ -423,6 +445,7 @@ export interface MachinePrimitives {
   readonly machine: typeof machine;
   readonly operation: typeof operation;
   readonly wait: typeof wait;
+  readonly use: typeof use;
 }
 
 export function requiredAgentNames(
@@ -719,7 +742,7 @@ function assertRequiredAgentRunners(
 }
 
 function assertHandledEvent(
-  actorName: "Agent" | "Human" | "Operation" | "Wait",
+  actorName: "Agent" | "Human" | "Operation" | "Wait" | "Machine",
   event: unknown,
   transitions: Readonly<Record<string, unknown>>,
   state: StateValue,
@@ -739,7 +762,7 @@ function assertHandledEvent(
 }
 
 function actorError(
-  actorName: "Agent" | "Human" | "Operation" | "Wait",
+  actorName: "Agent" | "Human" | "Operation" | "Wait" | "Machine",
   cause: unknown,
   state: StateValue,
 ): Error {

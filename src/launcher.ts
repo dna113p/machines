@@ -1,14 +1,15 @@
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { existsSync } from "node:fs";
 
-import type { AnyStateMachine, SnapshotFrom } from "xstate";
+import { fromPromise, type AnyStateMachine, type SnapshotFrom } from "xstate";
 
 import { assertJsonValue, jsonProblem, type JsonValue } from "./json.ts";
 import { fallbackPresets, type AgentPreset } from "./agent-bindings.ts";
 import { createLimitMemory, defaultProbeMs, limitAwareRunner, type LimitPolicy } from "./agent-limits.ts";
 import { configuredAgentPresets, type LauncherLocation, type MachineSummary, type AgentPresetSummary } from "./catalog.ts";
 import { queryCatalog } from "./discovery-worker.ts";
-import { loadMachineModule, readAgentRoles, requireMachineDescription } from "./machine-module.ts";
+import { loadMachineModule, readAgentRoles, readUses, requireMachineDescription } from "./machine-module.ts";
+import { assertUseStates, loadUseTree, usedModules, type UseModule } from "./composition.ts";
 import { assertEndingOutput, assertEndingStates, readEndings } from "./endings.ts";
 export type { LauncherLocation, MachineSummary, AgentPresetSummary } from "./catalog.ts";
 import { discoverMachines, machinesUserHome } from "./discovery.ts";
@@ -22,6 +23,8 @@ import {
   requiredAgentNames,
   run,
   wait,
+  use,
+  type Event,
   type AgentRunner,
   type RunOptions,
 } from "./index.ts";
@@ -74,32 +77,24 @@ export async function prepareMachineRun(
   const agentRoles = readAgentRoles(loaded, path);
   const endings = readEndings(loaded, path);
 
-  if (typeof loaded.default !== "function") {
-    throw new Error(`Machine "${path}" must default-export a factory`);
-  }
-
-  let savedData: object = {};
-  let dataCalled = false;
-  const data = <T extends object>(initial: T): T => {
-    if (dataCalled) throw new Error("p.data() may only be called once per Machine factory");
-    dataCalled = true;
-    initializeData(initial);
-    savedData = options.continueRun ? structuredClone(options.continueRun.data) : initial;
-    return savedData as T;
-  };
-  const definition = await loaded.default(
-    { agent, final, human, machine, operation, wait, data },
-    options.input === undefined ? "" : options.input,
-  ) as AnyStateMachine;
+  const { definition, savedData } = await buildDefinition(loaded, path,
+    options.input === undefined ? "" : options.input, options.continueRun?.data);
+  const children = await loadUseTree(path, readUses(loaded, path), { cwd, home }, definition);
+  assertUseStates(definition, path, children);
   assertEndingStates(definition, endings, path);
   if (options.continueRun) assertSavedState(definition.root, options.continueRun.state.value);
   const sourceHash = machineSourceHash(path);
   const configured = await configuredAgentPresets(cwd, home);
   const usedAgentRoles = requiredAgentNames(definition);
-  const requiredRoles = new Set([...usedAgentRoles, ...Object.keys(agentRoles)]);
+  const childModules = usedModules(children);
+  const requiredRoles = new Set([
+    ...usedAgentRoles, ...Object.keys(agentRoles),
+    ...childModules.flatMap((child) => ["default", ...Object.keys(child.agentRoles)]),
+  ]);
   const overrides = options.agents ?? {};
   const agents = applyAgentOverrides(path, configured.agents, configured.presets, requiredRoles, overrides);
   preflightAgentRoles(path, usedAgentRoles, agentRoles, agents);
+  for (const child of childModules) preflightAgentRoles(child.path, ["default"], child.agentRoles, agents);
   const limitAware = limitAwareAgents(requiredRoles, overrides, configured, limitPolicy(options.agentLimits));
 
   let started = false;
@@ -135,7 +130,15 @@ export async function prepareMachineRun(
           throw cause;
         }
       };
-      return run(definition, {
+      const shared: RunOptions = {
+        agents: { ...agents, ...limitAware },
+        human: runtimeOptions.human,
+        onAgentUpdate: runtimeOptions.onAgentUpdate,
+        onHumanInput: runtimeOptions.onHumanInput,
+        ...((checkpoint?.sleep || runtimeOptions.onSleep || runtimeOptions.onHumanSleep)
+          ? { onSleep: unsupportedChildSleep, onHumanSleep: unsupportedChildSleep } : {}),
+      };
+      return run(definition.provide({ actors: { use: useActor(children, shared) } }), {
         ...runtimeOptions,
         ...(runtimeOptions.onSleep ? { onSleep(due: string) {
           if (!checkpoint || !existsSync(checkpointPath(checkpoint.directory, checkpoint.id))) {
@@ -184,6 +187,51 @@ export async function prepareMachineRun(
       });
     },
   };
+}
+
+/** Every invocation owns its working data, including repeated uses of one module. */
+async function buildDefinition(
+  loaded: Record<string, unknown>,
+  path: string,
+  input: JsonValue,
+  restoredData?: object,
+): Promise<{ definition: AnyStateMachine; savedData: object }> {
+  if (typeof loaded.default !== "function") throw new Error(`Machine "${path}" must default-export a factory`);
+  let savedData: object = {};
+  let dataCalled = false;
+  const data = <T extends object>(initial: T): T => {
+    if (dataCalled) throw new Error("p.data() may only be called once per Machine factory");
+    dataCalled = true;
+    initializeData(initial);
+    savedData = restoredData === undefined ? initial : structuredClone(restoredData);
+    return savedData as T;
+  };
+  const definition = await loaded.default(
+    { agent, final, human, machine, operation, wait, use, data }, input,
+  ) as AnyStateMachine;
+  return { definition, savedData };
+}
+
+function unsupportedChildSleep(): never {
+  throw new Error("Sleeping through a child Machine is not supported yet");
+}
+
+function useActor(children: ReadonlyMap<string, UseModule>, options: RunOptions) {
+  return fromPromise<Event, { readonly selector: string; readonly input: unknown }>(async ({ input }): Promise<Event> => {
+    const child = children.get(input.selector);
+    if (!child) throw new Error(`Child Machine "${input.selector}" was not loaded by prepareMachineRun`);
+    assertJsonValue(input.input, `Child Machine "${child.path}" input`);
+    const { definition } = await buildDefinition(child.loaded, child.path, input.input);
+    assertEndingStates(definition, child.endings, child.path);
+    assertUseStates(definition, child.path, child.children);
+    preflightAgentRoles(child.path, requiredAgentNames(definition), child.agentRoles, options.agents ?? {});
+    const snapshot = await run(definition.provide({ actors: { use: useActor(child.children, options) } }), options);
+    assertEndingOutput(snapshot, child.endings);
+    if (snapshot.status !== "done" || typeof snapshot.value !== "string" || !Object.hasOwn(child.endings, snapshot.value)) {
+      throw new Error(`Child Machine "${child.path}" did not reach a declared ending`);
+    }
+    return { type: snapshot.value, output: snapshot.output };
+  });
 }
 
 async function resolveMachine(selector: string, cwd: string, home: string): Promise<string> {
