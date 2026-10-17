@@ -127,19 +127,32 @@ export type AgentRunner = (
   report?: AgentReporter,
 ) => Event | Promise<Event>;
 
+export interface OperationRetry {
+  readonly on: string;
+  /** Number of further attempts, from 1 to 10. */
+  readonly times: number;
+  readonly wait: number | string;
+}
+
+interface RetryInvocation {
+  readonly run: () => Event | Promise<Event>;
+  readonly retry: OperationRetry;
+}
+
 export interface StateEntry {
   readonly value: StateValue;
   readonly context: unknown;
   readonly kind: "agent" | "operation" | "human" | "wait" | "final" | "state";
   readonly enteredAt: string;
   readonly due?: string;
+  readonly retry?: { readonly attempt: number; readonly of: number };
 }
 
 export interface RunOptions {
   readonly onEnter?: (entry: StateEntry) => void;
   /** Captures mutable working data before XState evaluates a step's input. */
   readonly onBeforeStep?: (context: unknown) => void;
-  readonly continueAt?: { readonly value: StateValue; readonly context: unknown; readonly due?: string };
+  readonly continueAt?: { readonly value: StateValue; readonly context: unknown; readonly due?: string; readonly retry?: StateEntry["retry"] };
   /** Stop at a future timed wait, after its entry has been checkpointed. */
   readonly onSleep?: (due: string) => void;
   /** Stop at a Human request, after its entry has been checkpointed. */
@@ -164,6 +177,9 @@ const machines = setup({
     humanInputStarted: () => {},
   },
   actors: {
+    retry: fromPromise<Event, RetryInvocation>(async () => {
+      throw new Error("Operation retries require run()");
+    }),
     wait: fromPromise<Event>(async () => {
       throw new Error("Timed waits require run()");
     }),
@@ -178,19 +194,50 @@ const machines = setup({
 
 const agentMetaKey = "machines.agent";
 const waitMetaKey = "machines.wait";
+const retryMetaKey = "machines.retry";
 
-export const machine = machines.createMachine;
+export const machine: typeof machines.createMachine = (config) => {
+  assertRetries(config);
+  return machines.createMachine(config);
+};
+
+function durationMs(value: unknown): number {
+  const units: Record<string, number> = { ms: 1, s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 };
+  const duration = typeof value === "string" ? /^(\d+(?:\.\d+)?)(ms|s|m|h|d)$/u.exec(value) : null;
+  const ms = typeof value === "number" ? value
+    : duration ? Number(duration[1]) * units[duration[2]!]! : Number.NaN;
+  return Number.isFinite(ms) && ms >= 1 && ms <= 8.64e15 - Date.now() ? ms : Number.NaN;
+}
+
+/** Validate where state paths are known, including nested definitions. */
+function assertRetries(value: unknown, path: string[] = []): void {
+  if (value === null || typeof value !== "object") return;
+  const state = value as { meta?: Record<string, unknown>; on?: Record<string, unknown>; states?: Record<string, unknown> };
+  const retry = state.meta?.[retryMetaKey];
+  if (retry !== undefined) {
+    const name = `State "${path.join(".")}" retry`;
+    if (retry === null || typeof retry !== "object") throw new Error(`${name} must be an object`);
+    const option = retry as Partial<OperationRetry>;
+    if (typeof option.on !== "string" || option.on === "" || !Object.hasOwn(state.on ?? {}, option.on) || state.on?.[option.on] === undefined) {
+      throw new Error(`${name}.on "${option.on}" is not one of its events`);
+    }
+    if (!Number.isInteger(option.times) || option.times! < 1 || option.times! > 10) {
+      throw new Error(`${name}.times must be an integer from 1 to 10`);
+    }
+    if (Number.isNaN(durationMs(option.wait))) {
+      throw new Error(`${name}.wait must be positive milliseconds or a duration such as 10m`);
+    }
+  }
+  for (const [key, child] of Object.entries(state.states ?? {})) assertRetries(child, [...path, key]);
+}
 
 /** A timed state whose due event follows a positive interval. */
 export function wait<const TTransitions extends Readonly<Record<string, unknown>>>(
   options: { readonly every: number | string },
   on: TTransitions,
 ) {
-  const units: Record<string, number> = { ms: 1, s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 };
-  const duration = typeof options.every === "string" ? /^(\d+(?:\.\d+)?)(ms|s|m|h|d)$/u.exec(options.every) : null;
-  const ms = typeof options.every === "number" ? options.every
-    : duration ? Number(duration[1]) * units[duration[2]!]! : Number.NaN;
-  if (!Number.isFinite(ms) || ms < 1 || ms > 8.64e15 - Date.now()) {
+  const ms = durationMs(options.every);
+  if (Number.isNaN(ms)) {
     throw new Error("Wait every must be positive milliseconds or a duration such as 10m");
   }
   if (!Object.hasOwn(on, "due") || on.due === undefined) {
@@ -206,7 +253,17 @@ export function wait<const TTransitions extends Readonly<Record<string, unknown>
 export function operation<const TTransitions extends Readonly<Record<string, unknown>>>(
   runOperation: () => Event | Promise<Event>,
   on: TTransitions,
+  options: { readonly retry?: OperationRetry } = {},
 ) {
+  if (options.retry !== undefined) return {
+    meta: { [retryMetaKey]: options.retry },
+    invoke: {
+      src: "retry",
+      input: { run: runOperation, retry: options.retry },
+      ...actorLifecycle("Operation", on),
+    },
+    on,
+  } as const;
   return {
     invoke: {
       src: fromPromise(async () => runOperation()),
@@ -379,10 +436,24 @@ export function run<TMachine extends AnyStateMachine>(
   options: RunOptions = {},
 ): Promise<SnapshotFrom<TMachine>> {
   return new Promise((resolve, reject) => {
+    assertRetries(definition.config);
     const agentRunners = options.agents ?? {};
     assertAgentRunners(agentRunners);
     assertRequiredAgentRunners(definition, agentRunners);
     let waitDue: string | undefined;
+    let currentEntry: StateEntry;
+    const waitUntil = async (due: string, signal: AbortSignal): Promise<void> => {
+      if (options.onSleep && Date.parse(due) > Date.now()) {
+        options.onSleep(due);
+        queueMicrotask(() => actor.stop());
+        await new Promise<void>((done) => signal.addEventListener("abort", () => done(), { once: true }));
+      } else {
+        // Node timers cap at about 25 days. Recheck after each chunk.
+        while (Date.parse(due) > Date.now()) {
+          await delay(Math.min(Date.parse(due) - Date.now(), 2_147_483_647), undefined, { signal });
+        }
+      }
+    };
     let answer: string | undefined;
     const runnable = definition.provide({
       actions: {
@@ -390,6 +461,26 @@ export function run<TMachine extends AnyStateMachine>(
         humanInputStarted: () => options.onHumanInput?.(true),
       },
       actors: {
+        retry: fromPromise<Event, RetryInvocation>(async ({ input, signal }) => {
+          // Entry has checkpointed the saved count before a restored invoke runs.
+          await Promise.resolve();
+          signal.throwIfAborted();
+          const entry = currentEntry;
+          const of = input.retry.times + 1;
+          let attempt = Math.min(entry.retry?.attempt ?? 1, of);
+          if (entry.retry && entry.due) await waitUntil(entry.due, signal);
+          for (;;) {
+            signal.throwIfAborted();
+            const event = await input.run();
+            if (event?.type !== input.retry.on || attempt >= of) return event;
+            signal.throwIfAborted();
+            attempt += 1;
+            const enteredAt = new Date().toISOString();
+            const due = new Date(Date.parse(enteredAt) + durationMs(input.retry.wait)).toISOString();
+            options.onEnter?.({ ...entry, enteredAt, due, retry: { attempt, of } });
+            await waitUntil(due, signal);
+          }
+        }),
         wait: fromPromise<Event>(async ({ signal }) => {
           // Initial invokes and restored invokes start before entry actions.
           // The entry observer has set and saved the due time by this microtask.
@@ -397,17 +488,7 @@ export function run<TMachine extends AnyStateMachine>(
           signal.throwIfAborted();
           const due = waitDue;
           if (due === undefined) throw new Error("Timed wait has no due time");
-          if (options.onSleep && Date.parse(due) > Date.now()) {
-            options.onSleep(due);
-            queueMicrotask(() => actor.stop());
-            await new Promise<void>((done) => signal.addEventListener("abort", () => done(), { once: true }));
-          } else {
-            // Node timers cap at about 25 days. Recheck the deadline after each
-            // chunk so even longer waits never fire early or overflow.
-            while (Date.parse(due) > Date.now()) {
-              await delay(Math.min(Date.parse(due) - Date.now(), 2_147_483_647), undefined, { signal });
-            }
-          }
+          await waitUntil(due, signal);
           return { type: "due" };
         }),
         human: fromPromise<Event, HumanRequest>(async ({ input, signal }) => {
@@ -487,9 +568,15 @@ export function run<TMachine extends AnyStateMachine>(
       const ms = (leaf?.meta?.[waitMetaKey] as { ms: number } | undefined)?.ms;
       waitDue = kind === "wait" ? (firstEntry ? options.continueAt?.due : undefined)
         ?? new Date(Date.parse(enteredAt) + ms!).toISOString() : undefined;
+      const retryOption = leaf?.meta?.[retryMetaKey] as OperationRetry | undefined;
+      const savedRetry = firstEntry && retryOption ? options.continueAt?.retry : undefined;
+      const of = retryOption ? retryOption.times + 1 : undefined;
+      const retry = savedRetry && of ? { attempt: Math.min(savedRetry.attempt, of), of } : undefined;
       firstEntry = false;
-      options.onEnter?.({ value: snapshot.value, context: snapshot.context, kind, enteredAt,
-        ...(waitDue === undefined ? {} : { due: waitDue }) });
+      currentEntry = { value: snapshot.value, context: snapshot.context, kind, enteredAt,
+        ...(waitDue === undefined ? {} : { due: waitDue }),
+        ...(retry === undefined ? {} : { retry, due: options.continueAt?.due }) };
+      options.onEnter?.(currentEntry);
     };
     let entered: string | undefined;
     const actor = createActor(runnable as AnyStateMachine, {

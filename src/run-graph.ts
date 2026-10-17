@@ -81,6 +81,7 @@ export function machineGraph(definition: AnyStateMachine): RunGraph | undefined 
           if (target.path.length > 0) edges.push({ from: id(node), to: id(target), event });
         }
       };
+      if (node.meta?.["machines.retry"]) add("retry", [node]);
       for (const [event, definitions] of node.transitions) {
         // The runtime's own actor events only run actions; the outcome they raise is the transition.
         // A plain XState state can target from them directly, through `onDone` and `onError`.

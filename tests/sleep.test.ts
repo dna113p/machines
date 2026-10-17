@@ -9,7 +9,7 @@ import { join, resolve } from "node:path";
 import { test, type TestContext } from "node:test";
 
 import { readRunStatuses, type RunStatusRecord } from "../src/run-status.ts";
-import { askerPrompt, askerSource, sleeperSource } from "./sleep-machines.ts";
+import { askerPrompt, askerSource, retrierSource, sleeperSource } from "./sleep-machines.ts";
 
 /** What a sleeping record adds, read loosely so the test names only what the ticket asks. */
 type SleepingRecord = Omit<RunStatusRecord, "status" | "human"> & {
@@ -440,4 +440,71 @@ test("without --sleep, a Human request is answered by machine respond while its 
   assert.deepEqual({ id: record.id, status: record.status, state: record.state }, { id: waiting.id, status: "completed", state: "finished" });
   assert.equal(statuses.has("sleeping"), false);
   assert.equal(existsSync(checkpointFile(project, record.id)), false);
+});
+
+/** What a retrying run's record and checkpoint add, read loosely so the test names only what the ticket asks. */
+type RetryRecord = SleepingRecord & { readonly retry?: { readonly attempt: number; readonly of: number; readonly due: string } };
+type RetryCheckpoint = Checkpoint & { readonly state: Checkpoint["state"] & { readonly retry?: { readonly attempt: number; readonly of: number } } };
+
+/** Asserts the run sleeps before `attempt` of four at its push, and that its record and checkpoint both say so. */
+function assertSleepingBeforeAttempt(project: Project, attempt: number): { readonly record: RetryRecord; readonly due: number } {
+  const record = onlyRecord(project) as RetryRecord;
+  assert.deepEqual({ status: record.status, state: record.state }, { status: "sleeping", state: "push" });
+  assert.equal(typeof record.due, "string");
+  const due = Date.parse(record.due ?? "");
+  assert.ok(Number.isFinite(due), `due "${record.due}" is not a time`);
+  assert.deepEqual(record.retry, { attempt, of: 4, due: record.due });
+  const checkpoint = readCheckpoint(project, record.id) as RetryCheckpoint;
+  assert.deepEqual(
+    { value: checkpoint.state.value, kind: checkpoint.state.kind, due: checkpoint.state.due, retry: checkpoint.state.retry },
+    { value: "push", kind: "operation", due: record.due, retry: { attempt, of: 4 } },
+  );
+  assert.equal(checkpoint.sleep, true);
+  return { record, due };
+}
+
+test("a retrying Operation run with --sleep sleeps between attempts, and each continuation resumes the count from its checkpoint", async (context) => {
+  const project = await createProject(context, { every: "1h", checks: 1 });
+  writeFileSync(join(project.project, ".machines", "retrier.ts"), retrierSource);
+  writeFileSync(project.inputFile, JSON.stringify({ log: project.log, passAt: 99, times: 3, wait: "1s" }));
+  const started = Date.now();
+  const ran = cli(project, ["run", "retrier", "--sleep", "--input-file", project.inputFile]);
+  assert.equal(ran.status, 0, ran.stderr);
+  assert.deepEqual(logLines(project), ["call 1"]);
+  const first = assertSleepingBeforeAttempt(project, 2);
+  assert.ok(first.due >= started + 500, `due ${first.record.retry?.due} is not about 1s after the first call`);
+
+  // Before it is due: nothing changes, as for a timed wait.
+  const before = statusFiles(project);
+  const early = cli(project, ["continue", first.record.id]);
+  assert.equal(early.status, 0, early.stderr);
+  assert.deepEqual(logLines(project), ["call 1"]);
+  assert.deepEqual(statusFiles(project), before);
+
+  // Each continuation makes one attempt and sleeps before the next: attempt 3 of 4 is not attempt 1 again.
+  await until(first.due);
+  const second = cli(project, ["continue", first.record.id]);
+  assert.equal(second.status, 0, second.stderr);
+  assert.deepEqual(logLines(project), ["call 1", "call 2"]);
+  const third = assertSleepingBeforeAttempt(project, 3);
+  assert.equal(third.record.id, first.record.id);
+  assert.ok(third.due > first.due, `the next due time ${third.record.due} is not later than ${first.record.due}`);
+
+  await until(third.due);
+  const fourth = cli(project, ["continue", first.record.id]);
+  assert.equal(fourth.status, 0, fourth.stderr);
+  assert.deepEqual(logLines(project), ["call 1", "call 2", "call 3"]);
+  const last = assertSleepingBeforeAttempt(project, 4);
+
+  // The last attempt fails too: the attempts are used up and `failed` is handled as without retry.
+  await until(last.due);
+  const done = cli(project, ["continue", first.record.id]);
+  assert.equal(done.status, 0, done.stderr);
+  assert.deepEqual(logLines(project), ["call 1", "call 2", "call 3", "call 4"]);
+  const after = onlyRecord(project) as RetryRecord;
+  assert.deepEqual(
+    { id: after.id, status: after.status, state: after.state, retry: after.retry },
+    { id: first.record.id, status: "completed", state: "askPush", retry: undefined },
+  );
+  assert.equal(existsSync(checkpointFile(project, first.record.id)), false);
 });

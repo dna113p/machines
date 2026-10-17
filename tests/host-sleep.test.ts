@@ -10,7 +10,7 @@ import { test, type TestContext } from "node:test";
 
 import { startMachineHost, type HostedHumanRequest, type MachineHostOptions, type MachineHostResult, type MachineHostRun } from "../src/host.ts";
 import { readRunStatuses, type RunStatusRecord } from "../src/run-status.ts";
-import { askerPrompt, askerSource, sleeperSource } from "./sleep-machines.ts";
+import { askerPrompt, askerSource, retrierSource, sleeperSource } from "./sleep-machines.ts";
 
 /** What a sleeping record adds, read loosely so the test names only what the ticket asks. */
 type SleepingRecord = Omit<RunStatusRecord, "status" | "human"> & {
@@ -90,7 +90,7 @@ function cli(project: Project, args: readonly string[], timeout = 60_000) {
   });
 }
 
-function logLines(run: RunInput): string[] {
+function logLines(run: Pick<RunInput, "log">): string[] {
   return existsSync(run.log) ? readFileSync(run.log, "utf8").split("\n").filter((line) => line !== "") : [];
 }
 
@@ -387,4 +387,35 @@ test("machine continue --due goes on past a run that fails, reports it, and exit
   assert.deepEqual(logLines(dueRun), ["check 1"]);
   const after = recordOf(project, due.id);
   assert.deepEqual({ status: after.status, state: after.state }, { status: "completed", state: "finished" });
+});
+
+test("a hosted retrying run with the sleep option publishes its attempt, and the host continues it from that attempt", async (context) => {
+  const project = await createProject(context);
+  writeFileSync(join(project.project, ".machines", "retrier.ts"), retrierSource);
+  const run = { log: join(project.root, "retrier.log") };
+  const input = { log: run.log, passAt: 99, times: 1, wait: "1s" };
+
+  const hosted = await host(context, { machine: "retrier", cwd: project.project, home: project.home, input, publishRunStatus: true, sleep: true });
+  const first = await settled(hosted, "the hosted retrying run");
+  assert.equal(first.state, "push");
+  assert.equal(typeof first.sleeping?.due, "string", `the result does not say when the retry is due: ${JSON.stringify(first)}`);
+  assert.deepEqual(logLines(run), ["call 1"]);
+  const record = recordOf(project, hosted.id) as SleepingRecord & { readonly retry?: unknown };
+  assert.deepEqual(
+    { status: record.status, state: record.state, due: record.due, retry: record.retry },
+    { status: "sleeping", state: "push", due: first.sleeping!.due, retry: { attempt: 2, of: 2, due: first.sleeping!.due } },
+  );
+  const checkpoint = readCheckpoint(project, hosted.id) as Checkpoint & { readonly state: { readonly retry?: unknown } };
+  assert.deepEqual({ kind: checkpoint.state.kind, retry: checkpoint.state.retry }, { kind: "operation", retry: { attempt: 2, of: 2 } });
+
+  // Continued at attempt 2 of 2, the last: it fails, and the run hands on `failed` instead of sleeping again.
+  await until(Date.parse(first.sleeping!.due!));
+  const continued = await host(context, { continue: hosted.id });
+  const done = await settled(continued, "the continued hosted retrying run");
+  assert.equal(done.state, "askPush");
+  assert.equal(done.sleeping, undefined);
+  assert.deepEqual(logLines(run), ["call 1", "call 2"]);
+  const after = recordOf(project, hosted.id) as SleepingRecord & { readonly retry?: unknown };
+  assert.deepEqual({ status: after.status, state: after.state, retry: after.retry }, { status: "completed", state: "askPush", retry: undefined });
+  assert.equal(existsSync(checkpointFile(project, hosted.id)), false);
 });

@@ -53,3 +53,28 @@ export default function asker(p, input) {
   });
 }
 `;
+
+/**
+ * Pushes, logging each call, and fails until call `input.passAt`. A failed
+ * push is retried `input.times` more times, `input.wait` apart. The calls are
+ * counted from the log, so the count does not rely on saved data.
+ */
+export const retrierSource = `import { appendFileSync, existsSync, readFileSync } from "node:fs";
+
+export const description = "Retries a push that fails for a while.";
+
+export default function retrier(p, input) {
+  return p.machine({
+    initial: "push",
+    states: {
+      push: p.operation(() => {
+        const calls = (existsSync(input.log) ? readFileSync(input.log, "utf8").split("\\n").filter(Boolean).length : 0) + 1;
+        appendFileSync(input.log, "call " + calls + "\\n");
+        return { type: calls >= input.passAt ? "pushed" : "failed" };
+      }, { pushed: "merged", failed: "askPush" }, { retry: { on: "failed", times: input.times, wait: input.wait } }),
+      merged: p.final(),
+      askPush: p.final(),
+    },
+  });
+}
+`;

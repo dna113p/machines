@@ -165,6 +165,7 @@ const childMessageSchema = v.variant("type", [
       state: v.optional(stateValueSchema),
       agent: v.optional(v.nullable(v.object(agentIdentity))),
       limit: v.optional(v.nullable(v.strictObject({ text: v.string(), until: v.optional(v.string()) }))),
+      retry: v.optional(v.nullable(v.strictObject({ attempt: v.number(), of: v.number(), due: v.string() }))),
     }),
   }),
   v.strictObject({
@@ -375,11 +376,12 @@ function launchMachineHost(
       } else if (message.type === "agentUpdate") {
         observe(() => options.onAgentUpdate?.(message.update as AgentUpdate));
       } else if (message.type === "status") {
-        const { state, agent, limit } = message.change;
+        const { state, agent, limit, retry } = message.change;
         published?.update({
           ...(state === undefined ? {} : { state: state as StateValue }),
           ...(agent === undefined ? {} : { agent: agent ?? undefined }),
           ...(limit === undefined ? {} : { limit: limit ?? undefined }),
+          ...(retry === undefined ? {} : { retry: retry ?? undefined }),
         });
       } else if (message.type === "sleep") {
         published?.sleep(message.due);
@@ -545,6 +547,7 @@ function runChildHost(): void {
           ...(change.state === undefined ? {} : { state: change.state }),
           ...("agent" in change ? { agent: change.agent ?? null } : {}),
           ...("limit" in change ? { limit: change.limit ?? null } : {}),
+          ...("retry" in change ? { retry: change.retry ?? null } : {}),
         },
       }));
       const checkpointDirectory = await ready;
@@ -562,6 +565,7 @@ function runChildHost(): void {
             } });
           },
         } : {}),
+        onEnter(entry) { observed?.onEnter(entry); },
         onAgentUpdate(update) {
           send({ type: "agentUpdate", update });
           observed?.onAgentUpdate(update);

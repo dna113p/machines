@@ -18,6 +18,7 @@ import {
   runDeliveryPath,
   runInboxPath,
   runStatusDirectory,
+  runStatusObserver,
   type RunStatusOutcome,
   type RunStatusRecord,
 } from "../src/run-status.ts";
@@ -1596,3 +1597,48 @@ async function eventually(assertion: () => void): Promise<void> {
     }
   }
 }
+
+
+test("retry status survives a continued entry and sleep, and clears on leaving or finishing", async (context) => {
+  const directory = await temporaryDirectory(context);
+  const environment = { MACHINES_RUN_STATUS_DIR: directory };
+  const publisher = createRunStatusPublisher({ ...run, id: "retry-status" }, environment);
+  const observer = runStatusObserver((change) => publisher.update(change));
+  const due = new Date(Date.now() + 60_000).toISOString();
+  const entry = { value: "push", context: {}, kind: "operation" as const,
+    enteredAt: new Date().toISOString(), retry: { attempt: 3, of: 4 }, due };
+  // The runtime announces the continued entry before its initial state.
+  observer.onEnter(entry);
+  observer.onState("push");
+  assert.deepEqual(readRunStatuses(directory)[0]?.retry, { attempt: 3, of: 4, due });
+  publisher.sleep(due);
+  const sleeping = readRunStatuses(directory)[0]!;
+  assert.equal(sleeping.status, "sleeping");
+  assert.deepEqual(sleeping.retry, { attempt: 3, of: 4, due });
+
+  const continued = createRunStatusPublisher({ ...run, id: sleeping.id,
+    continueRun: { record: sleeping, machineChanged: false } }, environment);
+  continued.update({ state: "push", retry: { attempt: 3, of: 4, due } });
+  continued.update({ state: "done" });
+  assert.equal(readRunStatuses(directory)[0]?.retry, undefined);
+  continued.update({ state: "push", retry: { attempt: 4, of: 4, due } });
+  continued.finish({ error: "Operation threw" });
+  assert.equal(readRunStatuses(directory)[0]?.retry, undefined);
+});
+
+test("run status readers reject malformed retry fields but accept additional retry information", async (context) => {
+  const directory = await temporaryDirectory(context);
+  const publisher = createRunStatusPublisher({ ...run, id: "retry-shape" }, { MACHINES_RUN_STATUS_DIR: directory });
+  const due = new Date().toISOString();
+  publisher.update({ state: "push", retry: { attempt: 2, of: 4, due } });
+  const file = join(directory, "retry-shape.json");
+  const base = JSON.parse(await readFile(file, "utf8")) as Record<string, unknown>;
+  for (const retry of [null, "retry", { attempt: 1, of: 4, due }, { attempt: 5, of: 4, due },
+    { attempt: 2.5, of: 4, due }, { attempt: 2, of: 12, due }, { attempt: 2, of: 4 },
+    { attempt: 2, of: 4, due: "tomorrow" }]) {
+    await writeFile(file, JSON.stringify({ ...base, retry }));
+    assert.deepEqual(readRunStatuses(directory), [], JSON.stringify(retry));
+  }
+  await writeFile(file, JSON.stringify({ ...base, retry: { attempt: 2, of: 4, due, extra: true } }));
+  assert.equal(readRunStatuses(directory).length, 1);
+});

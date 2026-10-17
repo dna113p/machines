@@ -310,3 +310,46 @@ test("failed runs can be claimed even with a live host pid, claims are exclusive
   writeFileSync(checkpointPath(directory, "failed"), JSON.stringify(saved));
   assert.throws(() => claimContinuation("failed", directory), /parallel/u);
 });
+
+test("a sleeping retry checkpoint round-trips with its attempt, and a malformed attempt is not continued", (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "checkpoint-retry-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const path = join(directory, "machine.ts");
+  writeFileSync(path, "source");
+  const now = Date.now();
+  const due = new Date(now - 1_000).toISOString();
+  const publisher = createRunStatusPublisher({ id: "retry", machine: "machine", path, cwd: directory }, { MACHINES_RUN_STATUS_DIR: directory });
+  publisher.update({ state: "push" });
+  publisher.sleep(due);
+  // The attempt a retrying Operation sleeps before, read loosely so the test names only what the ticket asks.
+  const checkpoint = (state: Record<string, unknown>) => ({
+    schemaVersion: 1, id: "retry", machine: { name: "machine", path, sourceHash: "old" },
+    input: "", agents: {}, cwd: directory, home: directory, sleep: true,
+    state: { value: "push", path: "push", kind: "operation", due, enteredAt: new Date(now - 2_000).toISOString(), ...state },
+    data: {}, context: {}, writtenAt: new Date(now - 2_000).toISOString(),
+  }) as unknown as RunCheckpoint;
+
+  const saved = checkpoint({ retry: { attempt: 3, of: 4 } });
+  writeCheckpoint(directory, saved);
+  const continuation = claimContinuation("retry", directory, now);
+  try {
+    assert.deepEqual(continuation.checkpoint, saved);
+  } finally { continuation.release(); }
+
+  const { due: _due, ...withoutDue } = saved.state;
+  const malformed: Array<[string, Record<string, unknown>]> = [
+    ["attempt past of", { retry: { attempt: 5, of: 4 } }],
+    ["attempt 1, which is never waited for", { retry: { attempt: 1, of: 4 } }],
+    ["of past 11", { retry: { attempt: 2, of: 12 } }],
+    ["a fractional attempt", { retry: { attempt: 2.5, of: 4 } }],
+    ["a missing of", { retry: { attempt: 2 } }],
+    ["a retry that is not an object", { retry: "attempt 2" }],
+    ["a state that is not an Operation", { kind: "state", retry: { attempt: 2, of: 4 } }],
+  ];
+  for (const [what, state] of malformed) {
+    writeCheckpoint(directory, checkpoint(state));
+    assert.throws(() => claimContinuation("retry", directory, now), /invalid checkpoint/u, what);
+  }
+  writeCheckpoint(directory, { ...saved, state: { ...withoutDue, retry: { attempt: 2, of: 4 } } as RunCheckpoint["state"] });
+  assert.throws(() => claimContinuation("retry", directory, now), /invalid checkpoint/u, "a retry without a due time");
+});

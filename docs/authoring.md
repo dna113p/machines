@@ -116,6 +116,35 @@ Run status publication must be on. Nothing wakes a sleeping run automatically;
 an external scheduler can call `machine continue`. Human requests keep their
 normal in-process behavior. See [continuing runs](integrations.md#continuing-a-run).
 
+## Retrying a passing failure
+
+An Operation can retry an outcome it knows may pass on another attempt, such as a
+network timeout or a temporary registry failure:
+
+```ts
+push: p.operation(work.push, { pushed: "awaitMerge", failed: "askPush" }, {
+  retry: { on: "failed", times: 3, wait: "1m" },
+}),
+```
+
+`on` must name an event the state handles. `times` is the number of **further**
+attempts, an integer from 1 to 10: `times: 3` permits four calls in all. `wait`
+takes the same positive milliseconds or duration string as a timed wait. Invalid
+options fail when the Machine is defined, naming the state.
+
+Each matching outcome waits before calling the Operation again. A different
+outcome is handled immediately; after the final attempt, the last event takes
+its normal transition. Thrown errors fail the run immediately and are never
+retried. This option applies only to Operations, not Agents or Humans. Use it
+for outcomes the Operation identifies as temporary, not for every failure.
+
+Retry waits behave like timed waits: the checkpoint saves the next attempt and
+its absolute deadline, `--sleep` releases the process, and `machine continue` or
+a host resumes the saved count and waits only for the time left. The run record
+shows, for example, `retry: { attempt: 2, of: 4, due: "…" }`, and the graph draws
+a loop labelled `retry`. As with other interrupted Operations, an attempt may
+repeat after a crash; make its effects safe to repeat.
+
 ## Events and Human input
 
 An Operation or Agent returns `{ type: "eventName", ...data }`. Its state maps
