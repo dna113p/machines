@@ -15,6 +15,11 @@ implement (Agent) → check (Operation) → review (Human) → done
 XState runs the transitions. The same workflow runs from a terminal, Pi or
 Codex.
 
+For ready-made software workflows, see
+[Machine Shop](https://github.com/dna113p/machine-shop). To run a Machine for
+each ticket automatically, see
+[Machines Dispatch](https://github.com/dna113p/machines-dispatch).
+
 **When to use one:** whenever sequencing, verification, retries or a Human
 decision would help, even for a one-off task. Tiny edits, simple answers and
 single commands stay direct. Agents should look for a suitable Machine before
@@ -277,3 +282,12 @@ tags the commit `vX.Y.Z`. Details in [Releasing](docs/releasing.md).
   [draw your own widgets](docs/integrations.md#drawing-your-own-widgets).
 
 Licensed under the [MIT License](LICENSE).
+
+## The Machines family
+
+| Project | What it does |
+| --- | --- |
+| **Machines** (this repository) | The runtime: write a workflow as states, and run it with Agents, checks and people |
+| [Machine Shop](https://github.com/dna113p/machine-shop) | Ready-made software workflows to copy into a project |
+| [Machines Dispatch](https://github.com/dna113p/machines-dispatch) | A local daemon that runs a Machine for each ticket that is ready |
+| [Machine Wars](https://github.com/dna113p/machine-wars) | A concept: ranking Agents so a Machine can pick one |
