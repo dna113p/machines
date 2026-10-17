@@ -10,6 +10,7 @@ import type { StateValue } from "xstate";
 import type { AgentUpdate, HumanRequest, HumanResponse } from "./index.ts";
 import { claimContinuation, type Continuation, type RunCheckpoint } from "./run-checkpoint.ts";
 import type { RunGraph } from "./run-graph.ts";
+import { runEnding, type RunEnding } from "./endings.ts";
 import {
   prepareMachineRun,
   type PrepareMachineRunOptions,
@@ -50,6 +51,7 @@ export interface MachineHostOptions extends Omit<PrepareMachineRunOptions, "mach
 
 export interface MachineHostResult {
   readonly state: StateValue;
+  readonly ending?: RunEnding;
   readonly output?: JsonValue;
   readonly sleeping?: { readonly due: string } | { readonly human: HostedHumanRequest };
 }
@@ -176,6 +178,7 @@ const childMessageSchema = v.variant("type", [
   v.strictObject({
     type: v.literal("completed"),
     state: stateValueSchema,
+    ending: v.optional(v.strictObject({ name: v.string(), kind: v.picklist(["succeeded", "failed", "cancelled"]) })),
     output: v.optional(v.custom<JsonValue>(isJsonValue)),
   }),
   v.strictObject({ type: v.literal("failed"), message: v.string() }),
@@ -409,10 +412,14 @@ function launchMachineHost(
         }
         phase = "completed";
         pendingHuman = undefined;
-        if (sleeping === undefined) published?.finish({ state: message.state as StateValue, note: runOutputSummary(message.output) });
+        if (sleeping === undefined) published?.finish({
+          state: message.state as StateValue, note: runOutputSummary(message.output),
+          ...(message.ending === undefined ? {} : { ending: message.ending }),
+        });
         dispose();
         resolveResult({
           state: message.state as StateValue,
+          ...(message.ending === undefined ? {} : { ending: message.ending }),
           ...(sleeping === undefined ? {} : { sleeping }),
           ...(message.output === undefined ? {} : { output: message.output }),
         });
@@ -597,9 +604,11 @@ function runChildHost(): void {
         }),
       });
       if (result.output !== undefined) assertJsonValue(result.output, "Machine output");
+      const ending = runEnding(prepared.endings, result.value);
       send({
         type: "completed",
         state: result.value,
+        ...(ending === undefined ? {} : { ending }),
         ...(result.output === undefined ? {} : { output: result.output }),
       });
     } catch (cause) {

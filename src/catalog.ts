@@ -13,6 +13,7 @@ import { vonAgent, vonProvider } from "./von.ts";
 import { openRouterDecisionAgent, openRouterDecisionProvider } from "./openrouter.ts";
 import { discoverMachines, machinesUserHome } from "./discovery.ts";
 import type { AgentRunner } from "./index.ts";
+import { readEndings, type MachineEnding } from "./endings.ts";
 import { loadMachineModule, readAgentRoles, requireMachineDescription } from "./machine-module.ts";
 
 export interface MachineSummary {
@@ -21,6 +22,7 @@ export interface MachineSummary {
   readonly path: string;
   readonly agentRoles: Readonly<Record<string, string>>;
   readonly missingAgents: readonly string[];
+  readonly endings?: readonly Pick<MachineEnding, "name" | "kind" | "output">[];
   readonly error?: string;
 }
 
@@ -61,6 +63,7 @@ export async function inspectMachines(
       const loaded = await loadMachineModule(found.path);
       const description = requireMachineDescription(loaded, found.path);
       const agentRoles = readAgentRoles(loaded, found.path);
+      const endings = readEndings(loaded, found.path);
       if (typeof loaded.default !== "function") {
         throw new Error(`Machine "${found.path}" must default-export a factory`);
       }
@@ -68,6 +71,11 @@ export async function inspectMachines(
         ...found,
         description,
         agentRoles,
+        ...(endings === undefined ? {} : {
+          endings: Object.values(endings).map(({ name, kind, output }) => ({
+            name, kind, ...(output === undefined ? {} : { output }),
+          })),
+        }),
         missingAgents: Object.keys(agentRoles).filter((name) =>
           bindings.value !== undefined && !Object.hasOwn(bindings.value.agents, name)),
         ...(bindings.error === undefined ? {} : { error: bindings.error }),

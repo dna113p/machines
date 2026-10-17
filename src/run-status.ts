@@ -4,6 +4,7 @@ import { basename, isAbsolute, join, resolve } from "node:path";
 import type { StateValue } from "xstate";
 
 import { machinesUserHome } from "./discovery.ts";
+import type { RunEnding } from "./endings.ts";
 import type { AgentUpdate, StateEntry } from "./index.ts";
 import { statePaths, type RunGraph, type RunTrailStep } from "./run-graph.ts";
 
@@ -44,6 +45,8 @@ export interface RunStatusRecord {
   readonly error?: string;
   /** The finished run's summary, at most 2000 characters including any ellipsis. */
   readonly note?: string;
+  /** The declared ending reached by a completed run. */
+  readonly ending?: RunEnding;
   /** The Machine's states and transitions, when it is small enough to draw. */
   readonly graph?: RunGraph;
   /** The states the run entered, oldest first: the latest `trailLimit` of them. */
@@ -114,7 +117,7 @@ export interface RunStatusChange {
 }
 
 export type RunStatusOutcome =
-  | { readonly state?: StateValue; readonly note?: string }
+  | { readonly state?: StateValue; readonly note?: string; readonly ending?: RunEnding }
   | { readonly error: string };
 
 export interface RunStatusPublisher {
@@ -219,6 +222,7 @@ export function createRunStatusPublisher(
   let deliveries: ReadonlyArray<{ readonly id: string; readonly takenAt: number }> = [];
   let error: string | undefined;
   let note: string | undefined;
+  let ending: RunEnding | undefined;
   let trail: RunTrailStep[] = [...previous?.trail ?? []];
   const enter = (entered: string | undefined, at: string) => {
     const path = entered === undefined ? "" : statePaths(entered).join(", ");
@@ -251,6 +255,7 @@ export function createRunStatusPublisher(
       ...(deliveries.length === 0 ? {} : { deliveries: deliveries.map((delivery) => delivery.id) }),
       ...(error === undefined ? {} : { error }),
       ...(note === undefined ? {} : { note }),
+      ...(ending === undefined ? {} : { ending }),
       ...(run.graph === undefined ? {} : { graph: run.graph }),
       ...(trail.length === 0 ? {} : { trail }),
       startedAt,
@@ -329,6 +334,7 @@ export function createRunStatusPublisher(
         status = "completed";
         state = formatState(outcome.state) ?? state;
         note = formatNote(outcome.note);
+        ending = outcome.ending === undefined ? undefined : { name: outcome.ending.name, kind: outcome.ending.kind };
         enter(state, new Date().toISOString());
       }
       retry = undefined;
@@ -553,6 +559,9 @@ function isRunStatusRecord(value: unknown): value is RunStatusRecord {
     && isOptionalStrings(record.deliveries)
     && isOptionalString(record.error)
     && isOptionalString(record.note)
+    && (record.ending === undefined || (record.ending !== null && typeof record.ending === "object"
+      && !Array.isArray(record.ending) && typeof (record.ending as RunEnding).name === "string"
+      && isEndingKind((record.ending as RunEnding).kind)))
     && (record.graph === undefined || isGraph(record.graph))
     && (record.trail === undefined || (Array.isArray(record.trail) && record.trail.every((step) =>
       step !== null && typeof step === "object" && typeof step.state === "string" && isTimestamp(step.at))))
@@ -574,9 +583,14 @@ function isGraph(value: unknown): boolean {
   return isOptionalString(graph.initial)
     && Array.isArray(graph.states) && graph.states.every((state) => state !== null && typeof state === "object"
       && typeof state.id === "string" && typeof state.kind === "string"
+      && (state.ending === undefined || isEndingKind(state.ending))
       && isOptionalString(state.parent) && isOptionalString(state.role))
     && Array.isArray(graph.edges) && graph.edges.every((edge) => edge !== null && typeof edge === "object"
       && typeof edge.from === "string" && typeof edge.to === "string" && typeof edge.event === "string");
+}
+
+function isEndingKind(value: unknown): boolean {
+  return value === "succeeded" || value === "failed" || value === "cancelled";
 }
 
 function isOptionalString(value: unknown): boolean {

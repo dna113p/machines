@@ -1,6 +1,6 @@
 import { agentLimitOf, type AgentLimit } from "./agent-limit.ts";
 import { isMachineEnding, type MachineEnding } from "./endings.ts";
-export { defineEndings, type MachineEnding, type MachineEndings, type EndingKind } from "./endings.ts";
+export { defineEndings, type MachineEnding, type MachineEndings, type EndingKind, type RunEnding } from "./endings.ts";
 export { Type } from "typebox";
 import { terminalHuman } from "./terminal-human.ts";
 import { jsonProblem } from "./json.ts";
