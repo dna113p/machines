@@ -203,7 +203,7 @@ async function buildDefinition(
     if (dataCalled) throw new Error("p.data() may only be called once per Machine factory");
     dataCalled = true;
     initializeData(initial);
-    savedData = restoredData === undefined ? initial : structuredClone(restoredData);
+    savedData = restoredData === undefined ? initial : Object.assign(initial, structuredClone(restoredData));
     return savedData as T;
   };
   const definition = await loaded.default(

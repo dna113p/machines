@@ -274,6 +274,95 @@ export default (p, input) => {
   assert.equal(existsSync(checkpointPath(directory, "bad")), false);
 });
 
+// A Machine that sets up data, sleeps at a Human step, then records its data into context.
+const continuedDataMachine = (initial: string, prepare: string, check = "") => `export const description = "Checks continued data.";
+export default (p) => {
+  const data = p.data(${initial});
+  return p.machine({ context: {}, initial: "first", states: {
+    first: p.operation(() => { ${prepare} return { type: "done" }; }, { done: "ask" }),
+    ask: p.human(() => "Continue?", { submitted: "report" }),
+    report: p.operation(() => { ${check} return { type: "done" }; }, {
+      done: { target: "again", actions: ({ context }) => { context.data = JSON.parse(JSON.stringify(data)); } }
+    }),
+    again: p.human(() => "Again?", { submitted: "finished" }),
+    finished: p.final()
+  } });
+};`;
+
+async function savedAtAsk(directory: string, id: string, source: string): Promise<RunCheckpoint> {
+  const path = join(directory, `${id}-saved.ts`);
+  writeFileSync(path, source);
+  const prepared = await prepareMachineRun({ machine: path, cwd: directory, home: directory });
+  await assert.rejects(prepared.start({ checkpoint: { directory, id }, human: () => { throw new Error("interrupted"); } }), /interrupted/u);
+  return JSON.parse(readFileSync(checkpointPath(directory, id), "utf8")) as RunCheckpoint;
+}
+
+async function continueWith(directory: string, id: string, saved: RunCheckpoint, source: string, human: () => string = () => "yes") {
+  const path = join(directory, `${id}-current.ts`);
+  writeFileSync(path, source);
+  const prepared = await prepareMachineRun({ machine: path, cwd: directory, home: directory, continueRun: saved });
+  return prepared.start({ checkpoint: { directory, id }, human });
+}
+
+const iterateB = `for (const item of data.b) throw new Error("unexpected " + item);`;
+
+test("a continued run gains a field its Machine added since the checkpoint, and code that iterates it runs", async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "checkpoint-added-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const saved = await savedAtAsk(directory, "added", continuedDataMachine("{ a: 0 }", "data.a = 1;"));
+  assert.deepEqual(saved.data, { a: 1 });
+  const result = await continueWith(directory, "added", saved, continuedDataMachine("{ a: 0, b: [] }", "", iterateB));
+  assert.equal(result.value, "finished");
+  assert.deepEqual(result.context, { data: { a: 1, b: [] } });
+
+  // Later writes go to the object p.data() returned, and the next checkpoint saves them.
+  let calls = 0;
+  const human = () => { calls += 1; if (calls === 2) throw new Error("interrupted again"); return "yes"; };
+  await assert.rejects(continueWith(directory, "added-write", saved,
+    continuedDataMachine("{ a: 0, b: [] }", "", `${iterateB} data.b.push("after");`), human), /interrupted again/u);
+  const next = JSON.parse(readFileSync(checkpointPath(directory, "added-write"), "utf8")) as RunCheckpoint;
+  assert.equal(next.state.value, "again");
+  assert.deepEqual(next.data, { a: 1, b: ["after"] });
+});
+
+test("a continued run keeps a saved field its Machine no longer declares", async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "checkpoint-dropped-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const saved = await savedAtAsk(directory, "dropped", continuedDataMachine("{ a: 0, old: \"\" }", "data.a = 1; data.old = \"x\";"));
+  assert.deepEqual(saved.data, { a: 1, old: "x" });
+  const result = await continueWith(directory, "dropped", saved, continuedDataMachine("{ a: 0 }", ""));
+  assert.equal(result.value, "finished");
+  assert.deepEqual(result.context, { data: { a: 1, old: "x" } });
+});
+
+test("a continued run takes a saved nested object whole, without keys from the initial nested object", async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "checkpoint-nested-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const saved = await savedAtAsk(directory, "nested", continuedDataMachine("{ n: { x: 0 } }", "data.n.x = 1;"));
+  assert.deepEqual(saved.data, { n: { x: 1 } });
+  const result = await continueWith(directory, "nested", saved, continuedDataMachine("{ n: { x: 0, y: 2 }, b: [] }", "",
+    `if ("y" in data.n) throw new Error("nested object was merged"); ${iterateB}`));
+  assert.equal(result.value, "finished");
+  assert.deepEqual(result.context, { data: { n: { x: 1 }, b: [] } });
+});
+
+test("a run that is not continued gets its initial data, and a continued run of an unchanged Machine gets its saved data", async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "checkpoint-unchanged-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const path = join(directory, "fresh.ts");
+  writeFileSync(path, continuedDataMachine("{ a: 0, b: [], n: { x: 0, y: 2 } }", "", iterateB));
+  const fresh = await prepareMachineRun({ machine: path, cwd: directory, home: directory });
+  const freshResult = await fresh.start({ checkpoint: { directory, id: "fresh" }, human: () => "yes" });
+  assert.deepEqual(freshResult.context, { data: { a: 0, b: [], n: { x: 0, y: 2 } } });
+
+  const source = continuedDataMachine("{ a: 0, b: [], n: { x: 0, y: 2 } }", "data.a = 1; data.b.push(\"kept\"); data.n = { x: 1 };");
+  const saved = await savedAtAsk(directory, "unchanged", source);
+  assert.deepEqual(saved.data, { a: 1, b: ["kept"], n: { x: 1 } });
+  const result = await continueWith(directory, "unchanged", saved, source);
+  assert.equal(result.value, "finished");
+  assert.deepEqual(result.context, { data: { a: 1, b: ["kept"], n: { x: 1 } } });
+});
+
 test("failed runs can be claimed even with a live host pid, claims are exclusive, and parallel continuation is refused", (t) => {
   const directory = mkdtempSync(join(tmpdir(), "checkpoint-claim-"));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
