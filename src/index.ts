@@ -1,4 +1,7 @@
 import { agentLimitOf, type AgentLimit } from "./agent-limit.ts";
+import { isMachineEnding, type MachineEnding } from "./endings.ts";
+export { defineEndings, type MachineEnding, type MachineEndings, type EndingKind } from "./endings.ts";
+export { Type } from "typebox";
 import { terminalHuman } from "./terminal-human.ts";
 import { jsonProblem } from "./json.ts";
 import { setTimeout as delay } from "node:timers/promises";
@@ -395,8 +398,10 @@ async function submittedHumanEvent(
   return { type: "submitted", value: answer };
 }
 
-export function final() {
-  return { type: "final" } as const;
+export function final(ending?: MachineEnding) {
+  if (ending === undefined) return { type: "final" } as const;
+  if (!isMachineEnding(ending)) throw new Error("final() requires an ending from defineEndings");
+  return { type: "final", meta: { "machines.ending": ending.name } } as const;
 }
 
 /** Initialize working data. The launcher's factory-scoped version also restores it. */

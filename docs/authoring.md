@@ -39,6 +39,56 @@ Keep top-level evaluation free of side effects. Discovery imports the definition
 and its helpers to inspect metadata. Keep effects inside states: the launcher
 calls the factory before it finishes Agent preflight.
 
+### Declared endings
+
+Optionally export `endings` to declare the Machine's possible endings without
+building it. Use `defineEndings` and TypeBox's `Type`, both exported by the package:
+
+```ts
+import { defineEndings, Type } from "@dna113p/machines";
+import type { MachinePrimitives } from "@dna113p/machines";
+
+export const description = "Produces an investigation report.";
+export const endings = defineEndings({
+  success: { kind: "succeeded", output: Type.Object({ report: Type.String() }) },
+  failure: { kind: "failed" },
+  abandoned: { kind: "cancelled" },
+});
+
+export default function investigate(p: MachinePrimitives) {
+  return p.machine({
+    initial: "investigate",
+    output: () => ({ report: "Investigation complete" }),
+    states: {
+      investigate: p.operation(() => ({ type: "completed" }), {
+        completed: "success", failed: "failure", cancelled: "abandoned",
+      }),
+      success: p.final(endings.success),
+      failure: p.final(endings.failure),
+      abandoned: p.final(endings.abandoned),
+    },
+  });
+}
+```
+
+Each name must match `/^[A-Za-z_$][\w$]*$/u`: a non-empty identifier without
+surrounding whitespace. Each ending has kind `succeeded`, `failed`, or `cancelled`,
+and may have a TypeBox `output` schema. These schemas are JSON Schema objects.
+Runtime imports require the package to be installed where the definition can
+resolve it.
+
+At preparation, every top-level final must take its own named ending, and every
+declared ending must have a top-level final. Nested finals use bare `p.final()`.
+A mismatch fails to load and names the offending state or ending. A final taking
+an ending also requires the module to export `endings`.
+
+When a run finishes, its top-level XState `output` is checked against the reached
+ending's schema, if present. Invalid output fails the run with the ending name
+and the first validation problem. Sleeping runs are not finished and are not
+checked. The ending's kind describes the ending; it does not change XState's
+completion behavior. Modules without `endings` keep using bare `p.final()` as
+before.
+
 ## Saved working data
 
 Use `p.data()` once per factory call for mutable working data that must survive a
@@ -1157,3 +1207,6 @@ return machine({
 Direct runs retain XState's output behavior. Hosted output must be JSON-compatible;
 unsupported values fail explicitly instead of being silently converted. The CLI
 prints declared output, and completed MCP/Pi snapshots include it.
+
+To validate this output when a prepared run finishes, give its
+[declared ending](#declared-endings) an `output` schema.
