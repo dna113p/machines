@@ -89,6 +89,75 @@ checked. The ending's kind describes the ending; it does not change XState's
 completion behavior. Modules without `endings` keep using bare `p.final()` as
 before.
 
+## Using another Machine
+
+Use `p.use(selector, { input, on })` to run a child and route on its declared
+ending. Export a static `uses` list containing each selector the factory uses:
+
+```ts
+import type { Event, MachinePrimitives } from "@dna113p/machines";
+
+export const description = "Investigates a task before deciding the next step.";
+export const uses = ["investigate"];
+
+export default function diagnose(p: MachinePrimitives, input: string) {
+  const saved = p.data({ task: input, report: "" });
+  return p.machine({
+    initial: "diagnose",
+    states: {
+      diagnose: p.use("investigate", {
+        input: () => ({ task: saved.task }),
+        on: {
+          success: {
+            target: "fix",
+            actions: ({ event }: { event: Event }) => {
+              saved.report = (event.output as { report: string }).report;
+            },
+          },
+          failure: "askOwner",
+          abandoned: "cancelled",
+        },
+      }),
+      fix: p.operation(() => ({ type: "done" }), { done: "done" }),
+      askOwner: p.human("How should we proceed?", { submitted: "done" }),
+      cancelled: p.final(),
+      done: p.final(),
+    },
+  });
+}
+```
+
+Catalogue names use the same project/global lookup as `machine run`. Paths
+resolve relative to the module that declares the use, so `./review.ts` can name
+a sibling. `uses` must contain unique, non-empty, trimmed selectors. Every child
+must export declared `endings`; `on` must handle exactly those names. A declared
+`failed` ending is a normal event the parent can route on. An exception in the
+child fails the parent's use state with the child's error.
+
+`prepareMachineRun` recursively imports the modules in `uses` without calling
+child factories. It rejects unknown selectors, children without endings, cycles
+(including paths that resolve to the same file), and more than three child
+levels: parent → child → grandchild → great-grandchild is allowed; one more is
+not. It checks the parent's use states, including nested states, at prepare.
+A child's own use states and ending states are checked when that child is built
+at entry. This lets factories depend on runtime input without being built early.
+
+At each entry, `input()` reads the parent's current working data and returns JSON
+input. The child factory receives that value, its own primitives and its own
+`p.data()` storage. Its ending becomes the parent's event `type`, and its workflow
+output becomes `event.output`, checked against the ending's output schema when
+present. Existing Machines with declared endings can be used unchanged.
+
+Children execute in the same process and share the parent's Agent runners,
+Human runner, update reporter and usage-limit policy. Every child's declared
+Agent roles plus `default` are required at prepare; role names and Agent overrides
+are shared across the entire composition.
+
+Sleeping through a child is not supported yet. In a sleeping run, a child's timed
+wait, retry wait or Human request fails the use state with that error. Without
+sleep, Human requests use the parent's Human runner. Direct `run()` cannot load
+children: prepare the parent with `prepareMachineRun` and call its `start()`.
+
 ## Saved working data
 
 Use `p.data()` once per factory call for mutable working data that must survive a
