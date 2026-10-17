@@ -250,7 +250,10 @@ export class MachineSession {
       });
       return;
     }
-    publisher.finish(run.status === "completed" ? { state: run.state, note: runOutputSummary(run.output) } : { error: run.error ?? "Machine run failed" });
+    publisher.finish(run.status === "completed" ? {
+      state: run.state, note: runOutputSummary(run.output),
+      ...(run.ending === undefined ? {} : { ending: run.ending }),
+    } : { error: run.error ?? "Machine run failed" });
     this.#published.delete(run.id);
   }
 

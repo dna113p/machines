@@ -89,6 +89,14 @@ checked. The ending's kind describes the ending; it does not change XState's
 completion behavior. Modules without `endings` keep using bare `p.final()` as
 before.
 
+`listMachines()` exposes each declared ending's name, kind, and optional output
+schema without building the Machine. `machine list` prints the names and kinds
+under each Machine. The run graph marks these finals with their kinds, and
+`machine ui` gives each kind its own colour and label. A finished run's published
+record carries `ending: { name, kind }`; `status` remains `completed` for all three
+kinds, and `state` and `note` keep their existing meanings. Without an `endings`
+export, these optional fields are absent.
+
 ## Saved working data
 
 Use `p.data()` once per factory call for mutable working data that must survive a

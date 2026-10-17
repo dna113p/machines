@@ -7,6 +7,7 @@ import { join, resolve } from "node:path";
 import { test } from "node:test";
 
 import * as machines from "../src/index.ts";
+import { runEnding } from "../src/endings.ts";
 import { startMachineHost } from "../src/host.ts";
 import { prepareMachineRun } from "../src/launcher.ts";
 import { checkpointPath } from "../src/run-checkpoint.ts";
@@ -15,6 +16,21 @@ import { checkpointPath } from "../src/run-checkpoint.ts";
 const { defineEndings, final, Type } = machines;
 
 const fixture = (name: string) => resolve(`tests/fixtures/endings/${name}.machine.ts`);
+
+test("runEnding resolves only declared string state values and leaves out the output schema", () => {
+  const endings = defineEndings({
+    success: { kind: "succeeded", output: Type.String() },
+    failure: { kind: "failed" },
+    abandoned: { kind: "cancelled" },
+  });
+  for (const { name, kind } of Object.values(endings)) {
+    assert.deepEqual(runEnding(endings, name), { name, kind });
+  }
+  for (const value of [undefined, null, "unknown", "toString", { success: "nested" }]) {
+    assert.equal(runEnding(endings, value), undefined);
+  }
+  assert.equal(runEnding(undefined, "success"), undefined);
+});
 
 test("defineEndings returns each ending by name with its kind and output schema", () => {
   const output = Type.Object({ report: Type.String() });
@@ -83,9 +99,32 @@ test("a module whose top-level finals match its endings loads and finishes in ea
   }
 });
 
-test("a hosted run whose output fits its ending finishes as before", async () => {
+test("a hosted run whose output fits its ending finishes as before, naming its ending", async () => {
   const host = await startMachineHost({ machine: fixture("matching"), input: "" });
-  assert.deepEqual(await host.result, { state: "success", output: { report: "ended after work" } });
+  assert.deepEqual(await host.result, {
+    state: "success", output: { report: "ended after work" }, ending: { name: "success", kind: "succeeded" },
+  });
+});
+
+test("the graph marks each final that takes an ending with the ending's kind, before the run starts", async () => {
+  const expected = { work: undefined, success: "succeeded", failure: "failed", abandoned: "cancelled" };
+  const kinds = (graph: machines.RunGraph | undefined) =>
+    Object.fromEntries((graph?.states ?? []).map((state) => [state.id, (state as { ending?: string }).ending]));
+  const prepared = await prepareMachineRun({ machine: fixture("matching") });
+  assert.deepEqual(kinds(prepared.graph), expected);
+  // Only a final takes an ending; every other state is drawn as before.
+  assert.equal("ending" in prepared.graph!.states.find((state) => state.id === "work")!, false);
+
+  const host = await startMachineHost({ machine: fixture("matching"), input: "" });
+  assert.deepEqual(kinds(host.graph), expected);
+  await host.result;
+});
+
+test("the graph of a Machine without endings has no ending on any state", async () => {
+  const prepared = await prepareMachineRun({ machine: resolve("tests/fixtures/host.machine.ts") });
+  assert.deepEqual(prepared.graph?.states, [
+    { id: "work", kind: "operation" }, { id: "review", kind: "human" }, { id: "done", kind: "final" },
+  ]);
 });
 
 for (const [name, offender, what] of [

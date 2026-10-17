@@ -1,6 +1,7 @@
 import type { StateValue } from "xstate";
 
 import type { JsonValue } from "./json.ts";
+import type { RunEnding } from "./endings.ts";
 import { startMachineHost, type HostedHumanRequest, type MachineHostOptions, type MachineHostRun } from "./host.ts";
 import type { AgentUpdate } from "./index.ts";
 import type { PrepareMachineRunOptions } from "./launcher.ts";
@@ -16,6 +17,7 @@ export interface RunSnapshot {
   readonly status: RunStatus;
   readonly state?: StateValue;
   readonly output?: JsonValue;
+  readonly ending?: RunEnding;
   readonly startedAt: string;
   readonly updatedAt: string;
   readonly elapsedSeconds: number;
@@ -35,6 +37,7 @@ interface RunRecord {
   status: RunStatus;
   state?: StateValue;
   output?: JsonValue;
+  ending?: RunEnding;
   human?: HostedHumanRequest;
   agent?: Extract<AgentUpdate, { type: "identity" }>;
   limit?: RunSnapshot["limit"];
@@ -203,12 +206,13 @@ export class MachineSession {
     return run;
   }
 
-  #finish(run: RunRecord, outcome: { state: StateValue; output?: JsonValue } | { error: string }): void {
+  #finish(run: RunRecord, outcome: { state: StateValue; output?: JsonValue; ending?: RunEnding } | { error: string }): void {
     if (this.#closed || !isActive(run.status)) return;
     run.status = "state" in outcome ? "completed" : "failed";
     if ("state" in outcome) {
       run.state = outcome.state;
       run.output = outcome.output;
+      run.ending = outcome.ending;
     } else run.error = outcome.error;
     run.human = undefined;
     run.agent = undefined;
@@ -247,6 +251,7 @@ function snapshot(run: RunRecord): RunSnapshot {
     status: run.status,
     ...(run.state === undefined ? {} : { state: structuredClone(run.state) }),
     ...(run.output === undefined ? {} : { output: structuredClone(run.output) }),
+    ...(run.ending === undefined ? {} : { ending: { ...run.ending } }),
     startedAt: new Date(run.startedAt).toISOString(),
     updatedAt: new Date(run.updatedAt).toISOString(),
     elapsedSeconds: Math.floor(((isActive(run.status) ? Date.now() : run.updatedAt) - run.startedAt) / 1_000),

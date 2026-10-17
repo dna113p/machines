@@ -1,4 +1,5 @@
 import type { AnyStateMachine } from "xstate";
+import { runEnding, type EndingKind, type MachineEndings } from "./endings.ts";
 
 /**
  * A Machine's states and transitions as data, for a surface that draws them.
@@ -19,6 +20,8 @@ export interface RunGraphState {
   readonly kind: "agent" | "human" | "operation" | "final" | "group" | "state";
   /** The Agent role an Agent state runs. */
   readonly role?: string;
+  /** The declared kind of a top-level final state. */
+  readonly ending?: EndingKind;
 }
 
 export interface RunGraphEdge {
@@ -54,7 +57,7 @@ interface Node {
  * large to draw or one whose shape this cannot read. Never throws: a picture of
  * the workflow is never worth the run.
  */
-export function machineGraph(definition: AnyStateMachine): RunGraph | undefined {
+export function machineGraph(definition: AnyStateMachine, endings?: MachineEndings): RunGraph | undefined {
   try {
     const root = (definition as unknown as { readonly root: Node }).root;
     const states: RunGraphState[] = [];
@@ -69,10 +72,13 @@ export function machineGraph(definition: AnyStateMachine): RunGraph | undefined 
         : src === "human" ? "human"
         : src !== undefined ? "operation"
         : "state";
+      const ending = node.type === "final" && node.path.length === 1
+        ? runEnding(endings, node.meta?.["machines.ending"]) : undefined;
       states.push({
         id: id(node),
         ...(parent === undefined ? {} : { parent }),
         kind,
+        ...(ending === undefined ? {} : { ending: ending.kind }),
         ...(kind === "agent" ? { role: using as string } : {}),
       });
       const add = (event: string, targets: ReadonlyArray<Node> | undefined) => {

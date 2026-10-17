@@ -12,7 +12,7 @@ import { createContext, runInContext } from "node:vm";
 import { createMachine, fromPromise } from "xstate";
 
 // The package's own entry, which any tool that holds a definition can read its graph from.
-import { agent, final, human, machine, machineGraph, operation, statePaths } from "../src/index.ts";
+import { agent, defineEndings, final, human, machine, machineGraph, operation, statePaths } from "../src/index.ts";
 import { respondToRun } from "../src/run-inbox.ts";
 import { createRunStatusPublisher, readRunStatuses, trailLimit } from "../src/run-status.ts";
 import { runUiPage } from "../src/run-ui-page.ts";
@@ -280,6 +280,14 @@ class FakeNode {
   getAttribute(name: string) { return this.attributes.get(name) ?? null; }
   addEventListener(name: string, listener: (event: unknown) => void) { this.listeners.set(name, [...this.listeners.get(name) ?? [], listener]); }
   appendChild(child: FakeNode) { child.parent = this; this.children.push(child); return child; }
+  get parentNode(): FakeNode | undefined { return this.parent; }
+  insertBefore(child: FakeNode, before: FakeNode | null) {
+    const index = before === null ? -1 : this.children.indexOf(before);
+    if (index === -1) return this.appendChild(child);
+    child.parent = this;
+    this.children.splice(index, 0, child);
+    return child;
+  }
   replaceChildren(...children: FakeNode[]) { this.children.length = 0; for (const child of children) this.appendChild(child); }
   contains(other: FakeNode | null): boolean { return other === this || this.children.some((child) => child.contains(other)); }
   focus() {}
@@ -473,4 +481,70 @@ test("the page shows sleeping runs with their request or due time, and answers a
   const recorded = readRunStatuses(directory).find((found) => found.id === "asking-run");
   assert.equal(recorded?.status, "sleeping");
   assert.equal(recorded?.human?.answer, "approve");
+});
+
+test("a definition's graph marks each final that takes an ending with its kind, and a published record keeps it", async (context) => {
+  const endings = defineEndings({ shipped: { kind: "succeeded" }, broken: { kind: "failed" }, dropped: { kind: "cancelled" } });
+  const definition = machine({
+    initial: "work",
+    states: {
+      work: operation(() => ({ type: "done" }), { done: "shipped", failed: "broken", cancelled: "dropped" }),
+      shipped: final(endings.shipped),
+      broken: final(endings.broken),
+      dropped: final(endings.dropped),
+    },
+  });
+  // The package's entry draws from the definition and the module's endings, as `machine run` does.
+  const graph = (machineGraph as (definition: unknown, endings?: unknown) => ReturnType<typeof machineGraph>)(definition, endings);
+  assert.deepEqual(graph?.states, [
+    { id: "work", kind: "operation" },
+    { id: "shipped", kind: "final", ending: "succeeded" },
+    { id: "broken", kind: "final", ending: "failed" },
+    { id: "dropped", kind: "final", ending: "cancelled" },
+  ]);
+
+  const directory = await temporary(context);
+  createRunStatusPublisher({ ...run, id: "drawn", graph: graph! }, { MACHINES_RUN_STATUS_DIR: directory }).update({ state: "work" });
+  assert.deepEqual(readRunStatuses(directory)[0]?.graph, graph);
+});
+
+test("machine ui draws each ending kind distinctly, and a graph without endings as before", () => {
+  const stamp = new Date().toISOString();
+  const graph = (ending: boolean) => ({
+    initial: "work",
+    states: [
+      { id: "work", kind: "operation" },
+      ...[["shipped", "succeeded"], ["broken", "failed"], ["dropped", "cancelled"]].map(([id, kind]) =>
+        ({ id, kind: "final", ...(ending ? { ending: kind } : {}) })),
+    ],
+    edges: [{ from: "work", to: "shipped", event: "done" }, { from: "work", to: "broken", event: "failed" }, { from: "work", to: "dropped", event: "cancelled" }],
+  });
+  /** The colour bar of each drawn state, and the legend's entries, for a finished run of `graph`. */
+  const drawn = (ending: boolean) => {
+    const page = openPage(runUiPage("page-token"), "http://localhost/", async () => new Response("{}"));
+    page.show({
+      project: { name: "test" }, directory: "/tmp", panels: [],
+      runs: [{ ...run, id: "ended", label: "Ended", status: "completed", state: "shipped", graph: graph(ending), startedAt: stamp, updatedAt: stamp }],
+    });
+    const detail = page.document.getElementById("detail")!;
+    const bars = Object.fromEntries(detail.descendants()
+      .filter((node) => node.tagName === "g" && node.hasClass("node"))
+      .map((node) => [
+        node.children.find((child) => child.tagName === "title")!.textContent.split(" ")[0],
+        node.children.find((child) => child.tagName === "rect" && child.getAttribute("width") === "4")?.getAttribute("fill"),
+      ]));
+    const legend = detail.descendants().find((node) => node.hasClass("legend"))!.children.map((child) => child.textContent);
+    return { bars, legend };
+  };
+
+  const ended = drawn(true);
+  assert.deepEqual(Object.keys(ended.bars).sort(), ["broken", "dropped", "shipped", "work"]);
+  const fills = [ended.bars.shipped, ended.bars.broken, ended.bars.dropped];
+  assert.equal(new Set([...fills, ended.bars.work]).size, 4, JSON.stringify(ended.bars));
+  for (const kind of ["succeeded", "failed", "cancelled"]) assert.ok(ended.legend.includes(kind), ended.legend.join(", "));
+
+  // Without endings every final is drawn alike, and the legend is unchanged.
+  const plain = drawn(false);
+  assert.equal(new Set([plain.bars.shipped, plain.bars.broken, plain.bars.dropped]).size, 1, JSON.stringify(plain.bars));
+  assert.deepEqual(plain.legend, ["agent", "operation", "human", "final"]);
 });

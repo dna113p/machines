@@ -19,6 +19,7 @@ const page = String.raw`<!doctype html>
   --bg: #f6f7f9; --panel: #ffffff; --panel-2: #f0f2f5; --ink: #16181d; --muted: #646b78; --faint: #9aa1ad;
   --line: #e1e4ea; --edge: #c3c8d2; --accent: #4f5bd5; --accent-soft: rgba(79, 91, 213, 0.12);
   --agent: #7c4dcc; --human: #c77700; --operation: #1f7a99; --final: #2f8f4e; --group: #8a8f99;
+  --succeeded: #2f8f4e; --cancelled: #887135;
   --running: #2f6fdb; --waiting: #c77700; --sleeping: #657aaa; --completed: #2f8f4e; --failed: #cc3a3a; --lost: #8a8f99;
   --shadow: 0 1px 2px rgba(16, 24, 40, 0.06), 0 1px 3px rgba(16, 24, 40, 0.08);
   color-scheme: light;
@@ -28,6 +29,7 @@ const page = String.raw`<!doctype html>
     --bg: #0f1115; --panel: #171a21; --panel-2: #1e222b; --ink: #e8eaef; --muted: #9aa1ad; --faint: #6b7280;
     --line: #2a2f3a; --edge: #3d4452; --accent: #8b94ff; --accent-soft: rgba(139, 148, 255, 0.16);
     --agent: #b18cff; --human: #f0a531; --operation: #4fb3d4; --final: #5cc282; --group: #8a8f99;
+    --succeeded: #5cc282; --cancelled: #d4b765;
     --running: #6c9dff; --waiting: #f0a531; --sleeping: #94a8d4; --completed: #5cc282; --failed: #ff6b6b; --lost: #8a8f99;
     --shadow: none;
     color-scheme: dark;
@@ -503,10 +505,14 @@ function layout(graph) {
 }
 
 var KIND = { agent: "var(--agent)", human: "var(--human)", operation: "var(--operation)", final: "var(--final)", group: "var(--group)", state: "var(--group)" };
+var ENDING = { succeeded: "var(--succeeded)", failed: "var(--failed)", cancelled: "var(--cancelled)" };
 
 function graphCard(run) {
-  var legend = h("div", { class: "legend" }, ["agent", "operation", "human", "final"].map(function (k) {
-    return h("span", null, h("i", { style: "background:" + KIND[k] }), k);
+  var kinds = ["agent", "operation", "human", "final"].concat(Object.keys(ENDING).filter(function (k) {
+    return run.graph && run.graph.states.some(function (st) { return st.ending === k; });
+  }));
+  var legend = h("div", { class: "legend" }, kinds.map(function (k) {
+    return h("span", null, h("i", { style: "background:" + (ENDING[k] || KIND[k]) }), k);
   }));
   var tools = h("div", { class: "tools" },
     h("button", { class: "btn", title: "Zoom out", text: "−", onclick: function () { zoomBy(run, 1 / 1.25); } }),
@@ -600,13 +606,13 @@ function drawGraph(run) {
     var count = facts.counts[id] || 0;
     var short = id.split(".").pop();
     var name = short.length > 21 ? short.slice(0, 20) + "…" : short;
-    var kind = st.kind === "agent" ? "agent · " + st.role : st.kind;
+    var kind = st.ending || (st.kind === "agent" ? "agent · " + st.role : st.kind);
     var g = s("g", { class: "node" + (count ? " visited" : "") + (isCurrent ? " current " + run.status : "") + (n.reached ? "" : " unreached"), transform: "translate(" + n.x + "," + n.y + ")" },
       s("title", { text: id + " (" + kind + ")" + (count ? ", entered " + count + "×" : "") }));
     if (isCurrent && active(run)) g.appendChild(s("rect", { class: "halo", x: -5, y: -5, width: NODE_W + 10, height: NODE_H + 10, rx: 14 }));
     g.appendChild(s("rect", { class: "base", width: NODE_W, height: NODE_H, rx: 10 }));
     g.appendChild(s("rect", { class: "box", width: NODE_W, height: NODE_H, rx: 10, "stroke-dasharray": st.kind === "group" ? "4 3" : null }));
-    g.appendChild(s("rect", { x: 0, y: 8, width: 4, height: NODE_H - 16, rx: 2, fill: KIND[st.kind] || KIND.state }));
+    g.appendChild(s("rect", { x: 0, y: 8, width: 4, height: NODE_H - 16, rx: 2, fill: ENDING[st.ending] || KIND[st.kind] || KIND.state }));
     g.appendChild(s("text", { x: 14, y: 19, text: name }));
     g.appendChild(s("text", { class: "kind", x: 14, y: 35, text: kind.length > 26 ? kind.slice(0, 25) + "…" : kind }));
     if (count > 1) {
