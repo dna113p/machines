@@ -84,7 +84,7 @@ export async function prepareMachineRun(
     if (dataCalled) throw new Error("p.data() may only be called once per Machine factory");
     dataCalled = true;
     initializeData(initial);
-    savedData = options.continueRun ? structuredClone(options.continueRun.data) : initial;
+    savedData = options.continueRun ? Object.assign(initial, structuredClone(options.continueRun.data)) : initial;
     return savedData as T;
   };
   const definition = await loaded.default(

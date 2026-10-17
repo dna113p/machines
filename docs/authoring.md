@@ -120,6 +120,13 @@ status is published. A Machine using only `context` needs no `p.data()` call.
 Ordinary closure variables are not saved. Checkpoints capture data before the
 step's prompt or work starts; mutations made during an interrupted step are lost.
 
+On continuation, `p.data(initial)` returns the current initial object with each
+saved top-level key replacing its initial value. A field added since the checkpoint
+starts from its initial value; a saved field the Machine no longer declares is
+kept. A renamed field starts from its initial value, and its saved value remains
+under the old name. Nested objects are not merged: each saved nested object is
+used whole. Later reads, writes, and checkpoints use the same returned object.
+
 Saveable `p.data()` values are `null`, strings, booleans, finite numbers, arrays of
 saveable values, and plain objects whose string keys hold saveable values. Functions,
 `undefined` (including array elements and holes), symbols, bigints, non-finite
