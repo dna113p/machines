@@ -198,7 +198,7 @@ Other ways:
   `npm install /absolute/path/to/machines/dna113p-machines-0.5.0.tgz`.
 
 The command is always `machine`. The package ships JavaScript and TypeScript
-declarations; import `{ machine, agent, human, operation, wait, final, run }`
+declarations; import `{ machine, agent, human, operation, wait, final, run, defineEndings, Type }`
 from `"@dna113p/machines"`. Keep your workflow definitions as ordinary
 TypeScript outside `node_modules`.
 

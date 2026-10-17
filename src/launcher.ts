@@ -9,6 +9,7 @@ import { createLimitMemory, defaultProbeMs, limitAwareRunner, type LimitPolicy }
 import { configuredAgentPresets, type LauncherLocation, type MachineSummary, type AgentPresetSummary } from "./catalog.ts";
 import { queryCatalog } from "./discovery-worker.ts";
 import { loadMachineModule, readAgentRoles, requireMachineDescription } from "./machine-module.ts";
+import { assertEndingOutput, assertEndingStates, readEndings } from "./endings.ts";
 export type { LauncherLocation, MachineSummary, AgentPresetSummary } from "./catalog.ts";
 import { discoverMachines, machinesUserHome } from "./discovery.ts";
 import {
@@ -71,6 +72,7 @@ export async function prepareMachineRun(
   const loaded = await loadMachineModule(path);
   const description = requireMachineDescription(loaded, path);
   const agentRoles = readAgentRoles(loaded, path);
+  const endings = readEndings(loaded, path);
 
   if (typeof loaded.default !== "function") {
     throw new Error(`Machine "${path}" must default-export a factory`);
@@ -89,6 +91,7 @@ export async function prepareMachineRun(
     { agent, final, human, machine, operation, wait, data },
     options.input === undefined ? "" : options.input,
   ) as AnyStateMachine;
+  assertEndingStates(definition, endings, path);
   if (options.continueRun) assertSavedState(definition.root, options.continueRun.state.value);
   const sourceHash = machineSourceHash(path);
   const configured = await configuredAgentPresets(cwd, home);
@@ -175,6 +178,9 @@ export async function prepareMachineRun(
           captured = undefined;
           runtimeOptions.onEnter?.(entry);
         } } : {}),
+      }).then((snapshot) => {
+        assertEndingOutput(snapshot, endings);
+        return snapshot;
       });
     },
   };
