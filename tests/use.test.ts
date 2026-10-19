@@ -1,7 +1,7 @@
 import "./environment.ts";
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -11,6 +11,7 @@ import type { AnyStateMachine } from "xstate";
 import * as machines from "../src/index.ts";
 import { prepareMachineRun } from "../src/launcher.ts";
 import type { RunGraph } from "../src/run-graph.ts";
+import { checkpointPath, machineSourceHash } from "../src/run-checkpoint.ts";
 
 // Read from the namespace so that each case fails on its own until the export exists.
 const { final, machine, run } = machines;
@@ -124,33 +125,78 @@ test("without sleep, a child's Human request goes to the parent's Human runner",
   assert.deepEqual(prompts, ["Approve the child's work?"]);
 });
 
-const notSupported = (cause: unknown) => {
-  assert.ok(cause instanceof Error, String(cause));
-  assert.match(cause.message, /sleep/iu);
-  assert.match(cause.message, /not supported/iu);
-  return true;
-};
+/** A sleeping checkpoint, read loosely so the test names only what the ticket asks. */
+interface SavedLevel {
+  readonly schemaVersion?: number;
+  readonly machine: { readonly path: string; readonly sourceHash: string };
+  readonly state: { readonly value: unknown; readonly kind: string; due?: string };
+  readonly children?: readonly SavedLevel[];
+}
 
-test("a sleeping run reaching a child's timed wait fails with the not-supported error", async (t) => {
+function savedCheckpoint(directory: string, id: string): SavedLevel {
+  return JSON.parse(readFileSync(checkpointPath(directory, id), "utf8")) as SavedLevel;
+}
+
+function onlyChild(level: SavedLevel): SavedLevel {
+  assert.ok(Array.isArray(level.children), `no children saved: ${JSON.stringify(level)}`);
+  assert.equal(level.children.length, 1);
+  return level.children[0]!;
+}
+
+test("a sleeping run reaching a child's timed wait sleeps, saving the parent at its use state and the child under children", async (t) => {
   const location = isolated(t);
   const prepared = await prepareMachineRun({ ...location, machine: fixture("uses-wait") });
   let slept: string | undefined;
-  await assert.rejects(prepared.start({
+  const snapshot = await prepared.start({
     checkpoint: { directory: location.cwd, id: "resting", sleep: true },
     onSleep(due) { slept = due; },
-  }), notSupported);
-  assert.equal(slept, undefined, "the run slept inside its child");
+  });
+  assert.equal(typeof slept, "string", "the run did not sleep at its child's wait");
+  assert.notEqual(snapshot.status, "done");
+  const checkpoint = savedCheckpoint(location.cwd, "resting");
+  assert.equal(checkpoint.schemaVersion, 2);
+  assert.equal(checkpoint.state.value, "delegate");
+  const child = onlyChild(checkpoint);
+  assert.equal(child.machine.path, fixture("wait-child"));
+  assert.equal(child.machine.sourceHash, machineSourceHash(fixture("wait-child")));
+  assert.deepEqual({ value: child.state.value, kind: child.state.kind, due: child.state.due }, { value: "rest", kind: "wait", due: slept });
 });
 
-test("a sleeping run reaching a child's Human request fails with the not-supported error", async (t) => {
+test("a continued run takes its child's timed wait once due and routes on the child's ending", async (t) => {
+  const location = isolated(t);
+  const prepared = await prepareMachineRun({ ...location, machine: fixture("uses-wait") });
+  await prepared.start({ checkpoint: { directory: location.cwd, id: "resting", sleep: true }, onSleep() {} });
+  const checkpoint = savedCheckpoint(location.cwd, "resting");
+  // The child's hour-long wait is made due now.
+  onlyChild(checkpoint).state.due = new Date(Date.now() - 1_000).toISOString();
+
+  const continued = await prepareMachineRun({ ...location, machine: fixture("uses-wait"), continueRun: checkpoint as never });
+  const snapshot = await continued.start();
+  assert.equal(snapshot.status, "done");
+  assert.equal(snapshot.value, "done");
+});
+
+test("a sleeping run reaching a child's Human request sleeps with the child's request, and continuation gives the child the answer", async (t) => {
   const location = isolated(t);
   const prepared = await prepareMachineRun({ ...location, machine: fixture("uses-human") });
-  let asked = false;
-  await assert.rejects(prepared.start({
+  const requests: { readonly prompt: string; readonly choices?: readonly string[] }[] = [];
+  const snapshot = await prepared.start({
     checkpoint: { directory: location.cwd, id: "asking", sleep: true },
-    onHumanSleep() { asked = true; },
-  }), notSupported);
-  assert.equal(asked, false, "the run slept at its child's Human request");
+    onHumanSleep(request) { requests.push(request); },
+  });
+  assert.notEqual(snapshot.status, "done");
+  assert.deepEqual(requests.map(({ prompt, choices }) => ({ prompt, choices })), [{ prompt: "Approve the child's work?", choices: ["approve"] }]);
+  const checkpoint = savedCheckpoint(location.cwd, "asking");
+  assert.equal(checkpoint.schemaVersion, 2);
+  assert.equal(checkpoint.state.value, "delegate");
+  const child = onlyChild(checkpoint);
+  assert.equal(child.machine.path, fixture("human-child"));
+  assert.deepEqual({ value: child.state.value, kind: child.state.kind }, { value: "ask", kind: "human" });
+
+  const continued = await prepareMachineRun({ ...location, machine: fixture("uses-human"), continueRun: checkpoint as never });
+  const done = await continued.start({ answer: "approve", human() { assert.fail("the child asked again instead of taking the answer"); } });
+  assert.equal(done.status, "done");
+  assert.equal(done.value, "accepted");
 });
 
 test("run() without the launcher fails at a use state, naming prepareMachineRun", async () => {
