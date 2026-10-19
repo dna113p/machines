@@ -192,7 +192,10 @@ const machines = setup({
     humanInputStarted: () => {},
   },
   actors: {
-    use: fromPromise<Event, { readonly selector: string; readonly input: unknown }>(async () => {
+    use: fromPromise<Event, {
+      readonly selector: string; readonly input: unknown;
+      readonly sleep?: Pick<RunOptions, "onSleep" | "onHumanSleep">;
+    }>(async () => {
       throw new Error("Machine states require prepareMachineRun; run() cannot load a child Machine");
     }),
     retry: fromPromise<Event, RetryInvocation>(async () => {
@@ -572,13 +575,24 @@ export function run<TMachine extends AnyStateMachine>(
     }) as TMachine;
     // XState evaluates invoke inputs during the transition, before its microstep
     // notification. Capture working data first without changing input timing.
-    if (options.onBeforeStep) {
+    if (options.onBeforeStep || options.onSleep || options.onHumanSleep) {
       const visit = (node: AnyStateMachine["root"]) => {
         for (const invocation of node.invoke) {
           const input = invocation.input as unknown;
           invocation.input = (args: { context: unknown; event: Event; self: unknown }) => {
             options.onBeforeStep?.(args.context);
-            return typeof input === "function" ? input(args) : input;
+            const value = typeof input === "function" ? input(args) : input;
+            if (invocation.src !== "use" || (!options.onSleep && !options.onHumanSleep)) return value;
+            return { ...value, sleep: {
+              ...(options.onSleep ? { onSleep(due: string) {
+                options.onSleep!(due);
+                queueMicrotask(() => actor.stop());
+              } } : {}),
+              ...(options.onHumanSleep ? { onHumanSleep(request: HumanRequest) {
+                options.onHumanSleep!(request);
+                queueMicrotask(() => actor.stop());
+              } } : {}),
+            } };
           };
         }
         Object.values(node.states).forEach(visit);

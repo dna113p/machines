@@ -1,13 +1,14 @@
 import "./environment.ts";
 
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test, type TestContext } from "node:test";
 import { pathToFileURL } from "node:url";
 
 import { prepareMachineRun } from "../src/launcher.ts";
+import { checkpointPath, type RunCheckpoint } from "../src/run-checkpoint.ts";
 
 const runtime = JSON.stringify(pathToFileURL(resolve("src/index.ts")).href);
 const header = `import { defineEndings, Type } from ${runtime};
@@ -117,7 +118,7 @@ export default p => p.machine({ initial: "done", output: () => 42, states: { don
   await assert.rejects(prepared.start(), /delegate.*output does not match ending "done"/u);
 });
 
-test("sleep mode refuses child retry waits without calling the parent's hooks", async (t) => {
+test("a child retry wait sleeps through the parent's hook and continues at the saved attempt", { timeout: 5_000 }, async (t) => {
   const { write, location, directory } = workspace(t);
   write("retry.ts", `${header}
 export const endings = defineEndings({ done: { kind: "succeeded" } });
@@ -125,11 +126,30 @@ export default p => p.machine({ initial: "work", states: {
   work: p.operation(() => ({ type: "again" }), { again: "done" }, { retry: { on: "again", times: 1, wait: "1h" } }),
   done: p.final(endings.done),
 } });`);
-  const prepared = await prepareMachineRun({ ...location, machine: write("parent.ts", parent("./retry.ts")) });
-  await assert.rejects(prepared.start({
-    checkpoint: { directory, id: "retry", sleep: true },
-    onHumanSleep() { assert.fail("parent sleep hook called"); },
-  }), /delegate.*Sleeping through a child Machine is not supported yet/u);
+  const machine = write("parent.ts", parent("./retry.ts"));
+  const prepared = await prepareMachineRun({ ...location, machine });
+  const checkpoint = { directory, id: "retry", sleep: true };
+  let due: string | undefined;
+  const sleeping = await prepared.start({
+    checkpoint,
+    onSleep(value) { due = value; },
+    onHumanSleep() { assert.fail("a retry wait must not ask a Human"); },
+  });
+  assert.notEqual(sleeping.status, "done");
+  assert.equal(typeof due, "string");
+  const saved = JSON.parse(readFileSync(checkpointPath(directory, "retry"), "utf8")) as RunCheckpoint;
+  assert.equal(saved.state.value, "delegate");
+  const child = saved.children?.[0];
+  assert.ok(child);
+  assert.equal(child.state.value, "work");
+  assert.deepEqual(child.state.retry, { attempt: 2, of: 2 });
+  assert.equal(child.state.due, due);
+  Object.assign(child.state, { due: new Date(Date.now() - 1_000).toISOString() });
+  const continued = await prepareMachineRun({ ...location, machine, continueRun: saved });
+  const done = await continued.start({ checkpoint, onSleep() { assert.fail("the final attempt must not retry"); } });
+  assert.equal(done.status, "done");
+  assert.equal(done.value, "done");
+  assert.equal(existsSync(checkpointPath(directory, "retry")), false);
 });
 
 test("child roles accept overrides and share Agent updates and limit policy", async (t) => {

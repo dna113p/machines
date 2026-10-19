@@ -28,7 +28,7 @@ import {
   type AgentRunner,
   type RunOptions,
 } from "./index.ts";
-import { assertSavedState, checkpointPath, machineSourceHash, removeCheckpoint, writeCheckpoint, type RunCheckpoint } from "./run-checkpoint.ts";
+import { assertSavedState, checkpointPath, machineSourceHash, removeCheckpoint, writeCheckpoint, type ChildCheckpoint, type RunCheckpoint } from "./run-checkpoint.ts";
 import { machineGraph, nestGraph, statePaths, type RunGraph } from "./run-graph.ts";
 
 export interface PrepareMachineRunOptions extends LauncherLocation {
@@ -100,6 +100,7 @@ export async function prepareMachineRun(
   const agents = applyAgentOverrides(path, configured.agents, configured.presets, requiredRoles, overrides);
   preflightAgentRoles(path, usedAgentRoles, agentRoles, agents);
   for (const child of childModules) preflightAgentRoles(child.path, ["default"], child.agentRoles, agents);
+  const restored = await restoreChildren(definition, children, options.continueRun, agents);
   const limitAware = limitAwareAgents(requiredRoles, overrides, configured, limitPolicy(options.agentLimits));
 
   let started = false;
@@ -116,36 +117,28 @@ export async function prepareMachineRun(
       started = true;
       const { checkpoint, onGraph, ...runtimeOptions } = runOptions;
       if ((runtimeOptions.onSleep || runtimeOptions.onHumanSleep) && !checkpoint) throw new Error("Sleeping requires a checkpoint");
-      // null means context could not be serialized; skip this checkpoint only.
-      let captured: { data: Record<string, JsonValue>; context: JsonValue } | null | undefined;
-      const capture = (context: unknown) => {
-        try {
-          const problem = jsonProblem(savedData, "data");
-          if (problem) throw new Error(`Cannot save checkpoint: ${problem}`);
-          const data = JSON.parse(JSON.stringify(savedData)) as Record<string, JsonValue>;
-          try {
-            // Context predates checkpoints and may contain runtime objects. Keep
-            // JSON's normal conversions without modifying the running context.
-            const saved = JSON.parse(JSON.stringify({ context })) as { context?: JsonValue };
-            captured = saved.context === undefined ? null : { data, context: saved.context };
-          } catch {
-            captured = null;
-          }
-        } catch (cause) {
-          if (checkpoint) removeCheckpoint(checkpoint.directory, checkpoint.id);
-          throw cause;
+      const frames: (ChildCheckpoint | null)[] = [];
+      if (options.continueRun) {
+        let level: ChildCheckpoint | undefined = options.continueRun;
+        while (level) {
+          const { children: nested, ...frame }: ChildCheckpoint = level;
+          frames.push(frame);
+          level = nested?.[0];
         }
-      };
+      }
+      const hooks = checkpointHooks(checkpoint, frames, {
+        input: options.input === undefined ? "" : options.input,
+        agents: options.agents ?? {}, home, cwd,
+      });
       const shared: RunOptions = {
         agents: { ...agents, ...limitAware },
         human: runtimeOptions.human,
         onAgentUpdate: runtimeOptions.onAgentUpdate,
         onHumanInput: runtimeOptions.onHumanInput,
-        ...((checkpoint?.sleep || runtimeOptions.onSleep || runtimeOptions.onHumanSleep)
-          ? { onSleep: unsupportedChildSleep, onHumanSleep: unsupportedChildSleep } : {}),
       };
       return runWithChildren(definition, children, shared, {
         ...runtimeOptions,
+        ...(restored ? { answer: undefined } : {}),
         ...(runtimeOptions.onSleep ? { onSleep(due: string) {
           if (!checkpoint || !existsSync(checkpointPath(checkpoint.directory, checkpoint.id))) {
             throw new Error("Cannot sleep without a saved checkpoint");
@@ -162,32 +155,9 @@ export async function prepareMachineRun(
         ...(options.continueRun ? { continueAt: { value: options.continueRun.state.value, context: options.continueRun.context,
           ...(options.continueRun.state.retry === undefined ? {} : { retry: options.continueRun.state.retry }),
           ...(options.continueRun.state.due === undefined ? {} : { due: options.continueRun.state.due }) } } : {}),
-        ...(checkpoint ? { onBeforeStep: capture, onEnter(entry) {
-          try {
-            if (captured === undefined) capture(entry.context);
-            if (entry.kind === "final" || captured === null) removeCheckpoint(checkpoint.directory, checkpoint.id);
-            else writeCheckpoint(checkpoint.directory, {
-              schemaVersion: 1,
-              id: checkpoint.id,
-              machine: { name: machineName(path), path, sourceHash },
-              input: options.input === undefined ? "" : options.input,
-              agents: options.agents ?? {}, home, cwd,
-              ...(checkpoint.sleep ? { sleep: true } : {}),
-              state: { value: entry.value, kind: entry.kind, enteredAt: entry.enteredAt, path: statePaths(entry.value).join(", "),
-                ...(entry.retry === undefined ? {} : { retry: entry.retry }),
-                ...(entry.due === undefined ? {} : { due: entry.due }) },
-              data: captured!.data,
-              context: captured!.context,
-              writtenAt: new Date().toISOString(),
-            });
-          } catch (cause) {
-            removeCheckpoint(checkpoint.directory, checkpoint.id);
-            throw cause;
-          }
-          captured = undefined;
-          runtimeOptions.onEnter?.(entry);
-        } } : {}),
-      }, graph, onGraph).then((snapshot) => {
+        ...hooks(0, { name: machineName(path), path, sourceHash }, options.input === undefined ? "" : options.input,
+          savedData, runtimeOptions.onEnter),
+      }, graph, onGraph, hooks, 1, restored, runtimeOptions.answer).then((snapshot) => {
         assertEndingOutput(snapshot, endings);
         return snapshot;
       });
@@ -218,18 +188,115 @@ async function buildDefinition(
   return { definition, savedData };
 }
 
-function unsupportedChildSleep(): never {
-  throw new Error("Sleeping through a child Machine is not supported yet");
+type BuiltDefinition = Awaited<ReturnType<typeof buildDefinition>>;
+interface RestoredChild extends BuiltDefinition {
+  readonly saved: ChildCheckpoint;
+  readonly child?: RestoredChild;
 }
 
-/** Compose observations only; the runtime still owns each Machine's state and checkpoints. */
+/** Validate the entire saved chain before any state can perform work. */
+async function restoreChildren(
+  definition: AnyStateMachine,
+  children: ReadonlyMap<string, UseModule>,
+  saved: ChildCheckpoint | undefined,
+  agents: Readonly<Record<string, AgentRunner>>,
+): Promise<RestoredChild | undefined> {
+  const next = saved?.children?.[0];
+  if (!next || !saved) return undefined;
+  const entry = useStates(definition).find((entry) => entry.path === statePaths(saved.state.value)[0]);
+  const child = entry && children.get(entry.selector);
+  if (!child || child.path !== next.machine.path) {
+    throw new Error(`Cannot continue: saved child "${next.machine.path}" no longer matches the parent's use state`);
+  }
+  const built = await buildDefinition(child.loaded, child.path, next.input, next.data);
+  assertSavedState(built.definition.root, next.state.value);
+  assertEndingStates(built.definition, child.endings, child.path);
+  assertUseStates(built.definition, child.path, child.children);
+  preflightAgentRoles(child.path, requiredAgentNames(built.definition), child.agentRoles, agents);
+  return { ...built, saved: next, child: await restoreChildren(built.definition, child.children, next, agents) };
+}
+
+/** Each level captures before input evaluation; one writer joins the active frames. */
+function checkpointHooks(
+  checkpoint: { readonly directory: string; readonly id: string; readonly sleep?: boolean } | undefined,
+  frames: (ChildCheckpoint | null)[],
+  root: Pick<RunCheckpoint, "input" | "agents" | "home" | "cwd">,
+) {
+  const write = () => {
+    if (!checkpoint) return;
+    if (frames.some((frame) => frame === null)) {
+      removeCheckpoint(checkpoint.directory, checkpoint.id);
+      return;
+    }
+    const nest = (depth: number): ChildCheckpoint => ({
+      ...frames[depth]!,
+      ...(depth + 1 < frames.length ? { children: [nest(depth + 1)] as const } : {}),
+    });
+    writeCheckpoint(checkpoint.directory, {
+      ...root, ...nest(0), schemaVersion: 2, id: checkpoint.id,
+      ...(checkpoint.sleep ? { sleep: true } : {}), writtenAt: new Date().toISOString(),
+    });
+  };
+  return (depth: number, machine: ChildCheckpoint["machine"], input: JsonValue, savedData: object,
+    onEnter?: RunOptions["onEnter"]): Pick<RunOptions, "onBeforeStep" | "onEnter"> => {
+    if (!checkpoint) return {};
+    let firstEntry = true;
+    // null means this level's context could not be serialized.
+    let captured: Pick<ChildCheckpoint, "data" | "context"> | null | undefined;
+    const capture = (context: unknown) => {
+      try {
+        const problem = jsonProblem(savedData, "data");
+        if (problem) throw new Error(`Cannot save checkpoint: ${problem}`);
+        const data = JSON.parse(JSON.stringify(savedData)) as Record<string, JsonValue>;
+        try {
+          // Preserve JSON's normal context conversions without changing live objects.
+          const saved = JSON.parse(JSON.stringify({ context })) as { context?: JsonValue };
+          captured = saved.context === undefined ? null : { data, context: saved.context };
+        } catch { captured = null; }
+      } catch (cause) {
+        removeCheckpoint(checkpoint.directory, checkpoint.id);
+        throw cause;
+      }
+    };
+    return { onBeforeStep: capture, onEnter(entry) {
+      try {
+        if (captured === undefined) capture(entry.context);
+        if (entry.kind === "final") {
+          frames.length = depth;
+          if (depth === 0) removeCheckpoint(checkpoint.directory, checkpoint.id);
+        } else {
+          if (!firstEntry) frames.length = depth + 1;
+          frames[depth] = captured === null ? null : {
+            machine, input, ...captured!,
+            state: { value: entry.value, kind: entry.kind, enteredAt: entry.enteredAt, path: statePaths(entry.value).join(", "),
+              ...(entry.retry === undefined ? {} : { retry: entry.retry }),
+              ...(entry.due === undefined ? {} : { due: entry.due }) },
+          };
+          write();
+        }
+      } catch (cause) {
+        removeCheckpoint(checkpoint.directory, checkpoint.id);
+        throw cause;
+      }
+      firstEntry = false;
+      captured = undefined;
+      onEnter?.(entry);
+    } };
+  };
+}
+
+/** Compose child execution, observations and checkpoint hooks at each level. */
 function runWithChildren(
   definition: AnyStateMachine,
   children: ReadonlyMap<string, UseModule>,
   shared: RunOptions,
   options: RunOptions,
   graph: RunGraph | undefined,
-  onGraph?: (graph: RunGraph) => void,
+  onGraph: ((graph: RunGraph) => void) | undefined,
+  hooks: ReturnType<typeof checkpointHooks>,
+  depth: number,
+  restore?: RestoredChild,
+  answer?: string,
 ): Promise<SnapshotFrom<AnyStateMachine>> {
   const uses = useStates(definition);
   if (uses.length === 0) return run(definition, options);
@@ -251,12 +318,18 @@ function runWithChildren(
     graph = next;
     onGraph?.(graph);
   };
-  const actor = fromPromise<Event, { readonly selector: string; readonly input: unknown }>(async ({ input, self, signal }) => {
+  const actor = fromPromise<Event, {
+    readonly selector: string; readonly input: unknown;
+    readonly sleep?: Pick<RunOptions, "onSleep" | "onHumanSleep">;
+  }>(async ({ input, self, signal }) => {
     const path = paths.get(self.id)!;
     const child = children.get(input.selector);
     if (!child) throw new Error(`Child Machine "${input.selector}" was not loaded by prepareMachineRun`);
-    assertJsonValue(input.input, `Child Machine "${child.path}" input`);
-    const { definition } = await buildDefinition(child.loaded, child.path, input.input);
+    const restored = restore;
+    restore = undefined;
+    const childInput = restored ? restored.saved.input : input.input;
+    assertJsonValue(childInput, `Child Machine "${child.path}" input`);
+    const { definition, savedData } = restored ?? await buildDefinition(child.loaded, child.path, childInput);
     assertEndingStates(definition, child.endings, child.path);
     assertUseStates(definition, child.path, child.children);
     preflightAgentRoles(child.path, requiredAgentNames(definition), child.agentRoles, shared.agents ?? {});
@@ -266,14 +339,27 @@ function runWithChildren(
     if (!signal.aborted) active.set(path, observation);
     try {
       if (childGraph) reportGraph(childGraph);
+      let slept = false;
       const snapshot = await runWithChildren(definition, child.children, shared, {
         ...shared,
+        ...hooks(depth, { name: machineName(child.path), path: child.path, sourceHash: child.sourceHash }, childInput, savedData),
+        ...(restored ? { continueAt: { value: restored.saved.state.value, context: restored.saved.context,
+          ...(restored.saved.state.retry === undefined ? {} : { retry: restored.saved.state.retry }),
+          ...(restored.saved.state.due === undefined ? {} : { due: restored.saved.state.due }) },
+          ...(!restored.child ? { answer } : {}) } : {}),
+        ...(input.sleep?.onSleep ? { onSleep(due) { input.sleep!.onSleep!(due); slept = true; } } : {}),
+        ...(input.sleep?.onHumanSleep ? { onHumanSleep(request) { input.sleep!.onHumanSleep!(request); slept = true; } } : {}),
         onState(state) {
           if (signal.aborted) return;
           observation.value = state;
           report();
         },
-      }, childGraph, reportGraph);
+      }, childGraph, reportGraph, hooks, depth + 1, restored?.child, restored ? answer : undefined);
+      if (slept) {
+        // Sleeping is not a child ending. Let the parent's stop abort this invoke.
+        if (!signal.aborted) await new Promise<void>((done) => signal.addEventListener("abort", () => done(), { once: true }));
+        signal.throwIfAborted();
+      }
       assertEndingOutput(snapshot, child.endings);
       if (snapshot.status !== "done" || typeof snapshot.value !== "string" || !Object.hasOwn(child.endings, snapshot.value)) {
         throw new Error(`Child Machine "${child.path}" did not reach a declared ending`);

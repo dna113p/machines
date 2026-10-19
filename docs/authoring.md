@@ -167,10 +167,12 @@ Human runner, update reporter and usage-limit policy. Every child's declared
 Agent roles plus `default` are required at prepare; role names and Agent overrides
 are shared across the entire composition.
 
-Sleeping through a child is not supported yet. In a sleeping run, a child's timed
-wait, retry wait or Human request fails the use state with that error. Without
-sleep, Human requests use the parent's Human runner. Direct `run()` cannot load
-children: prepare the parent with `prepareMachineRun` and call its `start()`.
+In a sleeping run, a child's timed wait, retry wait or Human request sleeps the
+whole run. Schema version 2 checkpoints nest each active child's resolved path,
+source hash, input, state, context and working data under `children`, while the
+parent stays at its use state. The published Human request belongs to the child.
+Without sleep, Human requests use the parent's Human runner. Direct `run()` cannot
+load children: prepare the parent with `prepareMachineRun` and call its `start()`.
 
 ## Saved working data
 
@@ -233,6 +235,11 @@ A step may therefore repeat an external effect completed before interruption. De
 such steps so repetition is safe. Parallel states can be checkpointed but cannot
 be continued yet. See [continuing runs](integrations.md#continuing-a-run) for the
 file format and process rules.
+
+Continuation restores every saved child level with its own working data and sends
+an answer to the deepest Human request. A changed child's source is reported as
+`machineChanged`, just like a changed parent's source. Version 1 checkpoints still
+continue.
 
 ## Timed waits
 

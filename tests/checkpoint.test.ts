@@ -220,7 +220,9 @@ test("a run stopped while its Agent runs continues as the same run: the Agent ru
   assert.ok(before);
   // The checkpoint was written as the Agent state was entered, before its prompt changed the data.
   const checkpoint = readCheckpoint(project, before.id);
-  assert.equal(checkpoint.schemaVersion, 1);
+  assert.equal(checkpoint.schemaVersion, 2);
+  // A run without children saves none.
+  assert.equal("children" in checkpoint, false);
   assert.equal(checkpoint.id, before.id);
   assert.equal(checkpoint.machine.name, "checkpoint");
   assert.equal(checkpoint.machine.path, project.machine);
@@ -277,6 +279,23 @@ test("a run continues on a Machine file that gained a state elsewhere, and its s
   assert.equal(after?.id, before.id);
   assert.equal(after?.status, "completed");
   assert.equal(after?.continued?.machineChanged, true);
+  assert.deepEqual(await checkpointFiles(project.status), []);
+});
+
+test("a version 1 checkpoint, written before checkpoints saved children, continues as the same run", async (context) => {
+  const project = await createProject(context);
+  const before = await stopInAgent(context, project);
+  const written = readCheckpoint(project, before.id);
+  assert.equal(written.schemaVersion, 2);
+  await writeFile(checkpointPath(project, before.id), `${JSON.stringify({ ...written, schemaVersion: 1 })}\n`);
+
+  const continued = cli(project, ["continue", before.id]);
+  assert.equal(continued.status, 0, continued.stderr);
+  assert.deepEqual(logLines(project), ["first", "agent", "agent", 'second {"steps":["first"],"count":11}']);
+  const [after, ...others] = readRunStatuses(project.status) as ContinuedRecord[];
+  assert.deepEqual(others, []);
+  assert.deepEqual({ id: after?.id, status: after?.status, state: after?.state }, { id: before.id, status: "completed", state: "finished" });
+  assert.notEqual(after?.continued?.machineChanged, true);
   assert.deepEqual(await checkpointFiles(project.status), []);
 });
 

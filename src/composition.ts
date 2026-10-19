@@ -5,8 +5,10 @@ import type { AnyStateMachine, AnyStateNode } from "xstate";
 import { discoverMachines } from "./discovery.ts";
 import { readEndings, type MachineEndings } from "./endings.ts";
 import { loadMachineModule, readAgentRoles, readUses, requireMachineDescription } from "./machine-module.ts";
+import { machineSourceHash } from "./run-checkpoint.ts";
 
 export interface UseModule {
+  readonly sourceHash: string;
   readonly path: string;
   readonly loaded: Record<string, unknown>;
   readonly endings: MachineEndings;
@@ -53,7 +55,7 @@ export async function loadUseTree(
       if (!endings) throw new Error(`Child Machine "${childPath}" must declare endings`);
       const agentRoles = readAgentRoles(loaded, childPath);
       const nested = await loadUseTree(childPath, readUses(loaded, childPath), location, undefined, [...chain, canonical]);
-      children.set(selector, { path: childPath, loaded, endings, agentRoles, children: nested });
+      children.set(selector, { path: childPath, sourceHash: machineSourceHash(childPath), loaded, endings, agentRoles, children: nested });
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
       throw new Error(`Machine "${path}"${state ? ` state "${state}"` : " uses"} child "${selector}": ${message}`, { cause });

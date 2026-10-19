@@ -457,14 +457,18 @@ Every published run keeps `<run-id>.checkpoint.json` beside its status record.
 It is private (`0600`) and replaced atomically at each state entry. A crash during
 replacement leaves the previous checkpoint whole. It contains:
 
-- `schemaVersion: 1` and `id`;
+- `schemaVersion: 2` and `id` (version 1 checkpoints still continue);
 - `machine: { name, path, sourceHash }`, with the SHA-256 hash of the Machine file;
 - `input`, Agent override bindings in `agents`, `home`, and `cwd`;
 - `state: { value, path, kind, enteredAt, due? }`, with the full XState state value,
   dotted active paths, a kind of `agent`, `operation`, `human`, `wait`, `final`, or
   `state`, and the wait's deadline in `due`;
 - `sleep: true` when the CLI was started with `--sleep` or the host enabled `sleep`;
-- `data`, XState `context`, and `writtenAt`.
+- `data`, XState `context`, and `writtenAt`;
+- optional `children`, a single-element array holding the active child's
+  `machine: { name, path, sourceHash }`, `input`, `state`, `data`, `context`, and
+  recursively its own `children`. Each parent stays at its `use` state while
+  the child runs.
 
 No copy of the Machine source is stored. The checkpoint is removed when the run
 reaches a final state; failed and interrupted runs keep theirs, and pruning keeps

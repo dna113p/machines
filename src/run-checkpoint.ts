@@ -8,17 +8,21 @@ import { jsonProblem, type JsonValue } from "./json.ts";
 import { statePaths } from "./run-graph.ts";
 import { isFileSafeId, isProcessAlive, readRunStatuses, runStatusDirectory, cleanDeadClaim, type RunStatusHuman, type RunStatusRecord } from "./run-status.ts";
 
-export interface RunCheckpoint {
-  readonly schemaVersion: 1;
-  readonly id: string;
+export interface ChildCheckpoint {
   readonly machine: { readonly name: string; readonly path: string; readonly sourceHash: string };
   readonly input: JsonValue;
-  readonly agents: Readonly<Record<string, string>>;
-  readonly home: string;
-  readonly cwd: string;
   readonly state: Omit<StateEntry, "context"> & { readonly path: string };
   readonly data: Record<string, JsonValue>;
   readonly context: JsonValue;
+  readonly children?: readonly [ChildCheckpoint];
+}
+
+export interface RunCheckpoint extends ChildCheckpoint {
+  readonly schemaVersion: 1 | 2;
+  readonly id: string;
+  readonly agents: Readonly<Record<string, string>>;
+  readonly home: string;
+  readonly cwd: string;
   readonly writtenAt: string;
   readonly sleep?: true;
 }
@@ -116,7 +120,7 @@ export function claimContinuation(id: string, directory = runStatusDirectory(), 
     }
     return { directory, checkpoint, record: current,
       ...(current.status === "sleeping" && current.human?.answer !== undefined ? { answer: current.human.answer } : {}),
-      machineChanged: machineSourceHash(checkpoint.machine.path) !== checkpoint.machine.sourceHash, release };
+      machineChanged: sourceChanged(checkpoint), release };
   } catch (cause) {
     release();
     throw cause;
@@ -151,12 +155,29 @@ export function claimRun(directory: string, id: string): () => void {
   };
 }
 
+function sourceChanged(level: ChildCheckpoint): boolean {
+  return machineSourceHash(level.machine.path) !== level.machine.sourceHash
+    || (level.children?.some(sourceChanged) ?? false);
+}
+
 function readCheckpoint(file: string, id: string): RunCheckpoint {
   const saved: unknown = JSON.parse(readFileSync(file, "utf8"));
   const c = saved as Partial<RunCheckpoint> | null;
-  if (!c || typeof c !== "object" || jsonProblem(c) !== undefined || c.schemaVersion !== 1 || c.id !== id || !c.machine || typeof c.machine !== "object"
+  if (!c || typeof c !== "object" || jsonProblem(c) !== undefined || (c.schemaVersion !== 1 && c.schemaVersion !== 2) || c.id !== id
+    || typeof c.cwd !== "string" || typeof c.home !== "string"
+    || (c.sleep !== undefined && c.sleep !== true)
+    || typeof c.writtenAt !== "string" || !Number.isFinite(Date.parse(c.writtenAt))
+    || !c.agents || typeof c.agents !== "object" || Array.isArray(c.agents) || Object.values(c.agents).some((value) => typeof value !== "string")) {
+    throw new Error(`Cannot continue run "${id}": invalid checkpoint`);
+  }
+  assertCheckpointLevel(c, id, c.schemaVersion === 2);
+  return saved as RunCheckpoint;
+}
+
+function assertCheckpointLevel(c: Partial<ChildCheckpoint> | null, id: string, childrenAllowed: boolean, child = false): void {
+  if (!c || typeof c !== "object" || !c.machine || typeof c.machine !== "object"
     || typeof c.machine.name !== "string" || typeof c.machine.path !== "string" || typeof c.machine.sourceHash !== "string"
-    || typeof c.cwd !== "string" || typeof c.home !== "string" || !c.state || typeof c.state !== "object" || !("value" in c.state)
+    || !c.state || typeof c.state !== "object" || !("value" in c.state)
     || typeof c.state.path !== "string" || typeof c.state.enteredAt !== "string" || !Number.isFinite(Date.parse(c.state.enteredAt))
     || !["agent", "operation", "human", "wait", "final", "state"].includes(c.state.kind)
     || (c.state.due !== undefined && (typeof c.state.due !== "string" || !Number.isFinite(Date.parse(c.state.due))))
@@ -165,15 +186,14 @@ function readCheckpoint(file: string, id: string): RunCheckpoint {
       || !Number.isInteger(c.state.retry.attempt) || !Number.isInteger(c.state.retry.of)
       || c.state.retry.attempt < 2 || c.state.retry.attempt > c.state.retry.of || c.state.retry.of > 11))
     || (c.state.kind === "wait" && c.state.due === undefined)
-    || (c.sleep !== undefined && c.sleep !== true)
-    || typeof c.writtenAt !== "string" || !Number.isFinite(Date.parse(c.writtenAt))
     || !c.data || Array.isArray(c.data) || typeof c.data !== "object" || !("context" in c) || !("input" in c)
-    || !c.agents || typeof c.agents !== "object" || Array.isArray(c.agents) || Object.values(c.agents).some((value) => typeof value !== "string")) {
+    || (child && c.state.kind === "final")
+    || (c.children !== undefined && (!childrenAllowed || !Array.isArray(c.children) || c.children.length !== 1 || c.state.kind !== "operation"))) {
     throw new Error(`Cannot continue run "${id}": invalid checkpoint`);
   }
   const paths = statePaths(c.state.value);
   if (paths.length !== 1) throw new Error(`Cannot continue run "${id}": parallel states (more than one active state path) are not supported`);
-  return saved as RunCheckpoint;
+  for (const nested of c.children ?? []) assertCheckpointLevel(nested, id, childrenAllowed, true);
 }
 
 /** Validate against the definition itself, including Machines too large for a status graph. */
