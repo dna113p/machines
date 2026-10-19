@@ -6,6 +6,28 @@ import { join } from "node:path";
 import { machine, final, human, run, type HumanResponse, type Event } from "../src/index.ts";
 import { conversation } from "../src/conversation.ts";
 import { startMachineHost, type HostedHumanRequest } from "../src/host.ts";
+import { presentation, presentedPrompt } from "./sleep-machines.ts";
+
+test("conversation carries presentation through clarification and still answers by name", async () => {
+  let turns = 0;
+  const definition = machine({
+    initial: "decision",
+    states: {
+      decision: conversation({
+        ...presentation, prompt: presentedPrompt, reply: () => "The work is preserved.",
+      }, { submitted: "done" }),
+      done: final(),
+    },
+  });
+  const result = await run(definition, { human: request => {
+    const { prompt, ...fields } = request;
+    assert.deepEqual(fields, { ...presentation, discussion: true });
+    assert.equal(prompt, turns === 0 ? presentedPrompt : `The work is preserved.\n\n${presentedPrompt}`);
+    return turns++ === 0 ? { type: "question", text: "Is the work preserved?" } : "approve";
+  } });
+  assert.equal(turns, 2);
+  assert.equal(result.value, "done");
+});
 
 function deferred<T>() { let resolve!:(value:T)=>void; const promise=new Promise<T>(r=>{resolve=r;});return {promise,resolve}; }
 

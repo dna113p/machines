@@ -319,6 +319,50 @@ validated by the runtime across terminal, injected, Pi, and MCP Human runners.
 Both properties cannot be supplied together. Terminal selectors support arrow
 keys; piped input stays plain text.
 
+Human requests can also carry fixed presentation values. The prompt must still
+stand alone, and an answer remains the exact choice name:
+
+```ts
+human("The review approved the work but returned a malformed report. Choose the next step.", {
+  submitted: "decide",
+}, {
+  choices: ["retry", "discard"],
+  headline: "The work is approved; the review report needs repair.",
+  recommended: "retry",
+  effects: {
+    retry: "Asks the reviewer to return the report in the required format.",
+    discard: "Deletes the branch and its work.",
+  },
+  discards: ["discard"],
+  reason: "Repairing the report preserves the approved work.",
+  page: '<h2>Next step</h2><pre class="mermaid">flowchart TD\n  review --> repair</pre>',
+});
+```
+
+`headline` and each `effects` value must be a non-empty sentence on one line,
+at most 160 characters. `recommended` must exactly match a choice. `effects`
+maps some or all choice names to sentences describing what choosing them does.
+`discards` lists the choices that destroy work; entries must be distinct choice
+names, and none can be recommended. These three fields require `choices` and
+cannot accompany `suggestions`. `reason` explains the recommendation, requires
+`recommended`, and contains 1–1000 characters. All six fields are optional and
+fixed values, not functions. Invalid fields fail with a definition error when
+the state is defined and again when its request is built at runtime.
+
+`page` is an HTML body fragment of at most 200,000 bytes of UTF-8. It sets no
+colours or fonts, loads nothing and runs nothing. Put Mermaid source in
+`<pre class="mermaid">` without theme or styling directives. Obvious violations
+are refused: script, style, link, meta, iframe, object, embed, base and font tags;
+html, head or body wrappers; event-handler, style and resource-loading attributes
+(including src, srcset, srcdoc, poster, background, action, formaction and data);
+and colour or font attributes. `data-*` attributes are allowed. Only `<a>` may
+have href or xlink:href; javascript, data and vbscript URLs are refused. Ordinary
+links are allowed. These checks are not an HTML sanitizer: a host must isolate
+any page it renders and may omit the page entirely.
+
+The terminal, `machine runs` and `machine ui` show the headline before the prompt
+and mark the recommended choice. Presentation labels do not change answer matching.
+
 ## Agents
 
 An Agent that throws or returns no valid outcome is asked once more by default.

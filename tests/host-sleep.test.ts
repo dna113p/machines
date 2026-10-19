@@ -12,7 +12,7 @@ import { pathToFileURL } from "node:url";
 import { startMachineHost, type HostedHumanRequest, type MachineHostOptions, type MachineHostResult, type MachineHostRun } from "../src/host.ts";
 import { readRunStatuses, type RunStatusRecord } from "../src/run-status.ts";
 import { respondToRun } from "../src/run-inbox.ts";
-import { askerPrompt, askerSource, retrierSource, sleeperSource } from "./sleep-machines.ts";
+import { askerPrompt, askerSource, presentation, presentedPrompt, presentedSource, retrierSource, sleeperSource } from "./sleep-machines.ts";
 
 /** What a sleeping record adds, read loosely so the test names only what the ticket asks. */
 type SleepingRecord = Omit<RunStatusRecord, "status" | "human"> & {
@@ -254,6 +254,39 @@ test("a hosted run with the sleep option sleeps at a Human request, machine resp
     { status: "completed", state: "finished", startedAt: record.startedAt, error: undefined },
   );
   assert.equal(existsSync(checkpointFile(project, hosted.id)), false);
+});
+
+test("a hosted sleeping request carries every presentation field in its result and record, and its continuation keeps them", async (context) => {
+  const project = await createProject(context);
+  writeFileSync(join(project.project, ".machines", "presented.ts"), presentedSource);
+  const run = runInput(project, "presented", "1h");
+  const asked: HostedHumanRequest[] = [];
+  const onHumanRequest = (request: HostedHumanRequest) => { asked.push(request); };
+  const options = { machine: "presented", cwd: project.project, home: project.home, input: run.input, publishRunStatus: true, sleep: true, onHumanRequest } as const;
+
+  const hosted = await host(context, options);
+  const result = await settled(hosted, "the hosted run with the sleep option");
+  assert.equal(result.state, "ask");
+  const request = result.sleeping?.human;
+  assert.ok(request, `the result does not say the run sleeps at a Human request: ${JSON.stringify(result)}`);
+  assert.equal(typeof request.requestId, "string");
+  assert.deepEqual(request, { requestId: request.requestId, prompt: presentedPrompt, ...presentation });
+  const record = recordOf(project, hosted.id);
+  assert.deepEqual(record.human, { prompt: presentedPrompt, requestId: request.requestId, ...presentation });
+  const checkpoint = readCheckpoint(project, hosted.id);
+  assert.deepEqual({ kind: checkpoint.state.kind, sleep: checkpoint.sleep }, { kind: "human", sleep: true });
+
+  answer(project, record, "approve");
+  const continued = await host(context, { continue: hosted.id, onHumanRequest });
+  const again = await settled(continued, "the continued hosted run");
+  assert.equal(again.state, "again");
+  assert.deepEqual(logLines(run), ["answer approve"]);
+  const second = again.sleeping?.human;
+  assert.ok(second, `the continued run does not sleep at its second request: ${JSON.stringify(again)}`);
+  assert.notEqual(second.requestId, request.requestId);
+  assert.deepEqual(second, { requestId: second.requestId, prompt: presentedPrompt, ...presentation });
+  assert.deepEqual(recordOf(project, hosted.id).human, { prompt: presentedPrompt, requestId: second.requestId, ...presentation });
+  assert.deepEqual(asked, []);
 });
 
 test("hosted sleep requires the host to publish run status", async (context) => {
