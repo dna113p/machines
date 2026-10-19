@@ -13,6 +13,7 @@ import { blue, bold, cyan, dim, green, magenta, red, yellow } from "yoctocolors"
 
 import { assertJsonValue, isJsonValue, type JsonValue } from "./json.ts";
 import { discoverMachines, machinesUserHome } from "./discovery.ts";
+import { runEnding } from "./endings.ts";
 import {
   type AgentPresetSummary,
   type MachineSummary,
@@ -250,7 +251,8 @@ async function runMachine(machinePath: string, args: string[], continuation?: Co
       console.log(`--> sleeping in ${formatState(result.value)} until ${sleptUntil}. Continue with: machine continue ${runId}`);
       return;
     }
-    published.finish({ state: result.value, note: runOutputSummary(result.output) });
+    const ending = runEnding(prepared.endings, result.value);
+    published.finish({ state: result.value, note: runOutputSummary(result.output), ...(ending === undefined ? {} : { ending }) });
     status.succeed();
     console.log(`--> ${String(result.value)}`);
     if (result.output !== undefined) {
@@ -578,6 +580,7 @@ function printMachineListing(found: MachineSummary, separate: boolean) {
       ? "ready"
       : `missing Agents: ${found.missingAgents.join(", ")}`;
     console.log(`${found.name}\t${found.description}\t${found.path}\t${readiness}`);
+    for (const ending of found.endings ?? []) console.log(`  ${ending.name} (${ending.kind})`);
     return;
   }
 
@@ -585,6 +588,7 @@ function printMachineListing(found: MachineSummary, separate: boolean) {
   console.log(bold(cyan(found.name)));
   console.log(`  ${found.description}`);
   console.log(`  ${dim(found.path)}`);
+  if (found.endings?.length) console.log(`  endings: ${found.endings.map((ending) => `${ending.name} (${ending.kind})`).join(", ")}`);
   if (found.error !== undefined) console.log(`  ${red(found.error)}`);
   if (found.missingAgents.length > 0) {
     console.log(`  ${yellow(`missing Agents: ${found.missingAgents.join(", ")}`)}`);

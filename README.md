@@ -221,6 +221,9 @@ per-user directory (`~/.local/state/machines/runs`, or under
 `XDG_STATE_HOME`). Nothing needs configuring. Set `MACHINES_RUN_STATUS_DIR` to `off` to turn it off, or to a
 directory to move it.
 
+A finished run with declared endings records `ending: { name, kind }`, where
+`kind` is `succeeded`, `failed`, or `cancelled`; its `status` remains `completed`.
+
 | Command | What it does |
 | --- | --- |
 | `machine runs` | Running, waiting and sleeping runs, with each waiting run's prompt, request id and choices |

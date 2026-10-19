@@ -7,9 +7,11 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test, type TestContext } from "node:test";
+import { pathToFileURL } from "node:url";
 
 import { startMachineHost, type HostedHumanRequest, type MachineHostOptions, type MachineHostResult, type MachineHostRun } from "../src/host.ts";
 import { readRunStatuses, type RunStatusRecord } from "../src/run-status.ts";
+import { respondToRun } from "../src/run-inbox.ts";
 import { askerPrompt, askerSource, retrierSource, sleeperSource } from "./sleep-machines.ts";
 
 /** What a sleeping record adds, read loosely so the test names only what the ticket asks. */
@@ -171,6 +173,37 @@ function answer(project: Project, record: SleepingRecord, response: string): voi
   assert.equal(answered.status, 0, answered.stderr);
   assert.equal(recordOf(project, record.id).human?.answer, response);
 }
+
+test("a sleeping hosted run has no ending until its continuation reaches the declared final", async (context) => {
+  const project = await createProject(context);
+  const entry = pathToFileURL(resolve("src/index.ts")).href;
+  writeFileSync(join(project.project, ".machines", "ended.ts"), `
+    import { defineEndings } from ${JSON.stringify(entry)};
+    export const description = "Sleeps for an answer before finishing.";
+    export const endings = defineEndings({ delivered: { kind: "succeeded" } });
+    export default (p) => p.machine({ initial: "ask", states: {
+      ask: p.human("Continue?", { submitted: "delivered" }),
+      delivered: p.final(endings.delivered),
+    } });
+  `);
+  const started = await host(context, {
+    machine: "ended", cwd: project.project, home: project.home, sleep: true, publishRunStatus: true,
+  });
+  const sleeping = await settled(started, "the run before its ending");
+  assert.equal("ending" in sleeping, false);
+  assert.equal("ending" in recordOf(project, started.id), false);
+  assert.ok(sleeping.sleeping?.human);
+  await respondToRun({
+    directory: project.status, runId: started.id, requestId: sleeping.sleeping.human.requestId, response: "yes",
+  });
+  const continued = await host(context, { continue: started.id });
+  const completed = await settled(continued, "the run reaching its ending");
+  const ending = { name: "delivered", kind: "succeeded" };
+  assert.deepEqual(completed.ending, ending);
+  const record = recordOf(project, started.id);
+  assert.equal(record.status, "completed");
+  assert.deepEqual(record.ending, ending);
+});
 
 test("a hosted run with the sleep option sleeps at a Human request, machine respond answers it, and the host continues it with that answer", async (context) => {
   const project = await createProject(context);

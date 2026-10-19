@@ -7,6 +7,12 @@ const endingBrand = Symbol.for("machines.ending");
 
 export type EndingKind = "succeeded" | "failed" | "cancelled";
 
+/** The declared ending a run reached. */
+export interface RunEnding {
+  readonly name: string;
+  readonly kind: EndingKind;
+}
+
 export interface MachineEnding {
   readonly name: string;
   readonly kind: EndingKind;
@@ -96,6 +102,12 @@ export function assertEndingOutput(snapshot: SnapshotFrom<AnyStateMachine>, endi
   if (problem) {
     throw new Error(`Machine output does not match ending "${ending.name}": ${problem.instancePath || "/"} ${problem.message}`);
   }
+}
+
+export function runEnding(endings: MachineEndings | undefined, value: unknown): RunEnding | undefined {
+  if (typeof value !== "string" || !endings || !Object.hasOwn(endings, value)) return undefined;
+  const ending = endings[value];
+  return ending === undefined ? undefined : { name: ending.name, kind: ending.kind };
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {

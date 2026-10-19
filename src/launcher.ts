@@ -10,7 +10,7 @@ import { configuredAgentPresets, type LauncherLocation, type MachineSummary, typ
 import { queryCatalog } from "./discovery-worker.ts";
 import { loadMachineModule, readAgentRoles, readUses, requireMachineDescription } from "./machine-module.ts";
 import { assertUseStates, loadUseTree, usedModules, type UseModule } from "./composition.ts";
-import { assertEndingOutput, assertEndingStates, readEndings } from "./endings.ts";
+import { assertEndingOutput, assertEndingStates, readEndings, type MachineEndings } from "./endings.ts";
 export type { LauncherLocation, MachineSummary, AgentPresetSummary } from "./catalog.ts";
 import { discoverMachines, machinesUserHome } from "./discovery.ts";
 import {
@@ -52,6 +52,7 @@ export interface PreparedMachineRun {
   readonly description: string;
   readonly path: string;
   readonly agentRoles: Readonly<Record<string, string>>;
+  readonly endings?: MachineEndings;
   /** The definition's states and transitions, for run status; undefined when it is too large to draw. */
   readonly graph?: RunGraph;
   start(options?: Omit<RunOptions, "agents"> & { readonly checkpoint?: { readonly directory: string; readonly id: string; readonly sleep?: boolean } }): Promise<SnapshotFrom<AnyStateMachine>>;
@@ -98,12 +99,13 @@ export async function prepareMachineRun(
   const limitAware = limitAwareAgents(requiredRoles, overrides, configured, limitPolicy(options.agentLimits));
 
   let started = false;
-  const graph = machineGraph(definition);
+  const graph = machineGraph(definition, endings);
   return {
     name: machineName(path),
     description,
     path,
     agentRoles,
+    ...(endings === undefined ? {} : { endings }),
     ...(graph === undefined ? {} : { graph }),
     start(runOptions = {}) {
       if (started) throw new Error(`Prepared Machine "${path}" has already started`);

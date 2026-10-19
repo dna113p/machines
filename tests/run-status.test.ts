@@ -29,6 +29,8 @@ const run = { machine: "ticket", path: "/work/.machines/ticket.ts", cwd: "/work"
 const fixture = resolve("tests/fixtures/run-status.machine.ts");
 /** Returns its input as its output, so a test chooses what a run ends with. */
 const structured = resolve("tests/fixtures/structured.machine.ts");
+/** Finishes in a succeeded, failed or cancelled ending, as its input chooses. */
+const endingsFixture = resolve("tests/fixtures/endings/matching.machine.ts");
 /** Where a run publishes when nothing says where, under the home it is given. */
 const standardDirectory = (home: string) => join(home, ".local", "state", "machines", "runs");
 
@@ -1514,6 +1516,169 @@ test("the integrations guide says every way of starting a run that publishes a r
   assert.match(sources[0]!, /\bMCP server\b/u, "it names the MCP server");
   assert.match(sources[0]!, /\bhost\b/u, "it names a host that publishes");
   assert.match(sources[0]!, /\b(?:all three|each of the three|any of the three|every one of the three)\b/iu, "it says all three publish the note");
+});
+
+/** Each input the endings fixture takes, with the ending it then finishes in. */
+const endingRuns = [
+  ["", { name: "success", kind: "succeeded" }],
+  ["fail", { name: "failure", kind: "failed" }],
+  ["cancel", { name: "abandoned", kind: "cancelled" }],
+] as const;
+
+test("a finished run publishes the ending it was given, and a run given none publishes as before", async (context) => {
+  const directory = await temporaryDirectory(context);
+  const environment = { MACHINES_RUN_STATUS_DIR: directory };
+  const read = (id: string) => readRunStatuses(directory).find((record) => record.id === id)!;
+
+  for (const [, ending] of endingRuns) {
+    const publisher = createRunStatusPublisher({ ...run, id: `ended-${ending.name}` }, environment);
+    publisher.update({ state: "work" });
+    publisher.finish({ state: ending.name, note: "Ended.", ending } as RunStatusOutcome);
+    const record = read(`ended-${ending.name}`);
+    // The status, state and note are what they were before endings.
+    assert.deepEqual(
+      { status: record.status, state: record.state, note: record.note, ending: (record as { ending?: unknown }).ending },
+      { status: "completed", state: ending.name, note: "Ended.", ending },
+    );
+  }
+
+  const plain = createRunStatusPublisher({ ...run, id: "plain" }, environment);
+  plain.finish({ state: "done" });
+  assert.equal("ending" in read("plain"), false);
+
+  const failed = createRunStatusPublisher({ ...run, id: "failed" }, environment);
+  failed.finish({ error: "Operation threw" });
+  assert.equal("ending" in read("failed"), false);
+
+  // A sleeping run has not ended, and a finish it is sent anyway leaves its record as it was.
+  const resting = createRunStatusPublisher({ ...run, id: "resting" }, environment);
+  resting.sleep(new Date(Date.now() + 60_000).toISOString());
+  resting.finish({ state: "success", ending: { name: "success", kind: "succeeded" } } as RunStatusOutcome);
+  assert.deepEqual({ status: read("resting").status, hasEnding: "ending" in read("resting") }, { status: "sleeping", hasEnding: false });
+});
+
+test("reading accepts a record whose ending has a name and a kind, and skips one whose ending is malformed", async (context) => {
+  const directory = await temporaryDirectory(context);
+  const state = (id: string, ending?: unknown) => ({ id, kind: "final", ...(ending === undefined ? {} : { ending }) });
+  const graph = (ending: unknown) => ({ initial: "work", states: [{ id: "work", kind: "operation" }, state("done", ending)], edges: [] });
+  await writeRecord(directory, { id: "ended", status: "completed", state: "success", ending: { name: "success", kind: "succeeded" } } as Partial<RunStatusRecord>);
+  await writeRecord(directory, { id: "drawn", status: "running", state: "work", graph: graph("cancelled") } as Partial<RunStatusRecord>);
+  await writeRecord(directory, { id: "without", status: "completed", state: "done" });
+  for (const [id, ending] of [
+    ["bad-kind", { name: "success", kind: "completed" }],
+    ["bad-name", { name: 7, kind: "succeeded" }],
+    ["no-kind", { name: "success" }],
+    ["text", "success"],
+  ] as const) {
+    await writeRecord(directory, { id, status: "completed", state: "success", ending } as unknown as Partial<RunStatusRecord>);
+  }
+  await writeRecord(directory, { id: "bad-graph-kind", status: "running", state: "work", graph: graph("completed") } as Partial<RunStatusRecord>);
+
+  const records = readRunStatuses(directory);
+  assert.deepEqual(records.map((record) => record.id).sort(), ["drawn", "ended", "without"]);
+  assert.deepEqual((records.find((record) => record.id === "ended") as { ending?: unknown }).ending, { name: "success", kind: "succeeded" });
+});
+
+test("machine run publishes the ending each run finishes in, and a Machine without endings publishes none", async (context) => {
+  const root = await temporaryDirectory(context);
+  for (const [input, ending] of endingRuns) {
+    const directory = join(root, ending.name);
+    const result = runCli(input === "" ? [] : [input], process.cwd(), { MACHINES_RUN_STATUS_DIR: directory }, endingsFixture);
+    assert.equal(result.status, 0, result.stderr);
+    const records = readRunStatuses(directory);
+    assert.equal(records.length, 1);
+    const [record] = records;
+    assert.deepEqual(
+      { status: record!.status, state: record!.state, hasNote: "note" in record!, ending: (record as { ending?: unknown }).ending },
+      { status: "completed", state: ending.name, hasNote: false, ending },
+      ending.name,
+    );
+  }
+
+  const directory = join(root, "without");
+  const input = join(root, "input.json");
+  await writeFile(input, JSON.stringify({ summary: "Done." }));
+  const result = runCli(["--input-file", input], process.cwd(), { MACHINES_RUN_STATUS_DIR: directory }, structured);
+  assert.equal(result.status, 0, result.stderr);
+  const [record] = readRunStatuses(directory);
+  assert.deepEqual({ status: record?.status, state: record?.state, note: record?.note }, { status: "completed", state: "done", note: "Done." });
+  assert.equal("ending" in record!, false);
+});
+
+test("a hosted run publishes the ending it finishes in, as machine run does, and a Machine without endings publishes none", async (context) => {
+  const directory = await temporaryDirectory(context);
+  publishFrom(context, { MACHINES_RUN_STATUS_DIR: directory });
+  const finished = async (machine: string, input: JsonValue) => {
+    for (const name of await readdir(directory)) await rm(join(directory, name));
+    const hosted = await startMachineHost({ machine, publishRunStatus: true, input });
+    const result = await hosted.result;
+    assert.deepEqual(await readdir(directory), [`${hosted.id}.json`]);
+    return { result, record: JSON.parse(await readFile(join(directory, `${hosted.id}.json`), "utf8")) as RunStatusRecord };
+  };
+
+  for (const [input, ending] of endingRuns) {
+    const { result, record } = await finished(endingsFixture, input);
+    assert.deepEqual(
+      { status: record.status, state: record.state, ending: (record as { ending?: unknown }).ending },
+      { status: "completed", state: ending.name, ending },
+      ending.name,
+    );
+    assert.deepEqual((result as { ending?: unknown }).ending, ending, ending.name);
+  }
+
+  const { result, record } = await finished(structured, { summary: "Done." });
+  assert.deepEqual(result, { state: "done", output: { summary: "Done." } });
+  assert.deepEqual({ status: record.status, state: record.state, note: record.note }, { status: "completed", state: "done", note: "Done." });
+  assert.equal("ending" in record, false);
+});
+
+test("a run started through the MCP server publishes the ending it finishes in, and a Machine without endings publishes none", async (context) => {
+  const directory = await temporaryDirectory(context);
+  publishFrom(context, { MACHINES_RUN_STATUS_DIR: directory });
+  const session = new McpSession();
+  context.after(() => session.close());
+  const finished = async (machine: string, input: JsonValue): Promise<RunStatusRecord> => {
+    const started = await session.start({ cwd: process.cwd(), machine, input });
+    const { id } = (started.structuredContent as { run: { id: string } }).run;
+    await eventually(() => assert.equal(readRunStatuses(directory).find((record) => record.id === id)?.status, "completed"));
+    return JSON.parse(await readFile(join(directory, `${id}.json`), "utf8"));
+  };
+
+  for (const [input, ending] of endingRuns) {
+    const record = await finished(endingsFixture, input);
+    assert.deepEqual(
+      { status: record.status, state: record.state, ending: (record as { ending?: unknown }).ending },
+      { status: "completed", state: ending.name, ending },
+      ending.name,
+    );
+  }
+  assert.equal("ending" in await finished(structured, { summary: "Done." }), false);
+});
+
+test("a session's snapshot of a finished run carries its ending", async (context) => {
+  const session = new MachineSession();
+  context.after(() => session.close());
+  for (const [input, ending] of endingRuns) {
+    const started = await session.start({ machine: endingsFixture, input });
+    await eventually(() => assert.equal(session.status(started.id)[0]?.status, "completed"));
+    assert.deepEqual((session.status(started.id)[0] as { ending?: unknown }).ending, ending, ending.name);
+  }
+  const plain = await session.start({ machine: structured, input: { summary: "Done." } });
+  await eventually(() => assert.equal(session.status(plain.id)[0]?.status, "completed"));
+  assert.equal("ending" in session.status(plain.id)[0]!, false);
+});
+
+test("the integrations guide describes a finished run's ending beside its note", async () => {
+  const guide = await readFile(resolve("docs/integrations.md"), "utf8");
+  const described = guide.slice(
+    guide.indexOf("\n## Run status for host status lines\n"),
+    guide.indexOf("\n### Answering a waiting run from outside\n"),
+  );
+  const paragraphs = described.split(/\n{2,}/u).filter((paragraph) => paragraph.includes("`ending`"));
+  assert.notDeepEqual(paragraphs, [], "the record description names `ending`");
+  for (const kind of ["succeeded", "failed", "cancelled"]) {
+    assert.ok(paragraphs.some((paragraph) => paragraph.includes(`\`${kind}\``)), `it names the ${kind} kind`);
+  }
 });
 
 const publishedFrom = new WeakMap<TestContext, Map<string, string | undefined>>();

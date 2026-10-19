@@ -4,7 +4,9 @@ import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
+import { pathToFileURL } from "node:url";
 
+import { Type } from "../src/index.ts";
 import { listAgentPresets, listMachines } from "../src/launcher.ts";
 
 async function project(context: { after(fn: () => Promise<void>): void }) {
@@ -58,4 +60,77 @@ test("discovery output cannot corrupt the command's listing", async (context) =>
   assert.equal(listing.status, 0, listing.stderr);
   assert.match(listing.stdout, /noisy\tNoisy workflow/u);
   assert.doesNotMatch(listing.stdout + listing.stderr, /UNEXPECTED_MODULE/u);
+});
+
+/** A module that re-exports a Machine, so a temporary project can list it. */
+const reexport = (fixture: string) =>
+  `export * from ${JSON.stringify(pathToFileURL(resolve(fixture)).href)}; export { default } from ${JSON.stringify(pathToFileURL(resolve(fixture)).href)};\n`;
+
+test("discovery lists each Machine's endings with their kinds and output schemas, and none for a Machine without endings", async (context) => {
+  const location = await project(context);
+  await writeFile(join(location.cwd, ".machines", "ended.ts"), reexport("tests/fixtures/endings/matching.machine.ts"));
+  await writeFile(join(location.cwd, ".machines", "plain.ts"),
+    "export const description = 'Plain workflow'; export default () => {};\n");
+
+  const entries = await listMachines(location);
+  const ended = entries.find((entry) => entry.name === "ended");
+  assert.equal(ended?.error, undefined);
+  assert.deepEqual((ended as { endings?: unknown } | undefined)?.endings, [
+    { name: "success", kind: "succeeded", output: JSON.parse(JSON.stringify(Type.Object({ report: Type.String() }))) },
+    { name: "failure", kind: "failed" },
+    { name: "abandoned", kind: "cancelled" },
+  ]);
+  const plain = entries.find((entry) => entry.name === "plain")!;
+  assert.equal(plain.error, undefined);
+  assert.equal("endings" in plain, false);
+});
+
+test("a malformed endings export lists with an error, as a malformed agentRoles does", async (context) => {
+  const location = await project(context);
+  await writeFile(join(location.cwd, ".machines", "loose.ts"),
+    "export const description = 'Loose endings'; export const endings = { success: { kind: 'succeeded' } }; export default () => {};\n");
+  await writeFile(join(location.cwd, ".machines", "scalar.ts"),
+    "export const description = 'Scalar endings'; export const endings = 'success'; export default () => {};\n");
+  await writeFile(join(location.cwd, ".machines", "roles.ts"),
+    "export const description = 'Bad roles'; export const agentRoles = 'reviewer'; export default () => {};\n");
+  await writeFile(join(location.cwd, ".machines", "valid.ts"),
+    "export const description = 'Valid workflow'; export default () => {};\n");
+
+  const entries = await listMachines(location);
+  const entry = (name: string) => entries.find((found) => found.name === name);
+  assert.match(entry("loose")?.error ?? "", /\bending "success"/u);
+  assert.match(entry("scalar")?.error ?? "", /\bendings\b/u);
+  assert.match(entry("roles")?.error ?? "", /agentRoles/u);
+  // An invalid Machine lists the way one with bad roles does, and its neighbours list as before.
+  for (const name of ["loose", "scalar"]) {
+    const { error: _error, path: _path, ...rest } = entry(name)!;
+    const { error: _roles, path: _rolesPath, ...roles } = entry("roles")!;
+    assert.deepEqual(rest, { ...roles, name }, name);
+  }
+  assert.equal(entry("valid")?.description, "Valid workflow");
+  assert.equal(entry("valid")?.error, undefined);
+});
+
+test("machine list prints each ending with its kind under its Machine, and a Machine without endings as before", async (context) => {
+  const location = await project(context);
+  await writeFile(join(location.cwd, ".machines", "ended.ts"), reexport("tests/fixtures/endings/matching.machine.ts"));
+  await writeFile(join(location.cwd, ".machines", "plain.ts"),
+    "export const description = 'Plain workflow'; export default () => {};\n");
+  const listing = spawnSync(process.execPath, [resolve("machine"), "list"], {
+    cwd: location.cwd,
+    encoding: "utf8",
+    env: { ...process.env, HOME: location.home, MACHINES_USER_HOME: location.home },
+  });
+  assert.equal(listing.status, 0, listing.stderr);
+  const lines = listing.stdout.trimEnd().split("\n");
+  const row = (name: string) => lines.findIndex((line) => line.startsWith(`${name}\t`));
+  assert.match(lines[row("ended")]!, /^ended\tEnds in each of its declared endings, chosen by its input\.\t.*\.machines\/ended\.ts\tready$/u);
+  assert.deepEqual(lines.slice(row("ended") + 1, row("ended") + 4), [
+    "  success (succeeded)",
+    "  failure (failed)",
+    "  abandoned (cancelled)",
+  ]);
+  // A Machine without endings prints its one row and nothing under it.
+  assert.match(lines[row("plain")]!, /^plain\tPlain workflow\t.*\.machines\/plain\.ts\tready$/u);
+  assert.ok(row("plain") === lines.length - 1 || /^\S/u.test(lines[row("plain") + 1]!), lines.join("\n"));
 });

@@ -262,11 +262,21 @@ states the run entered, oldest first, each with the time it was entered, as the
 same dotted paths; it keeps the latest 200. Both are additions to version 2:
 a reader that does not know them ignores them.
 
-The graph does not depend on publication. `machineGraph(definition)` from
+A top-level final that takes a declared ending also has `ending` on its graph
+state: `succeeded`, `failed`, or `cancelled`. `machine ui` draws each kind with its
+own colour and label, including before the run reaches it.
+
+The graph does not depend on publication. `machineGraph(definition, endings?)` from
 `@dna113p/machines` returns it for any Machine definition a program holds, or
 undefined for one too large to draw. The value `startMachineHost` resolves to
 carries the run's `graph` whether or not the host publishes, and its `onState`
 callback reports each state a trail is made of.
+
+`listMachines()` from `@dna113p/machines/launcher` reads a module's optional
+`endings` export without building the Machine. Each summary's `endings` array
+contains the name, kind, and optional output schema of each declared ending.
+Malformed exports list with `error`; modules without the export omit the field.
+`machine list` prints each ending's name and kind under its Machine.
 
 A run hosted through `startMachineHost` from `@dna113p/machines/host` publishes
 the same record when its host asks with `publishRunStatus: true` and
@@ -349,6 +359,12 @@ at a word boundary (a single word longer than the limit is cut to fit).
 Empty or whitespace-only summaries leave the field absent. The whole note,
 including its line breaks, is available in JSON. This optional field keeps
 `schemaVersion` at 2; readers should accept records with or without it.
+
+A run that finishes in a declared ending also publishes `ending` as `{ name, kind }`.
+The `kind` is `succeeded`, `failed`, or `cancelled`, as declared by the Machine;
+all three leave `status` as `completed`. The `state` and `note` fields are unchanged.
+Runs of modules without `endings`, sleeping runs, and runs stopped by an execution
+error have no `ending`. This optional field also keeps `schemaVersion` at 2.
 
 The status record omits Machine input and output fields other than that summary.
 Human responses are omitted except for `human.answer` recorded while sleeping,
