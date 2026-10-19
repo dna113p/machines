@@ -1134,10 +1134,13 @@ test("an invalid Agent outcome identifies the state and event", async () => {
     },
   });
 
+  let calls = 0;
   await assert.rejects(
-    run(example, { agents: { default: () => ({ type: "unexpected" }) } }),
+    run(example, { agents: { default: () => { calls++; return { type: "unexpected" }; } } }),
     /State "work" does not handle event "unexpected"/u,
   );
+  // An event the state does not handle is no outcome, so the Agent is asked once more first.
+  assert.equal(calls, 2);
 });
 
 test("a missing Agent runner fails at the Agent state", async () => {
@@ -1258,19 +1261,26 @@ test("an Agent state that names a usage-limit event still fails on any other err
     },
   });
 
+  // Each failure is asked once more before the state fails with it.
+  let calls = 0;
   await assert.rejects(
-    run(example, { agents: { default: () => { throw new Error("claude crashed"); } } }),
+    run(example, { agents: { default: () => { calls++; throw new Error("claude crashed"); } } }),
     /^Error: Agent failed in state "review": claude crashed$/u,
   );
+  assert.equal(calls, 2);
   // The Agent is at no limit until its runner says so: it cannot take the transition by naming the event.
+  calls = 0;
   await assert.rejects(
-    run(example, { agents: { default: () => ({ type: "limited" }) } }),
+    run(example, { agents: { default: () => { calls++; return { type: "limited" }; } } }),
     /^Error: Agent failed in state "review": the runner returned "limited", which this state reserves for its usage-limit event$/u,
   );
+  assert.equal(calls, 2);
+  calls = 0;
   await assert.rejects(
-    run(example, { agents: { default: () => ({ type: "unexpected" }) } }),
+    run(example, { agents: { default: () => { calls++; return { type: "unexpected" }; } } }),
     /State "review" does not handle event "unexpected"/u,
   );
+  assert.equal(calls, 2);
   assert.equal((await run(example, { agents: { default: () => ({ type: "approved" }) } })).value, "done");
 });
 
@@ -1296,6 +1306,310 @@ test("a usage limit fails an Agent state that names no event for it", async () =
     /^Error: Agent failed in state "work": Out of quota$/u,
   );
   assert.deepEqual(requests, [{ prompt: "Implement the tiny task", outcomes: ["completed", "limited"] }]);
+});
+
+test("an Agent that returns no outcome is asked once more, told that the last attempt returned none and why", async () => {
+  const requests: AgentRequest[] = [];
+  const example = machine({
+    initial: "work",
+    states: {
+      work: agent("Implement the tiny task", { completed: "done", blocked: "stuck" }),
+      done: final(),
+      stuck: final(),
+    },
+  });
+
+  const result = await run(example, {
+    agents: {
+      default: (request) => {
+        requests.push(request);
+        if (requests.length === 1) throw new Error("Claude Agent finished without returning a Machines event");
+        return { type: "completed" };
+      },
+    },
+  });
+
+  assert.equal(result.value, "done");
+  assert.equal(requests.length, 2);
+  assert.deepEqual(requests[0], { prompt: "Implement the tiny task", outcomes: ["completed", "blocked"] });
+  const { prompt, ...rest } = requests[1]!;
+  assert.deepEqual(rest, { outcomes: ["completed", "blocked"] });
+  assert.ok(prompt.startsWith("Implement the tiny task"), prompt);
+  assert.match(prompt, /last attempt returned no outcome/u);
+  assert.ok(prompt.includes("Claude Agent finished without returning a Machines event"), prompt);
+});
+
+test("reask: 0 fails an Agent state on its first failure, and more than one re-ask is refused", async () => {
+  let calls = 0;
+  const example = machine({
+    initial: "work",
+    states: {
+      work: agent("Implement the tiny task", { completed: "done" }, { reask: 0 }),
+      done: final(),
+    },
+  });
+
+  await assert.rejects(
+    run(example, {
+      agents: {
+        default: () => {
+          calls++;
+          if (calls === 1) throw new Error("claude crashed");
+          return { type: "completed" };
+        },
+      },
+    }),
+    /^Error: Agent failed in state "work": claude crashed$/u,
+  );
+  assert.equal(calls, 1);
+
+  for (const reask of [2, -1, 0.5]) {
+    assert.throws(
+      () => agent("Implement the tiny task", { completed: "done" }, { reask } as unknown as Parameters<typeof agent>[2]),
+      /reask/u,
+    );
+  }
+});
+
+test("an Agent that fails twice hands its state to the fallback role, asked once", async () => {
+  const calls: string[] = [];
+  const updates: import("../src/index.ts").AgentUpdate[] = [];
+  const fallbackRequests: AgentRequest[] = [];
+  const example = machine({
+    initial: "work",
+    states: {
+      work: agent("Implement the tiny task", { completed: "done" }, { using: "implementer", fallback: "implementerFallback" }),
+      done: final(),
+    },
+  });
+  const failing = () => {
+    calls.push("implementer");
+    throw new Error(`implementer crash ${calls.length}`);
+  };
+
+  const result = await run(example, {
+    agents: {
+      implementer: failing,
+      implementerFallback: (request) => {
+        calls.push("implementerFallback");
+        fallbackRequests.push(request);
+        return { type: "completed" };
+      },
+    },
+    onAgentUpdate: (update) => updates.push(update),
+  });
+
+  assert.equal(result.value, "done");
+  assert.deepEqual(calls, ["implementer", "implementer", "implementerFallback"]);
+  assert.equal(fallbackRequests.length, 1);
+  assert.ok(fallbackRequests[0]!.prompt.startsWith("Implement the tiny task"), fallbackRequests[0]!.prompt);
+  assert.deepEqual(fallbackRequests[0]!.outcomes, ["completed"]);
+  // A person can see which role answered each later attempt.
+  assert.deepEqual(
+    updates.filter((update) => update.type === "attempt").map((update) => (update as { role?: unknown }).role),
+    ["implementer", "implementerFallback"],
+  );
+
+  // A fallback that fails too fails the state with its own error, after one try.
+  calls.length = 0;
+  await assert.rejects(
+    run(example, {
+      agents: {
+        implementer: failing,
+        implementerFallback: () => {
+          calls.push("implementerFallback");
+          throw new Error("fallback crashed");
+        },
+      },
+    }),
+    /^Error: Agent failed in state "work": fallback crashed$/u,
+  );
+  assert.deepEqual(calls, ["implementer", "implementer", "implementerFallback"]);
+
+  // Without a fallback the state fails with the re-ask's error.
+  const alone = machine({
+    initial: "work",
+    states: {
+      work: agent("Implement the tiny task", { completed: "done" }, { using: "implementer" }),
+      done: final(),
+    },
+  });
+  calls.length = 0;
+  await assert.rejects(
+    run(alone, { agents: { implementer: failing } }),
+    /^Error: Agent failed in state "work": implementer crash 2$/u,
+  );
+  assert.deepEqual(calls, ["implementer", "implementer"]);
+
+  // With reask: 0 the fallback is asked straight after the first failure.
+  const unasked = machine({
+    initial: "work",
+    states: {
+      work: agent("Implement the tiny task", { completed: "done" }, { using: "implementer", fallback: "implementerFallback", reask: 0 }),
+      done: final(),
+    },
+  });
+  calls.length = 0;
+  const direct = await run(unasked, {
+    agents: {
+      implementer: failing,
+      implementerFallback: () => {
+        calls.push("implementerFallback");
+        return { type: "completed" };
+      },
+    },
+  });
+  assert.equal(direct.value, "done");
+  assert.deepEqual(calls, ["implementer", "implementerFallback"]);
+});
+
+test("a usage limit goes to the fallback role unless the state names an event for it", async () => {
+  const calls: string[] = [];
+  const agents = {
+    reviewer: () => {
+      calls.push("reviewer");
+      throw new AgentLimitError("Out of quota", { harness: "claude" });
+    },
+    backupReviewer: () => {
+      calls.push("backupReviewer");
+      return { type: "approved" };
+    },
+  };
+  const example = machine({
+    initial: "review",
+    states: {
+      review: agent("Review the change", { approved: "done" }, { using: "reviewer", fallback: "backupReviewer" }),
+      done: final(),
+    },
+  });
+
+  assert.equal((await run(example, { agents })).value, "done");
+  assert.deepEqual(calls, ["reviewer", "backupReviewer"]);
+
+  // With onLimit the limit event wins, as it does without a fallback.
+  const received: Event[] = [];
+  const handled = machine({
+    initial: "review",
+    states: {
+      review: agent(
+        "Review the change",
+        {
+          approved: "done",
+          limited: { target: "unreviewed", actions: ({ event }: { event: Event }) => { received.push(event); } },
+        },
+        { using: "reviewer", fallback: "backupReviewer", onLimit: "limited" },
+      ),
+      done: final(),
+      unreviewed: final(),
+    },
+  });
+  calls.length = 0;
+  assert.equal((await run(handled, { agents })).value, "unreviewed");
+  assert.deepEqual(calls, ["reviewer"]);
+  assert.deepEqual(received, [{
+    type: "limited",
+    limit: { role: "reviewer", harness: "claude" },
+    message: "Out of quota",
+  }]);
+});
+
+test("a blocked Agent has answered: it is neither re-asked nor passed to the fallback", async () => {
+  const calls: string[] = [];
+  const example = machine({
+    initial: "work",
+    states: {
+      work: agent(
+        "Implement the tiny task",
+        { completed: "done", blocked: "stuck" },
+        { using: "implementer", fallback: "implementerFallback" },
+      ),
+      done: final(),
+      stuck: final(),
+    },
+  });
+  const implementerFallback = () => {
+    calls.push("implementerFallback");
+    return { type: "completed" };
+  };
+
+  const blocked = await run(example, {
+    agents: {
+      implementer: () => {
+        calls.push("implementer");
+        return { type: "blocked", reason: "needs a credential" };
+      },
+      implementerFallback,
+    },
+  });
+  assert.equal(blocked.value, "stuck");
+  assert.deepEqual(calls, ["implementer"]);
+
+  // A blocked re-ask is the answer too.
+  calls.length = 0;
+  const reasked = await run(example, {
+    agents: {
+      implementer: () => {
+        calls.push("implementer");
+        if (calls.length === 1) throw new Error("claude crashed");
+        return { type: "blocked", reason: "needs a credential" };
+      },
+      implementerFallback,
+    },
+  });
+  assert.equal(reasked.value, "stuck");
+  assert.deepEqual(calls, ["implementer", "implementer"]);
+});
+
+test("a fallback role is required like any other, so an unbound one is reported before the run starts", async () => {
+  let calls = 0;
+  const example = machine({
+    initial: "work",
+    states: {
+      work: agent("Implement the tiny task", { completed: "done" }, { using: "implementer", fallback: "implementerFallback" }),
+      done: final(),
+    },
+  });
+
+  assert.deepEqual(requiredAgentNames(example), ["implementer", "implementerFallback"]);
+  await assert.rejects(
+    run(example, { agents: { implementer: () => { calls++; return { type: "completed" }; } } }),
+    /^Error: Machine requires missing Agent runner: implementerFallback$/u,
+  );
+  assert.equal(calls, 0);
+});
+
+test("a Machine binds its fallback role through presets and must declare it", async () => {
+  const fixture = mkdtempSync(join(tmpdir(), "machines-agents-role-fallback-"));
+  const directory = join(fixture, ".machines");
+  const home = join(fixture, "home");
+  const workflow = (roles: string) => [
+    'export const description = "Works, with a fallback role.";',
+    `export const agentRoles = { ${roles} };`,
+    "export default function work({ agent, final, machine }) {",
+    '  return machine({ initial: "work", states: { work: agent("Work", { completed: "done" }, { using: "worker", fallback: "spare" }), done: final() } });',
+    "}",
+  ].join("\n");
+
+  try {
+    mkdirSync(directory);
+    writeFileSync(join(directory, "agents.ts"), [
+      "export default () => ({",
+      "  worker: { description: 'Never answers', runner: () => { throw new Error('worker crashed'); } },",
+      "  spare: { description: 'Answers', runner: () => ({ type: 'completed' }) },",
+      "});",
+    ].join("\n"));
+    writeFileSync(join(directory, "undeclared.ts"), workflow('worker: "Does the work"'));
+    writeFileSync(join(directory, "declared.ts"), workflow('worker: "Does the work", spare: "Takes over"'));
+
+    assert.match(
+      await rejectedMessage(prepareMachineRun({ cwd: fixture, home, machine: "undeclared" })),
+      /uses undeclared Agent roles: spare/u,
+    );
+    const prepared = await prepareMachineRun({ cwd: fixture, home, machine: "declared" });
+    assert.equal((await prepared.start()).value, "done");
+  } finally {
+    rmSync(fixture, { force: true, recursive: true });
+  }
 });
 
 test("a Human accepts free-form terminal input even when a suggestion is shown", async () => {

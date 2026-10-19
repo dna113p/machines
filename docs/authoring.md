@@ -274,7 +274,8 @@ repeat after a crash; make its effects safe to repeat.
 ## Events and Human input
 
 An Operation or Agent returns `{ type: "eventName", ...data }`. Its state maps
-that type to a target. An unexpected event fails the run. Human returns
+that type to a target. An unexpected Operation event fails the run; an unexpected
+Agent event starts the recovery described below. Human returns
 `{ type: "submitted", value: response }`; use an XState transition action or guard
 to inspect `event.value`.
 
@@ -292,6 +293,46 @@ Suggestions preserve free-form input. Explicit choices are restrictive and are
 validated by the runtime across terminal, injected, Pi, and MCP Human runners.
 Both properties cannot be supplied together. Terminal selectors support arrow
 keys; piped input stays plain text.
+
+## Agents
+
+An Agent that throws or returns no valid outcome is asked once more by default.
+The second prompt includes the original assignment and a line explaining that
+"the last attempt returned no outcome", with the failure reason. A valid event,
+including `blocked`, takes its declared transition immediately. Set `reask: 0`
+to skip this extra ask; only `0` and `1` are accepted. Each entry into the state
+has a fresh allowance. Partial work remains in the workspace, so Agents should
+inspect it before continuing.
+
+Name a fallback role when a different Agent could finish the same assignment
+if the primary role cannot return an outcome:
+
+```ts
+work: agent(
+  "Implement the change",
+  { completed: "verify", blocked: "askOwner" },
+  { using: "implementer", fallback: "implementerFallback" },
+),
+```
+
+After the re-ask fails, `implementerFallback` is asked once. With `reask: 0`, it
+is asked immediately after the first failure. Its valid answer takes the same
+transitions; its failure fails the state. The fallback must name a different
+role from `using` (which defaults to `default`). Declare it in `agentRoles` and
+bind it through presets like any other role; `requiredAgentNames` includes it,
+and missing bindings fail before execution. Use explicit workflow states when
+escalation should follow a valid answer such as `changesRequested`.
+
+The state's `fallback` names a **role**. A preset's `fallback` list names other
+**presets** that may serve the same role at a usage limit. Preset swapping and
+waiting run first, as usual. If they end with a usage-limit error, the state
+asks its fallback role once, without re-asking the primary role. Without a role
+fallback, that error fails the state. `onLimit`, when set, takes priority over
+both forms of fallback and delivers the limit event as before.
+
+Re-asks and role handoffs emit `{ type: "attempt", role, text }` Agent updates.
+The CLI prints them, and run status publishes the latest attempt for the current
+state, so a person can see which role is answering.
 
 Here is a complete Agent/Human feedback loop. Save as `.machines/review-task.ts`:
 
@@ -378,8 +419,8 @@ fallback and waiting apply. With `onLimit`, the role's bound preset is tried
 alone: no fallback takes over, the state does not wait, and no swap or wait is
 reported. Under the launcher, a preset that another state of the same run
 already found limited delivers the event without being asked again. Any other
-failure still fails the state. The event is plain JSON, so a transition action can keep it for a later
-prompt or the Machine's output. Direct `run()` callers get the same event from
+failure uses the re-ask and role fallback described above. The event is plain
+JSON, so a transition action can keep it for a later prompt or the Machine's output. Direct `run()` callers get the same event from
 their own runners.
 
 ## Agent presets
