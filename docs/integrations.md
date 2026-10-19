@@ -239,8 +239,11 @@ directory is created by the first write, as `0700`, and each file is `0600`:
 `status` is `running`, `waiting`, `sleeping`, `completed`, or `failed`. A sleeping
 run has either a timed wait's `due` timestamp or a `human` request with a
 `requestId`; see [continuing a run](#continuing-a-run). `state` is the current
-state as a string (JSON for a nested state). `agent` is present while an Agent
-state has reported its identity, and `error` after a failure. `owner` is
+state as a string (JSON for a nested state). While a `p.use` child runs, its
+state is nested under the parent use state, for example `{"review":"check"}`.
+Further children extend that same path. `machine runs` and the status line show
+this value; `machine ui` shows the dotted path `review.check`. `agent` is present
+while an Agent state has reported its identity, and `error` after a failure. `owner` is
 `MACHINES_RUN_OWNER` when set, otherwise the session id the coding agent gives
 the commands it starts (`CLAUDE_CODE_SESSION_ID`, then `CODEX_THREAD_ID`, then
 `PI_SESSION_ID`), otherwise absent; see
@@ -252,14 +255,19 @@ choice to publish that text. `machine run` exports its run id as
 `MACHINES_RUN_PARENT`, so a Machine started by one of its Operations or Agents
 records that id as `parent`; the status line shows only top-level runs.
 
-`graph` is the Machine's states and transitions, published once when the run
-starts: `initial`, `states` (each with an `id`, a `kind` of `agent`, `human`,
-`operation`, `final`, `group`, or `state`, an Agent's `role`, and the `parent`
+`graph` is the Machine's states and transitions, published when the run starts
+and extended when a child starts: `initial`, `states` (each with an `id`, a `kind`
+of `agent`, `human`, `operation`, `final`, `group`, or `state`, an Agent's `role`, and the `parent`
 group of a nested state), and `edges` (`from`, `to`, and the `event` taken). Ids
 are state paths joined by dots, so a nested state is `review.round`. A Machine
-with more than 300 states or 1000 transitions publishes no graph. `trail` is the
+with more than 300 states or 1000 transitions publishes no graph. A `use` state
+is a group whose outgoing edges name the child's endings. The child's graph
+needs its input, so its states and edges join that group only when it starts.
+Repeated entries do not duplicate states or edges. If adding a child would
+exceed either limit, the graph stays as drawn so far. `trail` is the
 states the run entered, oldest first, each with the time it was entered, as the
-same dotted paths; it keeps the latest 200. Both are additions to version 2:
+same dotted paths, including child states in entry order; it keeps the latest
+200. Both are additions to version 2:
 a reader that does not know them ignores them.
 
 A top-level final that takes a declared ending also has `ending` on its graph
@@ -269,8 +277,10 @@ own colour and label, including before the run reaches it.
 The graph does not depend on publication. `machineGraph(definition, endings?)` from
 `@dna113p/machines` returns it for any Machine definition a program holds, or
 undefined for one too large to draw. The value `startMachineHost` resolves to
-carries the run's `graph` whether or not the host publishes, and its `onState`
-callback reports each state a trail is made of.
+carries the run's initial `graph` whether or not the host publishes. Its
+`onGraph` callback reports each grown graph, and `onState` reports the nested
+state values a trail is made of. A prepared launcher's `start({ onGraph })`
+receives the same graph updates.
 
 `listMachines()` from `@dna113p/machines/launcher` reads a module's optional
 `endings` export without building the Machine. Each summary's `endings` array

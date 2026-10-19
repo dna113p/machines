@@ -161,5 +161,5 @@ export default p => p.machine({ initial: "review", states: {
   assert.equal((await prepared.start({ onAgentUpdate: update => updates.push(update), onState: state => states.push(state) })).value, "done");
   assert.ok(updates.some(update => (update as { text?: string }).text === "child progress"));
   assert.ok(updates.some(update => (update as { status?: string }).status === "swapped"));
-  assert.deepEqual(states, ["delegate", "done"]);
+  assert.deepEqual(states, ["delegate", { delegate: "review" }, { delegate: "done" }, "done"]);
 });

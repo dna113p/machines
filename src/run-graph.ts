@@ -67,7 +67,7 @@ export function machineGraph(definition: AnyStateMachine, endings?: MachineEndin
       const using = (node.meta?.["machines.agent"] as { readonly using?: unknown } | undefined)?.using;
       const src = node.invoke[0]?.src;
       const kind: RunGraphState["kind"] = node.type === "final" ? "final"
-        : node.type === "compound" || node.type === "parallel" ? "group"
+        : node.type === "compound" || node.type === "parallel" || node.meta?.["machines.use"] ? "group"
         : typeof using === "string" ? "agent"
         : src === "human" ? "human"
         : src !== undefined ? "operation"
@@ -107,6 +107,24 @@ export function machineGraph(definition: AnyStateMachine, endings?: MachineEndin
   } catch {
     return undefined;
   }
+}
+
+/** Add a started child's graph under its use state, retaining the existing graph at the limits. */
+export function nestGraph(graph: RunGraph, at: string, child: RunGraph): RunGraph {
+  const ids = new Set(graph.states.map((state) => state.id));
+  const states = [...graph.states];
+  for (const { id: childId, parent, ...state } of child.states) {
+    const id = `${at}.${childId}`;
+    if (ids.has(id)) continue;
+    ids.add(id);
+    states.push({ id, parent: parent === undefined ? at : `${at}.${parent}`, ...state });
+  }
+  const edges = dedupe([...graph.edges, ...child.edges.map((edge) => ({
+    ...edge, from: `${at}.${edge.from}`, to: `${at}.${edge.to}`,
+  }))]);
+  if (states.length > maxStates || edges.length > maxEdges
+    || (states.length === graph.states.length && edges.length === graph.edges.length)) return graph;
+  return { ...graph, states, edges };
 }
 
 /** A state value as the dotted paths of its active leaves: `{"review":"round"}` is `review.round`. */

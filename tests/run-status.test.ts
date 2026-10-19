@@ -1920,3 +1920,85 @@ for (const surface of ["host", "session", "cli"] as const) {
     if (session) await eventually(() => assert.equal(session!.status()[0]?.attempt, undefined));
   });
 }
+
+/** Uses a child whose Agent state runs the reviewer of use-observe-project, which records the run while it works. */
+const reviewParent = resolve("tests/fixtures/use/review-parent.machine.ts");
+const observeProject = resolve("tests/fixtures/use-observe-project");
+const graphStates = (record: RunStatusRecord | undefined) => new Set(record?.graph?.states.map((state) => state.id));
+const nestedState = JSON.stringify({ review: "review" });
+
+test("machine run publishes a child's state, graph and trail under its use state, and machine runs lists the nested state", async (context) => {
+  const root = await temporaryDirectory(context);
+  const directory = join(root, "status");
+  const observed = join(root, "observed.json");
+  const result = runCli([], observeProject, {
+    MACHINES_RUN_STATUS_DIR: directory, MACHINES_USER_HOME: root, USE_OBSERVED: observed,
+  }, reviewParent);
+  assert.equal(result.status, 0, result.stderr);
+  // The terminal's status line names the child's state under the parent's.
+  assert.ok(result.stderr.split("\n").includes(`● review-parent.machine · ${nestedState}`), result.stderr);
+
+  const { records, runs } = JSON.parse(await readFile(observed, "utf8")) as { readonly records: RunStatusRecord[]; readonly runs: string };
+  assert.equal(records.length, 1);
+  const during = records[0]!;
+  assert.deepEqual({ status: during.status, state: during.state }, { status: "running", state: nestedState });
+  const states = new Map(during.graph?.states.map((state) => [state.id, state]));
+  assert.deepEqual(states.get("review"), { id: "review", kind: "group" });
+  assert.deepEqual(states.get("review.review"), { id: "review.review", parent: "review", kind: "agent", role: "reviewer" });
+  assert.deepEqual(during.graph?.edges.filter((edge) => edge.from === "review"), [
+    { from: "review", to: "accepted", event: "approved" },
+    { from: "review", to: "refused", event: "rejected" },
+  ]);
+  assert.deepEqual(during.trail?.map((step) => step.state), ["review", "review.review"]);
+  const [line] = runs.split("\n");
+  assert.deepEqual(line?.split("\t"), [during.id, "review-parent.machine", "running", nestedState], runs);
+
+  const [finished] = readRunStatuses(directory);
+  assert.deepEqual({ status: finished?.status, state: finished?.state }, { status: "completed", state: "accepted" });
+  const trail = finished?.trail?.map((step) => step.state) ?? [];
+  // The parent's and the child's states in the order entered, each a state of the graph.
+  assert.deepEqual(trail.slice(0, 2), ["review", "review.review"]);
+  assert.equal(trail.at(-1), "accepted");
+  for (const step of trail) {
+    assert.ok(["review", "review.review", "review.approved", "accepted"].includes(step), trail.join(", "));
+    assert.ok(graphStates(finished).has(step), `${step} is a state of the graph`);
+  }
+});
+
+test("a publisher replaces its graph when a change carries one, keeping the trail", async (context) => {
+  const directory = await temporaryDirectory(context);
+  const before = { initial: "review", states: [{ id: "review", kind: "group" as const }, { id: "done", kind: "final" as const }], edges: [{ from: "review", to: "done", event: "approved" }] };
+  const after = { ...before, states: [...before.states, { id: "review.review", parent: "review", kind: "agent" as const, role: "reviewer" }] };
+  const published = createRunStatusPublisher({ ...run, id: "growing", graph: before }, { MACHINES_RUN_STATUS_DIR: directory });
+  published.update({ state: "review" });
+  published.update({ graph: after } as Parameters<typeof published.update>[0]);
+  published.update({ state: { review: "review" } });
+  const [record] = readRunStatuses(directory);
+  assert.deepEqual(record?.graph, after);
+  assert.deepEqual({ state: record?.state, trail: record?.trail?.map((step) => step.state) }, { state: nestedState, trail: ["review", "review.review"] });
+});
+
+test("a hosted run publishes its child's state and graph under its use state, and reports the grown graph", async (context) => {
+  const root = await temporaryDirectory(context);
+  const directory = join(root, "status");
+  const release = join(root, "release");
+  publishFrom(context, { MACHINES_RUN_STATUS_DIR: directory, USE_RELEASE: release });
+  const states: unknown[] = [];
+  const graphs: unknown[] = [];
+  const hosted = await startMachineHost({
+    cwd: observeProject, home: root, machine: reviewParent, publishRunStatus: true,
+    onState: (state) => states.push(state),
+    onGraph: (graph: unknown) => graphs.push(graph),
+  } as Parameters<typeof startMachineHost>[0]);
+  context.after(() => hosted.terminate());
+  const published = () => readRunStatuses(directory)[0];
+
+  await eventually(() => assert.equal(published()?.state, nestedState));
+  assert.ok(graphStates(published()).has("review.review"), "the child's states are published under its use state");
+  assert.deepEqual(published()?.trail?.map((step) => step.state), ["review", "review.review"]);
+  await eventually(() => assert.ok(graphs.length > 0, "the host reported the grown graph"));
+  await writeFile(release, "");
+  assert.deepEqual(await hosted.result, { state: "accepted" });
+  assert.ok(states.some((state) => JSON.stringify(state) === nestedState), JSON.stringify(states));
+  assert.ok(graphStates(published()).has("review.review"));
+});

@@ -2,19 +2,21 @@ import "./environment.ts";
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, mkdir, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test, type TestContext } from "node:test";
 import { createContext, runInContext } from "node:vm";
 
-import { createMachine, fromPromise } from "xstate";
+import { createMachine, fromPromise, type AnyStateMachine } from "xstate";
 
 // The package's own entry, which any tool that holds a definition can read its graph from.
-import { agent, defineEndings, final, human, machine, machineGraph, operation, statePaths } from "../src/index.ts";
+import { agent, defineEndings, final, human, machine, machineGraph, operation, statePaths, use } from "../src/index.ts";
+import * as graphModule from "../src/run-graph.ts";
+import type { RunGraph } from "../src/run-graph.ts";
 import { respondToRun } from "../src/run-inbox.ts";
-import { createRunStatusPublisher, readRunStatuses, trailLimit } from "../src/run-status.ts";
+import { createRunStatusPublisher, readRunStatuses, trailLimit, type RunStatusRecord } from "../src/run-status.ts";
 import { runUiPage } from "../src/run-ui-page.ts";
 import { parsePanelOutput, readPanelSources, startRunUi, uiProjectDir, uiRuns } from "../src/run-ui.ts";
 
@@ -547,4 +549,116 @@ test("machine ui draws each ending kind distinctly, and a graph without endings 
   const plain = drawn(false);
   assert.equal(new Set([plain.bars.shipped, plain.bars.broken, plain.bars.dropped]).size, 1, JSON.stringify(plain.bars));
   assert.deepEqual(plain.legend, ["agent", "operation", "human", "final"]);
+});
+
+// Read from the module so that each case fails on its own until the export exists.
+const nestGraph = (graphModule as unknown as {
+  readonly nestGraph: (graph: RunGraph, at: string, child: RunGraph) => RunGraph;
+}).nestGraph;
+const sorted = (graph: RunGraph) => ({
+  ...graph,
+  states: graph.states.map((state) => JSON.stringify(state)).sort(),
+  edges: graph.edges.map((edge) => JSON.stringify(edge)).sort(),
+});
+
+test("a definition's graph draws a use state as a group whose edges out are the child's endings", () => {
+  const graph = machineGraph(machine({
+    initial: "review",
+    states: {
+      review: use("./review-child.machine.ts", { input: () => "", on: { approved: "accepted", rejected: "refused" } }),
+      accepted: final(),
+      refused: final(),
+    },
+  } as never) as unknown as AnyStateMachine);
+  assert.deepEqual(graph?.states, [{ id: "review", kind: "group" }, { id: "accepted", kind: "final" }, { id: "refused", kind: "final" }]);
+  assert.deepEqual(graph?.edges, [
+    { from: "review", to: "accepted", event: "approved" },
+    { from: "review", to: "refused", event: "rejected" },
+  ]);
+});
+
+const parentGraph: RunGraph = {
+  initial: "review",
+  states: [{ id: "review", kind: "group" }, { id: "accepted", kind: "final" }, { id: "refused", kind: "final" }],
+  edges: [{ from: "review", to: "accepted", event: "approved" }, { from: "review", to: "refused", event: "rejected" }],
+};
+const childGraph: RunGraph = {
+  initial: "check",
+  states: [
+    { id: "check", kind: "group" },
+    { id: "check.run", parent: "check", kind: "agent", role: "reviewer" },
+    { id: "approved", kind: "final", ending: "succeeded" },
+    { id: "rejected", kind: "final", ending: "failed" },
+  ],
+  edges: [{ from: "check", to: "approved", event: "done" }, { from: "check.run", to: "rejected", event: "rejected" }],
+};
+
+test("a child's graph is placed under its use state, once however often the state is entered", () => {
+  const nested = nestGraph(parentGraph, "review", childGraph);
+  assert.deepEqual(sorted(nested), sorted({
+    initial: "review",
+    states: [
+      ...parentGraph.states,
+      { id: "review.check", parent: "review", kind: "group" },
+      { id: "review.check.run", parent: "review.check", kind: "agent", role: "reviewer" },
+      { id: "review.approved", parent: "review", kind: "final", ending: "succeeded" },
+      { id: "review.rejected", parent: "review", kind: "final", ending: "failed" },
+    ],
+    edges: [
+      ...parentGraph.edges,
+      { from: "review.check", to: "review.approved", event: "done" },
+      { from: "review.check.run", to: "review.rejected", event: "rejected" },
+    ],
+  }));
+  // Entering the use state again draws nothing twice.
+  assert.deepEqual(sorted(nestGraph(nested, "review", childGraph)), sorted(nested));
+});
+
+test("a child that would take the graph past its limits leaves the graph as drawn so far", () => {
+  const many = (count: number): RunGraph => ({
+    states: Array.from({ length: count }, (_, index) => ({ id: `s${index}`, kind: "operation" as const })),
+    edges: [],
+  });
+  assert.deepEqual(nestGraph(parentGraph, "review", many(300)), parentGraph);
+  const looping: RunGraph = {
+    states: [{ id: "a", kind: "operation" }],
+    edges: Array.from({ length: 1_000 }, (_, index) => ({ from: "a", to: "a", event: `e${index}` })),
+  };
+  assert.deepEqual(nestGraph(parentGraph, "review", looping), parentGraph);
+});
+
+/** Runs the review-parent fixture under `machine run`, returning its record as published during the child's Agent state. */
+async function recordDuringChild(context: TestContext) {
+  const root = await temporary(context);
+  const directory = join(root, "status");
+  const observed = join(root, "observed.json");
+  const child = spawn(process.execPath, [resolve("src/cli.ts"), "run", resolve("tests/fixtures/use/review-parent.machine.ts")], {
+    cwd: resolve("tests/fixtures/use-observe-project"),
+    env: { ...process.env, MACHINES_RUN_STATUS_DIR: directory, MACHINES_USER_HOME: root, USE_OBSERVED: observed },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stderr = "";
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  const code = await new Promise((resolveExit) => child.on("exit", resolveExit));
+  assert.equal(code, 0, stderr);
+  const { records } = JSON.parse(await readFile(observed, "utf8")) as { readonly records: readonly RunStatusRecord[] };
+  assert.equal(records.length, 1);
+  return records[0]!;
+}
+
+test("machine ui draws a running child's states inside its use state and marks the child's state as current", async (context) => {
+  const record = await recordDuringChild(context);
+  const page = openPage(runUiPage("page-token"), "http://localhost/", async () => new Response("{}"));
+  page.show({ project: { name: "test" }, directory: "/tmp", panels: [], runs: [record] });
+  const nodes = new Map(page.document.getElementById("detail")!.descendants()
+    .filter((node) => node.tagName === "g" && node.hasClass("node"))
+    .map((node) => [node.children.find((child) => child.tagName === "title")!.textContent.split(" ")[0], node]));
+  const box = (id: string) => nodes.get(id)?.children.find((child) => child.tagName === "rect" && child.hasClass("box"));
+  assert.ok(nodes.has("review.review"), [...nodes.keys()].join(", "));
+  assert.equal(box("review")?.getAttribute("stroke-dasharray"), "4 3", "the use state is drawn as a group");
+  assert.ok(nodes.get("review.review")!.hasClass("current"), "the child's Agent state is current");
+  assert.equal(nodes.get("review")!.hasClass("current"), false);
+  // The run's card names the nested path.
+  const card = [...runSections(page.document).values()].flatMap((cards) => [...cards.values()])[0]!;
+  assert.match(card.textContent, /review\.review/u);
 });

@@ -135,6 +135,12 @@ export default function diagnose(p: MachinePrimitives, input: string) {
 }
 ```
 
+While the child runs, the parent's published state includes its path, such as
+`{"diagnose":"inspect"}`. The trail records `diagnose.inspect` in entry order.
+The graph draws `diagnose` as a group with edges labelled by the child's endings
+and adds the child's states when it starts, within the existing graph limits.
+`machine ui`, `machine runs`, and the status line show where the child is working.
+
 Catalogue names use the same project/global lookup as `machine run`. Paths
 resolve relative to the module that declares the use, so `./review.ts` can name
 a sibling. `uses` must contain unique, non-empty, trimmed selectors. Every child

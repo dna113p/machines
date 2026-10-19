@@ -232,6 +232,9 @@ A finished run with declared endings records `ending: { name, kind }`, where
 | `machine watch <run>` | Show a run this session didn't start (say, a daemon's ticket) on its status line |
 | `machine continue <run-id>` | Continue a run whose process stopped, from its last checkpoint |
 
+A running `p.use` child appears inside its parent's state path, graph, and trail,
+including in `machine ui`, `machine runs`, and the status line.
+
 A run with no terminal, for example one started by an agent or a script, waits
 for `machine respond` instead of failing. Anything running as the same user
 can answer a waiting run, approvals included.

@@ -46,6 +46,7 @@ export interface MachineHostOptions extends Omit<PrepareMachineRunOptions, "mach
   readonly publishRunStatus?: boolean | "caller";
   readonly onAgentUpdate?: (update: AgentUpdate) => void;
   readonly onHumanRequest?: (request: HostedHumanRequest) => void;
+  readonly onGraph?: (graph: RunGraph) => void;
   readonly onState?: (state: StateValue) => void;
 }
 
@@ -161,6 +162,7 @@ const childMessageSchema = v.variant("type", [
     // Checked as the record is read back; here it only has to be an object.
     graph: v.optional(v.custom<RunGraph>((value) => value !== null && typeof value === "object")),
   }),
+  v.strictObject({ type: v.literal("graph"), graph: v.custom<RunGraph>((value) => value !== null && typeof value === "object") }),
   v.strictObject({ type: v.literal("state"), state: stateValueSchema }),
   v.strictObject({ type: v.literal("agentUpdate"), update: agentUpdateSchema }),
   v.strictObject({
@@ -378,6 +380,9 @@ function launchMachineHost(
           observersReady = true;
           pendingObservations.splice(0).forEach((observation) => observation());
         });
+      } else if (message.type === "graph") {
+        published?.update({ graph: message.graph });
+        observe(() => options.onGraph?.(message.graph));
       } else if (message.type === "state") {
         observe(() => options.onState?.(message.state as StateValue));
       } else if (message.type === "agentUpdate") {
@@ -583,6 +588,7 @@ function runChildHost(): void {
           send({ type: "agentUpdate", update });
           observed?.onAgentUpdate(update);
         },
+        onGraph(graph) { send({ type: "graph", graph }); },
         onState(state) {
           send({ type: "state", state });
           observed?.onState(state);

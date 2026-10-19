@@ -76,11 +76,11 @@ export function assertUseStates(definition: AnyStateMachine, path: string, child
   }
 }
 
-function useStates(definition: AnyStateMachine): { path: string; selector: string; node: AnyStateNode }[] {
-  const found: { path: string; selector: string; node: AnyStateNode }[] = [];
+export function useStates(definition: AnyStateMachine): { path: string; selector: string; node: AnyStateNode; actorId: string }[] {
+  const found: { path: string; selector: string; node: AnyStateNode; actorId: string }[] = [];
   const visit = (node: AnyStateNode, path: string) => {
     const metadata = node.meta?.["machines.use"] as { selector: string } | undefined;
-    if (metadata) found.push({ path, selector: metadata.selector, node });
+    if (metadata) found.push({ path, selector: metadata.selector, node, actorId: node.invoke[0]!.id });
     for (const child of Object.values(node.states)) visit(child, path ? `${path}.${child.key}` : child.key);
   };
   visit(definition.root, "");
