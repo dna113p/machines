@@ -236,6 +236,7 @@ async function runMachine(machinePath: string, args: string[], continuation?: Co
         published.update(active ? { status: "waiting" } : { status: "running", human: undefined });
         status.onHumanInput(active);
       },
+      onGraph(graph) { published.update({ graph }); },
       onState(state) {
         observed.onState(state);
         status.onState(state);

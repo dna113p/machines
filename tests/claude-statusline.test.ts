@@ -59,6 +59,13 @@ test("a run is one line, with its Agent or its Human prompt beneath it", () => {
   ], alive), ["✕ failed-r  ticket › failed · 15s", "✓ complete  ticket › done · 1m 0s"]);
 });
 
+test("a running child's nested state is shown in the status line", () => {
+  const state = JSON.stringify({ review: "check" });
+  assert.deepEqual(runStatusLines([record({ id: "nested", state })], alive), [
+    `● nested  ticket › ${state} · 0s`,
+  ]);
+});
+
 test("records of both schema versions are shown alike", () => {
   const request = { requestId: "request-1", choices: ["approve", "deny"], suggestions: ["later"], discussion: true };
   const lines = (schemaVersion: 1 | 2, human: RunStatusRecord["human"]) => runStatusLines([

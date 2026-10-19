@@ -109,6 +109,7 @@ export interface RunStatusRun {
 
 /** A present key replaces its field; a present key holding `undefined` clears it. */
 export interface RunStatusChange {
+  readonly graph?: RunGraph;
   readonly status?: "running" | "waiting";
   readonly state?: StateValue;
   readonly agent?: RunStatusAgent;
@@ -217,6 +218,7 @@ export function createRunStatusPublisher(
   const parent = previous ? previous.parent : environment.MACHINES_RUN_PARENT || undefined;
   const label = previous ? previous.label : formatLabel(run.label ?? environment.MACHINES_RUN_LABEL);
   const startedAt = previous?.startedAt ?? run.startedAt ?? new Date().toISOString();
+  let graph = run.graph;
   let status: RunStatusRecord["status"] = "running";
   let due: string | undefined;
   let state: string | undefined;
@@ -264,7 +266,7 @@ export function createRunStatusPublisher(
       ...(error === undefined ? {} : { error }),
       ...(note === undefined ? {} : { note }),
       ...(ending === undefined ? {} : { ending }),
-      ...(run.graph === undefined ? {} : { graph: run.graph }),
+      ...(graph === undefined ? {} : { graph }),
       ...(trail.length === 0 ? {} : { trail }),
       startedAt,
       updatedAt: new Date().toISOString(),
@@ -293,6 +295,7 @@ export function createRunStatusPublisher(
       if (status === "completed" || status === "failed" || status === "sleeping") return;
       const nextState = "state" in change ? formatState(change.state) : state;
       const next = {
+        graph: "graph" in change ? change.graph : graph,
         status: change.status ?? status,
         state: nextState,
         agent: "agent" in change ? pickAgent(change.agent) : agent,
@@ -308,12 +311,12 @@ export function createRunStatusPublisher(
         ],
       };
       // Repeated notifications for an unchanged run do not need another write.
-      if (JSON.stringify(next) === JSON.stringify({ status, state, agent, limit, attempt, retry, human, deliveries })) return;
+      if (JSON.stringify(next) === JSON.stringify({ graph, status, state, agent, limit, attempt, retry, human, deliveries })) return;
       if (next.state !== state) {
         stateSince = new Date().toISOString();
         enter(next.state, stateSince);
       }
-      ({ status, state, agent, limit, attempt, retry, human, deliveries } = next);
+      ({ graph, status, state, agent, limit, attempt, retry, human, deliveries } = next);
       publish();
     },
     sleep(until) {
