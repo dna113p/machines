@@ -105,11 +105,30 @@ next repair round or person taking over:
   what happens next.
 - Match a reviewer's findings across rounds by their place in the conversation,
   never by their wording.
-- End stuck unattended runs with work kept and a written note of what a person
-  must decide, instead of waiting in a Human state. Every stop keeps both so a later
-  run or a person can continue from them.
+- Let a stuck unattended run sleep on one Human question, with its
+  work kept and a written note of what a person must decide.
 - Before implementation, have a read-only Agent try to show the assignment is
   wrong, already done, or underspecified; require options and a recommended answer
   for each question it raises.
 - Tell editing Agents that checks they cannot run in their environment are the
   workflow's to run, so a sandboxed Agent returns its work instead of `blocked`.
+
+## Recovering from failures
+
+Not every step needs a failure path. A step needs one only when its failure is
+expected and something sensible can happen next. Let pure logic throw: a thrown
+error fails the run visibly, which is better than a quiet ending. Catching an
+error only to end the run hides it.
+
+- A passing outside failure (network, `gh`, registry, a lock file): use the
+  [Operation `retry` option](../../docs/authoring.md#retrying-a-passing-failure).
+- An Agent crashes or returns nothing: use the
+  [default re-ask and a `fallback` role](../../docs/authoring.md#agents).
+- An Agent report has the wrong shape: use Machine Shop's optional
+  [send-back helper](https://github.com/dna113p/machine-shop/blob/main/docs/catalog.md#recovery).
+- A check may be flaky: use Machine Shop's optional
+  [single rerun](https://github.com/dna113p/machine-shop/blob/main/docs/catalog.md#recovery).
+- A decision, scope change, used-up budget, or login: ask a person by
+  [sleeping on a Human question](../../docs/integrations.md#continuing-a-run).
+- "This task cannot be done": use a
+  [declared failed ending](../../docs/authoring.md#declared-endings).

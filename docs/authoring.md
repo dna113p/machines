@@ -253,8 +253,9 @@ By default the timer keeps the process running. Start with
 `machine run <name> --sleep` to end the process at each future timed wait;
 `machine continue <run-id>` wakes it once due. Continuations keep this option.
 Run status publication must be on. Nothing wakes a sleeping run automatically;
-an external scheduler can call `machine continue`. Human requests keep their
-normal in-process behavior. See [continuing runs](integrations.md#continuing-a-run).
+an external scheduler can call `machine continue`. `--sleep` also ends the process
+at a Human request, as it does at a timed wait. See
+[continuing runs](integrations.md#continuing-a-run).
 
 ## Retrying a passing failure
 
@@ -284,6 +285,9 @@ a host resumes the saved count and waits only for the time left. The run record
 shows, for example, `retry: { attempt: 2, of: 4, due: "…" }`, and the graph draws
 a loop labelled `retry`. As with other interrupted Operations, an attempt may
 repeat after a crash; make its effects safe to repeat.
+
+For when a step needs a failure path and which recovery fits, see
+[Recovering from failures](../skills/machine-builder/SKILL.md#recovering-from-failures).
 
 ## Events and Human input
 
