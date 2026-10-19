@@ -90,8 +90,11 @@ const agentIdentity = {
   thinking: v.optional(v.string()),
 };
 
+const agentAttempt = { role: v.string(), text: v.string() };
+
 const agentUpdateSchema = v.variant("type", [
   v.strictObject({ type: v.literal("identity"), ...agentIdentity }),
+  v.strictObject({ type: v.literal("attempt"), ...agentAttempt }),
   v.strictObject({
     type: v.literal("output"),
     text: v.string(),
@@ -166,6 +169,7 @@ const childMessageSchema = v.variant("type", [
     change: v.strictObject({
       state: v.optional(stateValueSchema),
       agent: v.optional(v.nullable(v.object(agentIdentity))),
+      attempt: v.optional(v.nullable(v.strictObject(agentAttempt))),
       limit: v.optional(v.nullable(v.strictObject({ text: v.string(), until: v.optional(v.string()) }))),
       retry: v.optional(v.nullable(v.strictObject({ attempt: v.number(), of: v.number(), due: v.string() }))),
     }),
@@ -379,10 +383,11 @@ function launchMachineHost(
       } else if (message.type === "agentUpdate") {
         observe(() => options.onAgentUpdate?.(message.update as AgentUpdate));
       } else if (message.type === "status") {
-        const { state, agent, limit, retry } = message.change;
+        const { state, agent, limit, attempt, retry } = message.change;
         published?.update({
           ...(state === undefined ? {} : { state: state as StateValue }),
           ...(agent === undefined ? {} : { agent: agent ?? undefined }),
+          ...(attempt === undefined ? {} : { attempt: attempt ?? undefined }),
           ...(limit === undefined ? {} : { limit: limit ?? undefined }),
           ...(retry === undefined ? {} : { retry: retry ?? undefined }),
         });
@@ -553,6 +558,7 @@ function runChildHost(): void {
         change: {
           ...(change.state === undefined ? {} : { state: change.state }),
           ...("agent" in change ? { agent: change.agent ?? null } : {}),
+          ...("attempt" in change ? { attempt: change.attempt ?? null } : {}),
           ...("limit" in change ? { limit: change.limit ?? null } : {}),
           ...("retry" in change ? { retry: change.retry ?? null } : {}),
         },

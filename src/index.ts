@@ -53,6 +53,10 @@ export type HumanRunner = (
 export interface AgentOptions {
   readonly cwd?: string;
   readonly using?: string;
+  /** Further asks after a failed or invalid outcome; defaults to one. */
+  readonly reask?: 0 | 1;
+  /** A different role asked once after recovery is exhausted. */
+  readonly fallback?: string;
   /**
    * The transition this state takes when its Agent is at a usage limit. The
    * event is delivered by the runtime and never offered to the Agent. A state
@@ -77,10 +81,18 @@ export interface AgentRequest {
 
 interface AgentInvocation extends AgentRequest {
   readonly using: string;
+  readonly reask: 0 | 1;
+  readonly fallback?: string;
   readonly onLimit?: string;
 }
 
 export type AgentUpdate =
+  | {
+    /** A further attempt in the current state, naming the role now answering. */
+    readonly type: "attempt";
+    readonly role: string;
+    readonly text: string;
+  }
   | {
     readonly type: "identity";
     readonly harness: string;
@@ -180,6 +192,9 @@ const machines = setup({
     humanInputStarted: () => {},
   },
   actors: {
+    use: fromPromise<Event, { readonly selector: string; readonly input: unknown }>(async () => {
+      throw new Error("Machine states require prepareMachineRun; run() cannot load a child Machine");
+    }),
     retry: fromPromise<Event, RetryInvocation>(async () => {
       throw new Error("Operation retries require run()");
     }),
@@ -276,6 +291,25 @@ export function operation<const TTransitions extends Readonly<Record<string, unk
   } as const;
 }
 
+/** Run a prepared child Machine and route on its declared ending. */
+export function use<const TTransitions extends Readonly<Record<string, unknown>>>(
+  selector: string,
+  options: { readonly input: () => unknown; readonly on: TTransitions },
+) {
+  if (typeof selector !== "string" || selector.trim() === "" || selector !== selector.trim()) {
+    throw new Error("Machine use selector must be a non-empty trimmed string");
+  }
+  return {
+    meta: { "machines.use": { selector } },
+    invoke: {
+      src: "use",
+      input: () => ({ selector, input: options.input() }),
+      ...actorLifecycle("Machine", options.on),
+    },
+    on: options.on,
+  } as const;
+}
+
 export function human<const TTransitions extends Readonly<Record<string, unknown>>>(
   prompt: HumanPrompt,
   on: TTransitions,
@@ -317,6 +351,15 @@ export function agent<const TTransitions extends Readonly<Record<string, unknown
   if (typeof using !== "string" || using.trim() === "" || using !== using.trim()) {
     throw new Error("Agent runner name must be a non-empty trimmed string");
   }
+  const reask = options.reask === undefined ? 1 : options.reask;
+  if (reask !== 0 && reask !== 1) throw new Error("Agent reask must be 0 or 1");
+  const fallback = options.fallback;
+  if (fallback !== undefined) {
+    if (typeof fallback !== "string" || fallback.trim() === "" || fallback !== fallback.trim()) {
+      throw new Error("Agent fallback must be a non-empty trimmed role name");
+    }
+    if (fallback === using) throw new Error("Agent fallback must name a different role from using");
+  }
   const onLimit = options.onLimit;
   if (onLimit !== undefined) {
     if (typeof onLimit !== "string" || onLimit.trim() === "" || onLimit !== onLimit.trim()) {
@@ -336,12 +379,14 @@ export function agent<const TTransitions extends Readonly<Record<string, unknown
 
   return {
     meta: {
-      [agentMetaKey]: { using, ...(onLimit === undefined ? {} : { onLimit }) },
+      [agentMetaKey]: { using, ...(fallback === undefined ? {} : { fallback }), ...(onLimit === undefined ? {} : { onLimit }) },
     },
     invoke: {
       src: "agent",
       input: () => ({
         using,
+        reask,
+        ...(fallback === undefined ? {} : { fallback }),
         prompt: typeof prompt === "function" ? prompt() : prompt,
         outcomes,
         ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
@@ -354,7 +399,7 @@ export function agent<const TTransitions extends Readonly<Record<string, unknown
 }
 
 function actorLifecycle(
-  actorName: "Agent" | "Human" | "Operation" | "Wait",
+  actorName: "Agent" | "Human" | "Operation" | "Wait" | "Machine",
   on: Readonly<Record<string, unknown>>,
 ) {
   return {
@@ -423,6 +468,7 @@ export interface MachinePrimitives {
   readonly machine: typeof machine;
   readonly operation: typeof operation;
   readonly wait: typeof wait;
+  readonly use: typeof use;
 }
 
 export function requiredAgentNames(
@@ -517,30 +563,9 @@ export function run<TMachine extends AnyStateMachine>(
           ? {}
           : {
             agent: fromPromise<Event, AgentInvocation>(
-              async ({ input }) => {
-                const { using, onLimit, ...request } = input;
-                const runner = agentRunners[using];
-                if (runner === undefined) {
-                  throw new Error(`Agent runner "${using}" was not supplied`);
-                }
-                if (onLimit === undefined) return runner(request, options.onAgentUpdate);
-
-                let event: Event;
-                try {
-                  event = await runner(request, options.onAgentUpdate);
-                } catch (cause) {
-                  const limit = agentLimitOf(cause);
-                  if (limit === undefined) throw cause;
-                  return limitEvent(onLimit, using, limit, cause);
-                }
-                // Only the runtime may say that the Agent is at a limit.
-                if (event !== null && typeof event === "object" && event.type === onLimit) {
-                  throw new Error(
-                    `the runner returned "${onLimit}", which this state reserves for its usage-limit event`,
-                  );
-                }
-                return event;
-              },
+              ({ input, signal }) => runAgentAttempts(
+                input, agentRunners, options.onAgentUpdate, signal, () => actor.getSnapshot().value,
+              ),
             ),
           }),
       },
@@ -654,6 +679,53 @@ function continuationSnapshot(definition: AnyStateMachine, saved: NonNullable<Ru
   return persisted as unknown as AnyMachineSnapshot;
 }
 
+async function runAgentAttempts(
+  input: AgentInvocation,
+  runners: Readonly<Record<string, AgentRunner>>,
+  report: AgentReporter | undefined,
+  signal: AbortSignal,
+  state: () => StateValue,
+): Promise<Event> {
+  const { using, reask, fallback, onLimit, ...request } = input;
+  const roles = [using, ...(reask === 1 ? [using] : []), ...(fallback === undefined ? [] : [fallback])];
+  const transitions = Object.fromEntries(request.outcomes.map((outcome) => [outcome, true]));
+  let failure: unknown;
+  for (const [index, role] of roles.entries()) {
+    signal.throwIfAborted();
+    // Preset swapping and waiting have already run inside the bound runner.
+    // A remaining usage limit skips the same-role re-ask entirely.
+    if (index > 0 && role === using && agentLimitOf(failure) !== undefined) continue;
+    const reason = failure instanceof Error ? failure.message : String(failure);
+    const prompt = index === 0 ? request.prompt : `${request.prompt}\n\nThe last attempt returned no outcome: ${reason}. Inspect any partial work and continue the same assignment.`;
+    if (index > 0) {
+      // Synchronous runner failures can precede the state's entry announcement.
+      // Publish recovery only after observers know which state it belongs to.
+      await Promise.resolve();
+      signal.throwIfAborted();
+      report?.({
+        type: "attempt",
+        role,
+        text: `${role === using ? "Asking again" : "Using fallback role"}: ${role}; last attempt returned no outcome: ${reason}`,
+      });
+    }
+    try {
+      const event = await runners[role]!({ ...request, prompt }, report);
+      // Only the runtime may say that the Agent is at a limit.
+      if (onLimit !== undefined && event !== null && typeof event === "object" && event.type === onLimit) {
+        throw new Error(`the runner returned "${onLimit}", which this state reserves for its usage-limit event`);
+      }
+      assertHandledEvent("Agent", event, transitions, state());
+      return event;
+    } catch (cause) {
+      signal.throwIfAborted();
+      const limit = agentLimitOf(cause);
+      if (limit !== undefined && onLimit !== undefined) return limitEvent(onLimit, role, limit, cause);
+      failure = cause;
+    }
+  }
+  throw failure;
+}
+
 /** The event a state that names `onLimit` receives. It is plain JSON, so a Machine can keep or publish it. */
 function limitEvent(type: string, role: string, limit: AgentLimit, cause: unknown): Event {
   const resets = typeof limit.resetsAt === "number" ? new Date(limit.resetsAt) : undefined;
@@ -686,6 +758,7 @@ function collectAgentNames(value: unknown, names: Set<string>): void {
     && typeof metadata.using === "string"
   ) {
     names.add(metadata.using);
+    if ("fallback" in metadata && typeof metadata.fallback === "string") names.add(metadata.fallback);
   }
 
   if (state.states !== undefined) {
@@ -719,7 +792,7 @@ function assertRequiredAgentRunners(
 }
 
 function assertHandledEvent(
-  actorName: "Agent" | "Human" | "Operation" | "Wait",
+  actorName: "Agent" | "Human" | "Operation" | "Wait" | "Machine",
   event: unknown,
   transitions: Readonly<Record<string, unknown>>,
   state: StateValue,
@@ -739,7 +812,7 @@ function assertHandledEvent(
 }
 
 function actorError(
-  actorName: "Agent" | "Human" | "Operation" | "Wait",
+  actorName: "Agent" | "Human" | "Operation" | "Wait" | "Machine",
   cause: unknown,
   state: StateValue,
 ): Error {

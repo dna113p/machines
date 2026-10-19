@@ -6,6 +6,9 @@ A Machine writes a repeatable process down as states. An Agent implements a
 change, an Operation checks it, a Human approves it or sends feedback. Each
 state returns an event, and the Machine decides what happens next.
 
+A state can [run another Machine](docs/authoring.md#using-another-machine) with
+`p.use()` and route on its ending, receiving its output.
+
 ```text
 implement (Agent) → check (Operation) → review (Human) → done
         ↑                                  │

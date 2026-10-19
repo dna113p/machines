@@ -650,6 +650,7 @@ function printRunListing(record: RunStatusRecord | ViewerRun, separate: boolean,
     ...(human.suggestions === undefined ? [] : [`suggestions: ${human.suggestions.map(plain).join(", ")}`]),
     ...(human.discussion === true && recorded === "waiting" ? ["discussion: questions allowed"] : []),
   ];
+  if ((recorded === "running" || recorded === "waiting") && record.attempt) details.push(plain(record.attempt.text));
   if (record.retry) details.push(`retry: attempt ${record.retry.attempt} of ${record.retry.of}, due ${plain(record.retry.due)}`);
   if (sleep?.for === "time") details.push(`due: ${plain(sleep.due)}${sleep.isDue ? " (due now)" : ""}`);
   if (sleep?.for === "answer") {
@@ -708,7 +709,7 @@ function createRunStatus(machinePath: string): RunStatus {
         console.error(`● ${name} · ${formatState(state)}`);
       },
       onAgentUpdate(update) {
-        if (update.type === "limit") console.error(update.text.replace(/\s+/gu, " "));
+        if (update.type === "limit" || update.type === "attempt") console.error(update.text.replace(/\s+/gu, " "));
       },
       onHumanInput() {},
       succeed() {},
@@ -724,6 +725,7 @@ function createRunStatus(machinePath: string): RunStatus {
   let agentOutput = "";
   let agentIdentity: Partial<Extract<AgentUpdate, { type: "identity" }>> = {};
   let agentLimit = "";
+  let agentAttempt = "";
   let agentWaiting = false;
   let refresh: NodeJS.Timeout | undefined;
   const tools = new Map<string, { title: string; status?: Extract<AgentUpdate, { type: "tool" }>["status"] }>();
@@ -751,9 +753,10 @@ function createRunStatus(machinePath: string): RunStatus {
       ? ""
       : `\n  ${yellow(truncate(stripVTControlCharacters(agentLimit).replace(/\s+/gu, " "), width))}`;
 
+    const attemptLine = agentAttempt === "" ? "" : `\n  ${dim(truncate(stripVTControlCharacters(agentAttempt).replace(/\s+/gu, " "), width))}`;
     return activityExpanded
-      ? `${status}${identityLine}${limitLine}\n${activityText()}`
-      : `${status}${identityLine}${limitLine}`;
+      ? `${status}${identityLine}${attemptLine}${limitLine}\n${activityText()}`
+      : `${status}${identityLine}${attemptLine}${limitLine}`;
   }
 
   function completedText() {
@@ -858,6 +861,13 @@ function createRunStatus(machinePath: string): RunStatus {
         agentIdentity = update;
       } else if (update.type === "output") {
         agentOutput = (agentOutput + update.text).slice(-32_768);
+      } else if (update.type === "attempt") {
+        agentAttempt = update.text;
+        agentIdentity = {};
+        agentOutput = "";
+        agentLimit = "";
+        agentWaiting = false;
+        tools.clear();
       } else if (update.type === "limit") {
         // A wait stays on screen while its presets are tried again, until one of them resumes.
         if (update.status !== "swapped") agentWaiting = update.status === "waiting";
@@ -890,6 +900,7 @@ function createRunStatus(machinePath: string): RunStatus {
       agentOutput = "";
       agentIdentity = {};
       agentLimit = "";
+      agentAttempt = "";
       agentWaiting = false;
       tools.clear();
 

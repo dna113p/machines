@@ -97,6 +97,75 @@ record carries `ending: { name, kind }`; `status` remains `completed` for all th
 kinds, and `state` and `note` keep their existing meanings. Without an `endings`
 export, these optional fields are absent.
 
+## Using another Machine
+
+Use `p.use(selector, { input, on })` to run a child and route on its declared
+ending. Export a static `uses` list containing each selector the factory uses:
+
+```ts
+import type { Event, MachinePrimitives } from "@dna113p/machines";
+
+export const description = "Investigates a task before deciding the next step.";
+export const uses = ["investigate"];
+
+export default function diagnose(p: MachinePrimitives, input: string) {
+  const saved = p.data({ task: input, report: "" });
+  return p.machine({
+    initial: "diagnose",
+    states: {
+      diagnose: p.use("investigate", {
+        input: () => ({ task: saved.task }),
+        on: {
+          success: {
+            target: "fix",
+            actions: ({ event }: { event: Event }) => {
+              saved.report = (event.output as { report: string }).report;
+            },
+          },
+          failure: "askOwner",
+          abandoned: "cancelled",
+        },
+      }),
+      fix: p.operation(() => ({ type: "done" }), { done: "done" }),
+      askOwner: p.human("How should we proceed?", { submitted: "done" }),
+      cancelled: p.final(),
+      done: p.final(),
+    },
+  });
+}
+```
+
+Catalogue names use the same project/global lookup as `machine run`. Paths
+resolve relative to the module that declares the use, so `./review.ts` can name
+a sibling. `uses` must contain unique, non-empty, trimmed selectors. Every child
+must export declared `endings`; `on` must handle exactly those names. A declared
+`failed` ending is a normal event the parent can route on. An exception in the
+child fails the parent's use state with the child's error.
+
+`prepareMachineRun` recursively imports the modules in `uses` without calling
+child factories. It rejects unknown selectors, children without endings, cycles
+(including paths that resolve to the same file), and more than three child
+levels: parent → child → grandchild → great-grandchild is allowed; one more is
+not. It checks the parent's use states, including nested states, at prepare.
+A child's own use states and ending states are checked when that child is built
+at entry. This lets factories depend on runtime input without being built early.
+
+At each entry, `input()` reads the parent's current working data and returns JSON
+input. The child factory receives that value, its own primitives and its own
+`p.data()` storage. Its ending becomes the parent's event `type`, and its workflow
+output becomes `event.output`, checked against the ending's output schema when
+present. Existing Machines with declared endings can be used unchanged.
+
+Children execute in the same process and share the parent's Agent runners,
+Human runner, update reporter and usage-limit policy. Every child's declared
+Agent roles plus `default` are required at prepare; role names and Agent overrides
+are shared across the entire composition.
+
+Sleeping through a child is not supported yet. In a sleeping run, a child's timed
+wait, retry wait or Human request fails the use state with that error. Without
+sleep, Human requests use the parent's Human runner. Direct `run()` cannot load
+children: prepare the parent with `prepareMachineRun` and call its `start()`.
+
 ## Saved working data
 
 Use `p.data()` once per factory call for mutable working data that must survive a
@@ -213,7 +282,8 @@ repeat after a crash; make its effects safe to repeat.
 ## Events and Human input
 
 An Operation or Agent returns `{ type: "eventName", ...data }`. Its state maps
-that type to a target. An unexpected event fails the run. Human returns
+that type to a target. An unexpected Operation event fails the run; an unexpected
+Agent event starts the recovery described below. Human returns
 `{ type: "submitted", value: response }`; use an XState transition action or guard
 to inspect `event.value`.
 
@@ -231,6 +301,46 @@ Suggestions preserve free-form input. Explicit choices are restrictive and are
 validated by the runtime across terminal, injected, Pi, and MCP Human runners.
 Both properties cannot be supplied together. Terminal selectors support arrow
 keys; piped input stays plain text.
+
+## Agents
+
+An Agent that throws or returns no valid outcome is asked once more by default.
+The second prompt includes the original assignment and a line explaining that
+"the last attempt returned no outcome", with the failure reason. A valid event,
+including `blocked`, takes its declared transition immediately. Set `reask: 0`
+to skip this extra ask; only `0` and `1` are accepted. Each entry into the state
+has a fresh allowance. Partial work remains in the workspace, so Agents should
+inspect it before continuing.
+
+Name a fallback role when a different Agent could finish the same assignment
+if the primary role cannot return an outcome:
+
+```ts
+work: agent(
+  "Implement the change",
+  { completed: "verify", blocked: "askOwner" },
+  { using: "implementer", fallback: "implementerFallback" },
+),
+```
+
+After the re-ask fails, `implementerFallback` is asked once. With `reask: 0`, it
+is asked immediately after the first failure. Its valid answer takes the same
+transitions; its failure fails the state. The fallback must name a different
+role from `using` (which defaults to `default`). Declare it in `agentRoles` and
+bind it through presets like any other role; `requiredAgentNames` includes it,
+and missing bindings fail before execution. Use explicit workflow states when
+escalation should follow a valid answer such as `changesRequested`.
+
+The state's `fallback` names a **role**. A preset's `fallback` list names other
+**presets** that may serve the same role at a usage limit. Preset swapping and
+waiting run first, as usual. If they end with a usage-limit error, the state
+asks its fallback role once, without re-asking the primary role. Without a role
+fallback, that error fails the state. `onLimit`, when set, takes priority over
+both forms of fallback and delivers the limit event as before.
+
+Re-asks and role handoffs emit `{ type: "attempt", role, text }` Agent updates.
+The CLI prints them, and run status publishes the latest attempt for the current
+state, so a person can see which role is answering.
 
 Here is a complete Agent/Human feedback loop. Save as `.machines/review-task.ts`:
 
@@ -317,8 +427,8 @@ fallback and waiting apply. With `onLimit`, the role's bound preset is tried
 alone: no fallback takes over, the state does not wait, and no swap or wait is
 reported. Under the launcher, a preset that another state of the same run
 already found limited delivers the event without being asked again. Any other
-failure still fails the state. The event is plain JSON, so a transition action can keep it for a later
-prompt or the Machine's output. Direct `run()` callers get the same event from
+failure uses the re-ask and role fallback described above. The event is plain
+JSON, so a transition action can keep it for a later prompt or the Machine's output. Direct `run()` callers get the same event from
 their own runners.
 
 ## Agent presets

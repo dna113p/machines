@@ -1,5 +1,19 @@
 import { pathToFileURL } from "node:url";
 
+/** Static dependencies let prepare inspect composition without running factories. */
+export function readUses(loaded: Record<string, unknown>, machinePath: string): readonly string[] {
+  const { uses } = loaded;
+  if (uses === undefined) return [];
+  if (!Array.isArray(uses) || uses.some((selector) =>
+    typeof selector !== "string" || selector.trim() === "" || selector !== selector.trim())) {
+    throw new Error(`Machine "${machinePath}" uses must be an array of non-empty trimmed selectors`);
+  }
+  if (new Set(uses).size !== uses.length) {
+    throw new Error(`Machine "${machinePath}" uses must contain unique selectors`);
+  }
+  return uses;
+}
+
 export async function loadMachineModule(machinePath: string): Promise<Record<string, unknown>> {
   try {
     return await import(pathToFileURL(machinePath).href) as Record<string, unknown>;
