@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { humanChoiceLabel } from "./human-request.ts";
 
 import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -120,8 +121,9 @@ try {
     console.log(`Run ${selector} is not due until ${cause.due}.`);
   } else if (command === "continue" && cause instanceof RunNotAnsweredError) {
     const { human } = cause;
+    if (human.headline !== undefined) console.log(human.headline);
     console.log(`Run ${selector} is waiting for an answer to: ${human.prompt}`);
-    if (human.choices !== undefined) console.log(`Choices: ${human.choices.join(", ")}`);
+    if (human.choices !== undefined) console.log(`Choices: ${human.choices.map(choice => humanChoiceLabel(human, choice)).join(", ")}`);
     console.log(`Answer with: machine respond ${selector} ${human.requestId} <response>`);
     console.log(`Then wake it with: machine continue ${selector}`);
   } else {
@@ -644,10 +646,11 @@ function printRunListing(record: RunStatusRecord | ViewerRun, separate: boolean,
   // A run that finished or lost its process is no longer waiting for anything.
   const limit = recorded === "running" || recorded === "waiting" ? record.limit : undefined;
   const details = human === undefined ? (limit === undefined ? [] : [plain(limit.text)]) : [
+    ...(human.headline === undefined ? [] : [plain(human.headline)]),
     ...human.prompt.split("\n").map(plain).filter((line) => line !== ""),
     ...(human.requestId === undefined ? [] : [`request: ${plain(human.requestId)}`]),
     ...(record.answeredBy === "host" ? ["answered through its host"] : []),
-    ...(human.choices === undefined ? [] : [`choices: ${human.choices.map(plain).join(", ")}`]),
+    ...(human.choices === undefined ? [] : [`choices: ${human.choices.map(choice => plain(humanChoiceLabel(human, choice))).join(", ")}`]),
     ...(human.suggestions === undefined ? [] : [`suggestions: ${human.suggestions.map(plain).join(", ")}`]),
     ...(human.discussion === true && recorded === "waiting" ? ["discussion: questions allowed"] : []),
   ];

@@ -350,9 +350,11 @@ function renderDetail(run, runs, byId) {
       : "Sleeping for an answer. After it is recorded, the run wakes " + wakesWith(run) + ".";
     parts.push(h("div", { class: "banner sleeping", text: note, title: run.due || "" }));
     if (sleepingForAnswer(run) && !needsAnswer(run)) parts.push(h("div", { class: "card block" },
-      h("h2", { text: "Recorded request" }), h("div", { class: "prompt", text: run.human.prompt }),
+      h("h2", { text: "Recorded request" }),
+      run.human.headline ? h("h3", { text: run.human.headline }) : null,
+      h("div", { class: "prompt", text: run.human.prompt }),
       h("div", { class: "hint mono", text: "request: " + run.human.requestId }),
-      run.human.choices ? h("div", { class: "hint", text: "choices: " + run.human.choices.join(", ") }) : null));
+      run.human.choices ? h("div", { class: "hint", text: "choices: " + run.human.choices.map(function (c) { return choiceLabel(run.human, c); }).join(", ") }) : null));
   }
   if (needsAnswer(run) && run.human) parts.push(askCard(run));
   parts.push(graphCard(run));
@@ -372,12 +374,20 @@ function renderDetail(run, runs, byId) {
   drawGraph(run);
 }
 
+function choiceLabel(human, choice) {
+  return choice + (human.recommended === choice ? " (recommended)" : "")
+    + (human.discards && human.discards.indexOf(choice) !== -1 ? " (discards work)" : "");
+}
+
 function askCard(run) {
   var human = run.human;
   var sleeping = run.status === "sleeping";
   var key = run.id + ":" + (human.requestId || "");
   var status = h("div", { class: "hint" });
-  var card = h("div", { class: "card ask" }, h("h2", { text: "The run is asking" }), h("div", { class: "prompt", text: human.prompt }));
+  var card = h("div", { class: "card ask" }, h("h2", { text: human.headline || "The run is asking" }), h("div", { class: "prompt", text: human.prompt }));
+  if ((run.answeredBy === "host" || !human.requestId) && human.choices) {
+    card.appendChild(h("div", { class: "hint", text: "choices: " + human.choices.map(function (c) { return choiceLabel(human, c); }).join(", ") }));
+  }
   if (run.answeredBy === "host") {
     card.appendChild(h("div", { class: "hint", text: "This run is answered through the program hosting it, such as Dispatch or an MCP session. Answer it there." }));
     return card;
@@ -400,7 +410,9 @@ function askCard(run) {
   }
   if (human.choices && human.choices.length) {
     card.appendChild(h("div", { class: "choices" }, human.choices.map(function (c) {
-      return h("button", { class: "btn", text: c, onclick: function () { submit(c, false); } });
+      var button = h("button", { class: "btn", text: choiceLabel(human, c), onclick: function () { submit(c, false); } });
+      return human.effects && Object.prototype.hasOwnProperty.call(human.effects, c)
+        ? h("div", null, button, h("div", { class: "hint", text: human.effects[c] })) : button;
     })));
   } else {
     var box = h("textarea", { placeholder: "Your answer", oninput: function () { drafts[key] = box.value; },

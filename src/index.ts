@@ -1,3 +1,4 @@
+import { copyHumanRequest, humanRequestProblem, type HumanPresentation } from "./human-request.ts";
 import { agentLimitOf, type AgentLimit } from "./agent-limit.ts";
 import { isMachineEnding, type MachineEnding } from "./endings.ts";
 export { defineEndings, type MachineEnding, type MachineEndings, type EndingKind, type RunEnding } from "./endings.ts";
@@ -22,21 +23,27 @@ export interface Event {
   readonly [key: string]: unknown;
 }
 
-export type HumanOptions =
+export type HumanOptions = Pick<HumanPresentation, "headline" | "reason" | "page"> & (
   | {
+    readonly recommended?: string;
+    readonly effects?: Readonly<Record<string, string>>;
+    readonly discards?: readonly string[];
     readonly choices: readonly string[];
     readonly suggestions?: never;
     readonly discussion?: boolean;
   }
   | {
     readonly choices?: never;
+    readonly recommended?: never;
+    readonly effects?: never;
+    readonly discards?: never;
     readonly suggestions?: readonly string[];
     readonly discussion?: boolean;
-  };
+  });
 
 export type HumanPrompt = string | (() => string);
 
-export interface HumanRequest {
+export interface HumanRequest extends HumanPresentation {
   /** A separate question channel; never an approval or a restricted choice. */
   readonly discussion?: boolean;
   readonly prompt: string;
@@ -322,6 +329,9 @@ export function human<const TTransitions extends Readonly<Record<string, unknown
     throw new Error("Human choices must include at least one value");
   }
 
+  const problem = humanRequestProblem(options);
+  if (problem !== undefined) throw new Error(problem);
+
   if (options.discussion && !Object.hasOwn(on, "question")) {
     throw new Error("Discussion-enabled Human states must handle a question event");
   }
@@ -331,14 +341,12 @@ export function human<const TTransitions extends Readonly<Record<string, unknown
     exit: "humanInputFinished",
     invoke: {
       src: "human",
-      input: () => ({
-        prompt: typeof prompt === "function" ? prompt() : prompt,
-        ...(options.discussion ? { discussion: true } : {}),
-        ...(options.choices === undefined ? {} : { choices: options.choices }),
-        ...(options.suggestions === undefined
-          ? {}
-          : { suggestions: options.suggestions }),
-      }),
+      input: () => {
+        const request = { ...options, prompt: typeof prompt === "function" ? prompt() : prompt };
+        const problem = humanRequestProblem(request);
+        if (problem !== undefined) throw new Error(problem);
+        return copyHumanRequest(request);
+      },
       ...actorLifecycle("Human", on),
     },
     on,

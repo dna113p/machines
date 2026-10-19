@@ -33,6 +33,7 @@ import {
   requiredAgentNames,
   run,
 } from "../src/index.ts";
+import { presentation, presentedPrompt } from "./sleep-machines.ts";
 
 test("the command loads one exact Machine file and passes its input", () => {
   const file = "tests/fixtures/input.machine.ts";
@@ -1691,6 +1692,134 @@ test("a Human runner cannot bypass restricted choices", async () => {
     run(example, { human: () => "something else" }),
     /Human failed in state "review": Expected one of: approve, deny/u,
   );
+});
+
+test("a Human runner receives every presentation field and answers with a choice's name", async () => {
+  const requests: import("../src/index.ts").HumanRequest[] = [];
+  const answers: string[] = [];
+  const example = machine({
+    initial: "review",
+    states: {
+      review: human(presentedPrompt, { submitted: { target: "done", actions: ({ event }: { event: Event }) => { answers.push(String(event.value)); } } }, presentation),
+      done: final(),
+    },
+  });
+
+  const result = await run(example, {
+    human: (request) => {
+      requests.push(request);
+      return "approve";
+    },
+  });
+
+  assert.deepEqual(requests, [{ prompt: presentedPrompt, ...presentation }]);
+  assert.deepEqual(answers, ["approve"]);
+  assert.equal(result.value, "done");
+  await assert.rejects(
+    run(example, { human: () => "approve (recommended)" }),
+    /Expected one of: approve, retry, discard/u,
+  );
+});
+
+test("a Human refuses a presentation field that breaks a rule, naming the field", () => {
+  const choices = ["approve", "deny"] as const;
+  const define = (options: Parameters<typeof human>[2]) => () => human("Choose", { submitted: "done" }, options);
+
+  assert.throws(define({ choices, recommended: "maybe" }), /\brecommended\b/u);
+  assert.throws(define({ choices, recommended: "deny", discards: ["deny"] }), /\bdiscards?\b/u);
+  assert.throws(define({ choices, discards: ["maybe"] }), /\bdiscards?\b/u);
+  assert.throws(define({ choices, effects: { maybe: "Does nothing." } }), /\beffects?\b/u);
+  assert.throws(define({ choices, effects: { approve: "x".repeat(161) } }), /\beffects?\b/u);
+  assert.throws(define({ choices, headline: "x".repeat(161) }), /\bheadline\b/u);
+  assert.throws(define({ choices, recommended: "approve", reason: "x".repeat(1001) }), /\breason\b/u);
+  // 200 kB is 200,000 bytes of UTF-8, whatever the number of characters.
+  assert.throws(define({ choices, page: "x".repeat(200_001) }), /\bpage\b/u);
+  assert.throws(define({ choices, page: "é".repeat(100_001) }), /\bpage\b/u);
+
+  // At the limits, each is accepted.
+  define({
+    choices,
+    headline: "x".repeat(160),
+    recommended: "approve",
+    effects: { approve: "x".repeat(160) },
+    discards: ["deny"],
+    reason: "x".repeat(1000),
+    page: "x".repeat(200_000),
+  })();
+});
+
+test("a Human refuses a page that styles, loads or runs anything, and accepts plain markup with a link and Mermaid source", () => {
+  const define = (page: string) => () => human("Choose", { submitted: "done" }, { choices: ["approve", "deny"], page });
+
+  for (const page of [
+    "<script>alert(1)</script>",
+    "<SCRIPT src=x></SCRIPT>",
+    "<style>p { color: red }</style>",
+    '<link rel="stylesheet" href="x.css">',
+    '<meta http-equiv="refresh" content="0">',
+    '<iframe src="https://example.com"></iframe>',
+    '<object data="x.swf"></object>',
+    '<embed src="x.swf">',
+    '<p onclick="go()">Go</p>',
+    '<img src="x" onerror="go()">',
+    '<p style="color: red">Red</p>',
+    '<img src="https://example.com/x.png">',
+  ]) {
+    assert.throws(define(page), /\bpage\b/u, `page was accepted: ${page}`);
+  }
+
+  define(presentation.page)();
+  define('<table><tr><th>Before</th><th>After</th></tr><tr><td data-x="1">one</td><td>two</td></tr></table>')();
+});
+
+test("a Human request without presentation fields is built exactly as before", async () => {
+  const requests: import("../src/index.ts").HumanRequest[] = [];
+  const example = machine({
+    initial: "review",
+    states: {
+      review: human("Choose", { submitted: "done", question: "review" }, { suggestions: ["Use the default"], discussion: true }),
+      done: final(),
+    },
+  });
+  await run(example, { human: (request) => { requests.push(request); return "Use the default"; } });
+  assert.deepEqual(requests, [{ prompt: "Choose", discussion: true, suggestions: ["Use the default"] }]);
+  assert.deepEqual(Object.keys(requests[0]!).sort(), ["discussion", "prompt", "suggestions"]);
+});
+
+test("the CLI's own Human prompt shows the headline and marks the recommended choice, and takes a choice's name", () => {
+  const directory = mkdtempSync(join(tmpdir(), "machines-presented-"));
+  try {
+    const file = join(directory, "presented.machine.ts");
+    writeFileSync(file, [
+      `import { presentation, presentedPrompt } from ${JSON.stringify(resolvePath("tests/sleep-machines.ts"))};`,
+      'export const description = "Asks once with every presentation field.";',
+      "export default ({ final, human, machine }) => machine({",
+      '  initial: "review",',
+      "  states: {",
+      '    review: human(presentedPrompt, { submitted: { target: "done", actions: ({ event }) => { console.log(`submitted "${event.value}"`); } } }, presentation),',
+      "    done: final(),",
+      "  },",
+      "});",
+      "",
+    ].join("\n"));
+    const result = spawnSync(process.execPath, [resolvePath("machine"), "run", file], {
+      cwd: directory, encoding: "utf8", input: "approve\n",
+      env: { ...process.env, MACHINES_RUN_STATUS_DIR: "off" },
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(result.stdout.includes(presentation.headline), result.stdout);
+    assert.ok(result.stdout.includes(presentedPrompt), result.stdout);
+    assert.ok(
+      result.stdout.indexOf(presentation.headline) < result.stdout.indexOf(presentedPrompt),
+      `the headline does not come first: ${result.stdout}`,
+    );
+    assert.match(result.stdout, /approve \(recommended\)/u);
+    assert.doesNotMatch(result.stdout, /(retry|discard) \(recommended\)/u);
+    assert.match(result.stdout, /submitted "approve"/u);
+  } finally {
+    rmSync(directory, { force: true, recursive: true });
+  }
 });
 
 test("a Human fails clearly when terminal input closes", async () => {

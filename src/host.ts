@@ -1,3 +1,4 @@
+import { copyHumanRequest } from "./human-request.ts";
 import { execFileSync, fork, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { resolve as resolvePath } from "node:path";
@@ -79,6 +80,12 @@ export interface MachineHostRun {
 const childArgument = "--machines-child-host";
 
 const humanRequestSchema = v.strictObject({
+  headline: v.optional(v.string()),
+  recommended: v.optional(v.string()),
+  effects: v.optional(v.record(v.string(), v.string())),
+  discards: v.optional(v.array(v.string())),
+  reason: v.optional(v.string()),
+  page: v.optional(v.string()),
   discussion: v.optional(v.boolean()),
   prompt: v.string(),
   choices: v.optional(v.array(v.string())),
@@ -575,12 +582,7 @@ function runChildHost(): void {
         ...(sleep ? {
           onSleep(due: string) { send({ type: "sleep", due }); },
           onHumanSleep(request: HumanRequest) {
-            send({ type: "humanSleep", request: {
-              prompt: request.prompt,
-              ...(request.discussion ? { discussion: true } : {}),
-              ...(request.choices === undefined ? {} : { choices: [...request.choices] }),
-              ...(request.suggestions === undefined ? {} : { suggestions: [...request.suggestions] }),
-            } });
+            send({ type: "humanSleep", request: copyHumanRequest(request) });
           },
         } : {}),
         onEnter(entry) { observed?.onEnter(entry); },
@@ -602,16 +604,7 @@ function runChildHost(): void {
           send({
             type: "humanRequest",
             requestId,
-            request: {
-              prompt: request.prompt,
-              ...(request.discussion ? { discussion: true } : {}),
-              ...(request.choices === undefined
-                ? {}
-                : { choices: [...request.choices] }),
-              ...(request.suggestions === undefined
-                ? {}
-                : { suggestions: [...request.suggestions] }),
-            },
+            request: copyHumanRequest(request),
           });
         }),
       });

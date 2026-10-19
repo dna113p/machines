@@ -27,9 +27,7 @@ export function conversation<const TOn extends Readonly<Record<string, unknown>>
     const original = typeof options.prompt === "function" ? options.prompt() : options.prompt;
     return reply ? `${reply}\n\n${original}` : original;
   };
-  const inputOptions = options.choices !== undefined
-    ? { choices: options.choices, discussion: true }
-    : { suggestions: options.suggestions, discussion: true };
+  const inputOptions = { ...options, discussion: true };
   return {
     initial: "waiting",
     states: {

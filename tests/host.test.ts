@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { test } from "node:test";
 
 import { startMachineHost, type HostedHumanRequest } from "../src/host.ts";
+import { presentation, presentedPrompt } from "./sleep-machines.ts";
 
 const fixture = resolve("tests/fixtures/host.machine.ts");
 
@@ -43,6 +44,22 @@ test("a host starts one Machine, reports state, and accepts Human input", async 
     hosted.respond("approve", request.requestId),
     /Machine host is not waiting for Human input/u,
   );
+});
+
+test("a hosted Human request carries every presentation field, and a choice's name answers it", async (context) => {
+  const human = deferred<HostedHumanRequest>();
+  const hosted = await startMachineHost({
+    machine: resolve("tests/fixtures/host-presented.machine.ts"),
+    onHumanRequest: human.resolve,
+  });
+  context.after(() => hosted.terminate());
+  const request = await human.promise;
+
+  assert.equal(typeof request.requestId, "string");
+  assert.deepEqual(request, { requestId: request.requestId, prompt: presentedPrompt, ...presentation });
+  await assert.rejects(hosted.respond("approve (recommended)", request.requestId), /Expected one of: approve, retry, discard/u);
+  await hosted.respond("approve", request.requestId);
+  assert.deepEqual(await hosted.result, { state: "done" });
 });
 
 test("two hosts keep concurrent Human requests separate", async () => {

@@ -59,6 +59,45 @@ export default function asker(p, input) {
 }
 `;
 
+export const presentedPrompt = "Review stage org-26 stopped: its report was malformed. What should happen?";
+
+/** Every optional presentation field a Human request can carry, as one Human state sets them. */
+export const presentation = {
+  headline: "The work is approved; only the reviewer's report was malformed.",
+  choices: ["approve", "retry", "discard"],
+  recommended: "approve",
+  effects: {
+    approve: "Merges the approved branch as it stands.",
+    discard: "Deletes the worktree and its branch.",
+  },
+  discards: ["discard"],
+  reason: "The reviewer approved the work; only the format of its report failed.",
+  page: '<h2>Where the run stopped</h2>\n<pre class="mermaid">flowchart LR\n  review --> merge\n</pre>\n<p>See <a href="https://example.com/org-26">the ticket</a>.</p>',
+} as const;
+
+/**
+ * Asks with every presentation field, logs the answer, then asks again with the
+ * same fields, logs that answer and finishes.
+ */
+export const presentedSource = `import { appendFileSync } from "node:fs";
+
+export const description = "Asks twice with every presentation field.";
+
+const presentation = ${JSON.stringify(presentation)};
+
+export default function presented(p, input) {
+  const log = ({ event }) => { appendFileSync(input.log, "answer " + event.value + "\\n"); };
+  return p.machine({
+    initial: "ask",
+    states: {
+      ask: p.human(${JSON.stringify(presentedPrompt)}, { submitted: { target: "again", actions: log } }, presentation),
+      again: p.human(${JSON.stringify(presentedPrompt)}, { submitted: { target: "finished", actions: log } }, presentation),
+      finished: p.final(),
+    },
+  });
+}
+`;
+
 /**
  * Pushes, logging each call, and fails until call `input.passAt`. A failed
  * push is retried `input.times` more times, `input.wait` apart. The calls are

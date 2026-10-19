@@ -1,3 +1,4 @@
+import { humanChoiceLabel } from "./human-request.ts";
 import {
   clearScreenDown,
   createInterface,
@@ -24,18 +25,23 @@ export function terminalHuman(request: HumanRequest, signal?: AbortSignal): Prom
   if (signal?.aborted) return Promise.reject(signal.reason);
   const values = request.choices ?? request.suggestions ?? [];
   const allowOther = request.suggestions !== undefined;
+  const prompt = request.headline === undefined ? request.prompt : `${request.headline}\n\n${request.prompt}`;
+  const label = (choice: string) => {
+    const effect = request.effects !== undefined && Object.hasOwn(request.effects, choice) ? request.effects[choice] : undefined;
+    return humanChoiceLabel(request, choice) + (effect === undefined ? "" : ` — ${dim(effect)}`);
+  };
   if (
     values.length > 0
     && process.stdin.isTTY
     && process.stdout.isTTY
     && typeof process.stdin.setRawMode === "function"
   ) {
-    return selectHumanInput(request.prompt, values, allowOther, signal);
+    return selectHumanInput(prompt, values, allowOther, signal, label);
   }
 
   return readFreeformInput(
-    request.prompt,
-    values,
+    prompt,
+    values.map(label),
     allowOther ? "Suggestions" : "Choices",
     signal,
   );
@@ -82,6 +88,7 @@ function selectHumanInput(
   values: readonly string[],
   allowOther: boolean,
   signal?: AbortSignal,
+  label: (choice: string) => string = choice => choice,
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const choices = allowOther ? [...values, "Other…"] : [...values];
@@ -100,7 +107,7 @@ function selectHumanInput(
     function render() {
       clearMenu();
       const lines = choices.map((choice, index) => (
-        index === selected ? `${cyan("❯")} ${cyan(choice)}` : `  ${choice}`
+        index === selected ? `${cyan("❯")} ${cyan(label(choice))}` : `  ${label(choice)}`
       ));
       lines.push(dim("↑↓ select · enter confirm"));
       process.stdout.write(`${lines.join("\n")}\n`);

@@ -24,6 +24,7 @@ import {
 } from "../src/run-status.ts";
 import { readRunWatches } from "../src/run-watch.ts";
 import { MachineSession } from "../src/session.ts";
+import { presentation, presentedPrompt } from "./sleep-machines.ts";
 
 const run = { machine: "ticket", path: "/work/.machines/ticket.ts", cwd: "/work" };
 const fixture = resolve("tests/fixtures/run-status.machine.ts");
@@ -84,6 +85,72 @@ test("a sleeping status record holds either a due time or a Human request, which
   assert.equal(answered?.human?.answer, "approve");
   assert.deepEqual(await read({ ...base, human: { ...human, answer: 1 } }), []);
   assert.deepEqual(await read(base), []);
+});
+
+test("a published Human request keeps every presentation field, and one without them is published as before", async (context) => {
+  const directory = await temporaryDirectory(context);
+  const environment = { MACHINES_RUN_STATUS_DIR: directory };
+  const presented = { prompt: presentedPrompt, requestId: "request-1", ...presentation };
+  const raw = async (id: string) => (JSON.parse(await readFile(join(directory, `${id}.json`), "utf8")) as { human?: unknown }).human;
+
+  createRunStatusPublisher({ ...run, id: "waiting" }, environment).update({ status: "waiting", state: "ask", human: presented });
+  assert.deepEqual(await raw("waiting"), presented);
+  const sleeping = createRunStatusPublisher({ ...run, id: "sleeping" }, environment);
+  sleeping.update({ state: "ask" });
+  sleeping.sleepForAnswer(presented);
+  assert.deepEqual(await raw("sleeping"), presented);
+  const read = new Map(readRunStatuses(directory).map((record) => [record.id, record.human]));
+  assert.deepEqual(read.get("waiting"), presented);
+  assert.deepEqual(read.get("sleeping"), presented);
+
+  // Without the fields, the request is exactly what it was.
+  const plain = { prompt: "Ship it?", requestId: "request-2", choices: ["approve", "deny"], discussion: true };
+  createRunStatusPublisher({ ...run, id: "plain" }, environment).update({ status: "waiting", state: "ask", human: plain });
+  assert.deepEqual(await raw("plain"), plain);
+  assert.deepEqual(Object.keys(await raw("plain") as object).sort(), ["choices", "discussion", "prompt", "requestId"]);
+});
+
+test("reading accepts a record with presentation fields, and skips one where a field has the wrong type", async (context) => {
+  const directory = await temporaryDirectory(context);
+  const human = { prompt: presentedPrompt, requestId: "request-1", ...presentation };
+  await writeRecord(directory, { id: "valid", status: "waiting", human } as Partial<RunStatusRecord>);
+  const invalid: Array<Record<string, unknown>> = [
+    { headline: 7 },
+    { recommended: ["approve"] },
+    { effects: "Merges." },
+    { effects: { approve: 7 } },
+    { discards: "discard" },
+    { discards: [7] },
+    { reason: false },
+    { page: { html: "<p>x</p>" } },
+  ];
+  for (const [index, change] of invalid.entries()) {
+    await writeRecord(directory, { id: `invalid-${index}`, status: "waiting", human: { ...human, ...change } } as unknown as Partial<RunStatusRecord>);
+  }
+
+  const records = readRunStatuses(directory);
+  assert.deepEqual(records.map((record) => record.id), ["valid"]);
+  assert.deepEqual(records[0]!.human, human);
+});
+
+test("a hosted run publishes a waiting request with every presentation field", async (context) => {
+  const directory = await temporaryDirectory(context);
+  publishFrom(context, { MACHINES_RUN_STATUS_DIR: directory });
+  const human = deferred<HostedHumanRequest>();
+  const hosted = await startMachineHost({
+    machine: resolve("tests/fixtures/host-presented.machine.ts"), publishRunStatus: true, onHumanRequest: human.resolve,
+  });
+  context.after(() => hosted.terminate());
+  const request = await human.promise;
+  assert.deepEqual(request, { requestId: request.requestId, prompt: presentedPrompt, ...presentation });
+  await eventually(() => {
+    const [record] = readRunStatuses(directory);
+    assert.equal(record?.status, "waiting");
+    // A hosted request is answered through its host, so the record names no request id, as before.
+    assert.deepEqual(record.human, { prompt: presentedPrompt, ...presentation });
+  });
+  await hosted.respond("approve", request.requestId);
+  assert.deepEqual(await hosted.result, { state: "done" });
 });
 
 test("the directory is the user's own unless MACHINES_RUN_STATUS_DIR moves it or turns publication off", (context) => {

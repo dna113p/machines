@@ -1,3 +1,4 @@
+import { copyHumanRequest, type HumanPresentation } from "./human-request.ts";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, isAbsolute, join, resolve } from "node:path";
@@ -59,7 +60,7 @@ export interface RunStatusRecord {
 }
 
 /** The pending Human request: what a surface needs to show it and to answer it. */
-export interface RunStatusHuman {
+export interface RunStatusHuman extends HumanPresentation {
   readonly prompt: string;
   /** Names this request to `machine respond`; absent when the run takes no outside response. */
   readonly requestId?: string;
@@ -570,6 +571,10 @@ function isRunStatusRecord(value: unknown): value is RunStatusRecord {
     && (human === undefined || (human !== null && typeof human === "object" && typeof human.prompt === "string"
       && isOptionalString(human.requestId) && isOptionalString(human.answer)
       && isOptionalStrings(human.choices) && isOptionalStrings(human.suggestions)
+      && isOptionalString(human.headline) && isOptionalString(human.recommended)
+      && isOptionalString(human.reason) && isOptionalString(human.page) && isOptionalStrings(human.discards)
+      && (human.effects === undefined || (human.effects !== null && typeof human.effects === "object"
+        && !Array.isArray(human.effects) && Object.values(human.effects).every(value => typeof value === "string")))
       && (human.discussion === undefined || typeof human.discussion === "boolean")))
     && (attempt === undefined || (attempt !== null && typeof attempt === "object"
       && typeof attempt.role === "string" && typeof attempt.text === "string"))
@@ -690,11 +695,11 @@ function pickLimit(limit: RunStatusLimit | undefined): RunStatusLimit | undefine
 
 function pickHuman(human: RunStatusHuman | undefined): RunStatusHuman | undefined {
   if (human === undefined) return undefined;
+  const { prompt, discussion, ...fields } = copyHumanRequest(human);
   return {
-    prompt: human.prompt,
+    prompt,
     ...(human.requestId === undefined ? {} : { requestId: human.requestId }),
-    ...(human.choices === undefined ? {} : { choices: [...human.choices] }),
-    ...(human.suggestions === undefined ? {} : { suggestions: [...human.suggestions] }),
-    ...(human.discussion === true ? { discussion: true } : {}),
+    ...fields,
+    ...(discussion === true ? { discussion: true } : {}),
   };
 }

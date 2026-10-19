@@ -19,6 +19,7 @@ import { respondToRun } from "../src/run-inbox.ts";
 import { createRunStatusPublisher, readRunStatuses, trailLimit, type RunStatusRecord } from "../src/run-status.ts";
 import { runUiPage } from "../src/run-ui-page.ts";
 import { parsePanelOutput, readPanelSources, startRunUi, uiProjectDir, uiRuns } from "../src/run-ui.ts";
+import { presentation, presentedPrompt } from "./sleep-machines.ts";
 
 const run = { machine: "ticket", path: "/work/.machines/ticket.ts", cwd: "/work" };
 
@@ -371,6 +372,48 @@ function clock(iso: string) {
   return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
+test("machine ui shows a request's headline and marks its recommended choice, and a choice still answers with its name", async () => {
+  const requests: Array<{ path: string; init: RequestInit }> = [];
+  const page = openPage(runUiPage("page-token"), "http://localhost/", async (path, init) => {
+    requests.push({ path, init });
+    return new Response("{}", { status: 200 });
+  });
+  const stamp = new Date().toISOString();
+  const waiting = {
+    ...run, id: "asking", label: "Asking", status: "waiting", state: "ask",
+    human: { prompt: presentedPrompt, requestId: "request-1", ...presentation },
+    startedAt: stamp, updatedAt: stamp,
+  };
+  page.show({ project: { name: "test" }, directory: "/tmp", panels: [], runs: [waiting] });
+  const detail = page.document.getElementById("detail")!;
+  assert.ok(detail.textContent.includes(presentation.headline), detail.textContent);
+  assert.ok(detail.textContent.includes(presentedPrompt), detail.textContent);
+  assert.ok(
+    detail.textContent.indexOf(presentation.headline) < detail.textContent.indexOf(presentedPrompt),
+    "the headline does not come before the prompt",
+  );
+  const buttons = detail.querySelectorAll("button");
+  const marked = buttons.filter((button) => /recommended/iu.test(button.textContent));
+  assert.equal(marked.length, 1, buttons.map((button) => button.textContent).join(" | "));
+  assert.match(marked[0]!.textContent, /^approve\b/u);
+
+  marked[0]!.click();
+  await new Promise((resolveTurn) => setImmediate(resolveTurn));
+  assert.equal(requests.length, 1);
+  assert.deepEqual(JSON.parse(String(requests[0]!.init.body)), {
+    runId: "asking", requestId: "request-1", response: "approve", question: false,
+  });
+
+  // A request without the fields draws its choices as before, each named exactly.
+  const plain = openPage(runUiPage("page-token"), "http://localhost/", async () => new Response("{}", { status: 200 }));
+  plain.show({ project: { name: "test" }, directory: "/tmp", panels: [], runs: [{
+    ...waiting, human: { prompt: "Ship it?", requestId: "request-2", choices: ["approve", "deny"] },
+  }] });
+  const plainDetail = plain.document.getElementById("detail")!;
+  assert.deepEqual(plainDetail.querySelectorAll("button").map((button) => button.textContent).filter((text) => text === "approve" || text === "deny"), ["approve", "deny"]);
+  assert.doesNotMatch(plainDetail.textContent, /recommended/iu);
+});
+
 test("the sleeping form sends only plain answers and explains host continuation after recording", async () => {
   const requests: Array<{ path: string; init: RequestInit }> = [];
   const page = openPage(runUiPage("page-token"), "http://localhost/", async (path, init) => {
@@ -661,4 +704,24 @@ test("machine ui draws a running child's states inside its use state and marks t
   // The run's card names the nested path.
   const card = [...runSections(page.document).values()].flatMap((cards) => [...cards.values()])[0]!;
   assert.match(card.textContent, /review\.review/u);
+});
+
+test("machine ui keeps presentation visible for recorded requests and requests answered elsewhere", () => {
+  const stamp = new Date().toISOString();
+  for (const variant of [
+    { status: "waiting", answeredBy: "host", answer: undefined },
+    { status: "sleeping", answeredBy: undefined, answer: "approve" },
+  ]) {
+    const page = openPage(runUiPage("page-token"), "http://localhost/", async () => new Response("{}", { status: 200 }));
+    page.show({ project: { name: "test" }, directory: "/tmp", panels: [], runs: [{
+      ...run, id: "asking", state: "ask", ...variant, startedAt: stamp, updatedAt: stamp,
+      human: { prompt: presentedPrompt, requestId: "request-1", ...presentation, answer: variant.answer },
+    }] });
+    const detail = page.document.getElementById("detail")!;
+    assert.ok(detail.textContent.indexOf(presentation.headline) >= 0);
+    assert.ok(detail.textContent.indexOf(presentation.headline) < detail.textContent.indexOf(presentedPrompt));
+    assert.match(detail.textContent, /approve \(recommended\)/u);
+    assert.match(detail.textContent, /discard \(discards work\)/u);
+    assert.ok(!detail.textContent.includes(presentation.page));
+  }
 });
