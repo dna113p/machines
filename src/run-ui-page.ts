@@ -354,7 +354,8 @@ function renderDetail(run, runs, byId) {
       run.human.headline ? h("h3", { text: run.human.headline }) : null,
       h("div", { class: "prompt", text: run.human.prompt }),
       h("div", { class: "hint mono", text: "request: " + run.human.requestId }),
-      run.human.choices ? h("div", { class: "hint", text: "choices: " + run.human.choices.map(function (c) { return choiceLabel(run.human, c); }).join(", ") }) : null));
+      run.human.choices ? h("div", { class: "hint", text: "choices: " + run.human.choices.map(function (c) { return choiceLabel(run.human, c); }).join(", ") }) : null,
+      run.human.suggestions ? h("div", { class: "hint", text: "suggestions: " + run.human.suggestions.map(function (c) { return choiceLabel(run.human, c); }).join(", ") }) : null));
   }
   if (needsAnswer(run) && run.human) parts.push(askCard(run));
   parts.push(graphCard(run));
@@ -387,6 +388,9 @@ function askCard(run) {
   var card = h("div", { class: "card ask" }, h("h2", { text: human.headline || "The run is asking" }), h("div", { class: "prompt", text: human.prompt }));
   if ((run.answeredBy === "host" || !human.requestId) && human.choices) {
     card.appendChild(h("div", { class: "hint", text: "choices: " + human.choices.map(function (c) { return choiceLabel(human, c); }).join(", ") }));
+  }
+  if ((run.answeredBy === "host" || !human.requestId) && human.suggestions) {
+    card.appendChild(h("div", { class: "hint", text: "suggestions: " + human.suggestions.map(function (c) { return choiceLabel(human, c); }).join(", ") }));
   }
   if (run.answeredBy === "host") {
     card.appendChild(h("div", { class: "hint", text: "This run is answered through the program hosting it, such as Dispatch or an MCP session. Answer it there." }));
@@ -421,7 +425,9 @@ function askCard(run) {
     var asQuestion = h("input", { type: "checkbox", id: "q" });
     card.appendChild(box);
     if (human.suggestions && human.suggestions.length) card.appendChild(h("div", { class: "choices" }, human.suggestions.map(function (c) {
-      return h("button", { class: "btn", text: c, onclick: function () { box.value = c; drafts[key] = c; box.focus(); } });
+      var button = h("button", { class: "btn", text: choiceLabel(human, c), onclick: function () { box.value = c; drafts[key] = c; box.focus(); } });
+      return human.effects && Object.prototype.hasOwnProperty.call(human.effects, c)
+        ? h("div", null, button, h("div", { class: "hint", text: human.effects[c] })) : button;
     })));
     card.appendChild(h("div", { class: "row" },
       h("button", { class: "btn primary", text: "Send", onmousedown: function (e) { e.preventDefault(); }, onclick: function () { submit(box.value, human.discussion && !sleeping ? asQuestion.checked : false); } }),

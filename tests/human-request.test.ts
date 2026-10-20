@@ -127,3 +127,27 @@ test("Human page refuses elements whose content a browser reads as raw text", ()
     assert.throws(() => human("Choose", { submitted: "done" }, { page }), /page/u, page);
   }
 });
+
+test("Human suggestion presentation validates membership and names both lists when neither exists", () => {
+  for (const field of ["recommended", "effects", "discards"] as const) {
+    const value = { recommended: "retry", effects: {}, discards: [] }[field];
+    assert.throws(() => human("Choose", { submitted: "done" }, { [field]: value } as HumanOptions),
+      new RegExp(`Human ${field} requires choices or suggestions`));
+  }
+  const suggestions = ["retry", "discard"];
+  for (const [options, message] of [
+    [{ recommended: "unknown" }, "Human recommended must be one of the suggestions"],
+    [{ effects: { unknown: "Does nothing." } }, "Human effects contains an unknown suggestion: unknown"],
+    [{ effects: [] }, "Human effects must map suggestions to sentences"],
+    [{ discards: ["unknown"] }, "Human discards must contain only suggestions"],
+    [{ discards: ["discard", "discard"] }, "Human discards must not repeat a suggestion"],
+    [{ recommended: "retry", discards: ["retry"] }, "Human discards must not include the recommended suggestion"],
+  ] as const) {
+    assert.throws(() => human("Choose", { submitted: "done" }, { suggestions, ...options } as HumanOptions),
+      (error: unknown) => error instanceof Error && error.message.includes(message));
+  }
+  // JavaScript callers with both lists retain choices precedence.
+  assert.throws(() => human("Choose", { submitted: "done" }, {
+    choices: ["approve"], suggestions, recommended: "retry",
+  } as unknown as HumanOptions), /Human recommended must be one of the choices/u);
+});

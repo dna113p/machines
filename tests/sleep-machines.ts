@@ -355,3 +355,16 @@ export default () => ({
   },
 });
 `;
+
+export const suggestedPresentation = {
+  headline: "The work needs another review round.",
+  suggestions: ["more rounds", "stop", "discard"],
+  recommended: "more rounds",
+  effects: {
+    "more rounds": "Continues review until the work is finished.",
+    discard: "Deletes the worktree and its branch.",
+  },
+  discards: ["discard"],
+} as const;
+
+export const suggestedSource = presentedSource.replace(JSON.stringify(presentation), JSON.stringify(suggestedPresentation));

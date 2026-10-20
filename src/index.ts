@@ -39,9 +39,9 @@ export type HumanOptions = {
   }
   | {
     readonly choices?: never;
-    readonly recommended?: never;
-    readonly effects?: never;
-    readonly discards?: never;
+    readonly recommended?: string;
+    readonly effects?: Readonly<Record<string, string>>;
+    readonly discards?: readonly string[];
     readonly suggestions?: readonly string[];
     readonly discussion?: boolean;
   });

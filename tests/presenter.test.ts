@@ -388,3 +388,24 @@ test("presentWith failure is reported without blocking, and presenters request r
   assert.equal(requests[0]!.headline, "A question still needs an answer.");
   assert.ok(presenterUpdates(updates).some((text) => text.includes("evidence unavailable")));
 });
+
+test("a presenter can recommend suggestions and drops a recommendation outside them", async () => {
+  const suggestions = ["retry", "stop", "discard"];
+  const definition = machine({
+    initial: "ask",
+    states: {
+      ask: human(prompt, { submitted: "done" }, { suggestions, present: "presenter" }),
+      done: final(),
+    },
+  });
+  const presented = {
+    recommended: "retry", effects: { retry: "Repairs the report." }, discards: ["discard"],
+  };
+  const kept = await observe(definition, () => ({ type: "presented", ...presented }), "something else");
+  assert.equal(kept.snapshot.value, "done");
+  assert.deepEqual(kept.requests, [{ prompt, suggestions, ...presented }]);
+  const dropped = await observe(definition, () => ({ type: "presented", recommended: "unknown" }));
+  assert.equal(dropped.snapshot.value, "done");
+  assert.deepEqual(dropped.requests, [{ prompt, suggestions }]);
+  assert.match(presenterUpdates(dropped.updates).join("\n"), /recommended.*suggestions/u);
+});

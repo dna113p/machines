@@ -352,16 +352,19 @@ A run waiting for Human input is `waiting` and records the pending request in
 ```
 
 The optional presentation fields are `headline` (one sentence, at most 160
-characters), `recommended` (an exact choice name), `effects` (a map from choice
-names to sentences of at most 160 characters), `discards` (choice names that
+characters), `recommended` (an exact choice or suggestion name), `effects` (a map
+from those names to sentences of at most 160 characters), `discards` (names that
 destroy work), `reason` (why the recommendation, at most 1000 characters), and
 `page` (an inert HTML body fragment of at most 200,000 bytes of UTF-8). A discard
-cannot be recommended. These fields travel unchanged in hosted requests, sleeping
+cannot be recommended. `recommended`, `effects` and `discards` name entries in
+`choices`, or in `suggestions` when there are no choices; they require one of
+these lists. These fields travel unchanged in hosted requests, sleeping
 requests and published records, and appear only when set. Readers should ignore
 fields they do not know. Hosts may show the headline first, mark the recommendation
+and discarding entries for both choices and suggestions, show their effects,
 and display the page beside the prompt, or omit the page. The prompt stands alone;
-responses still use the original choice strings. See [Human input](authoring.md#events-and-human-input)
-for validation and page content rules; a host must isolate pages it renders.
+responses still use the original strings, and suggestions still allow free replies.
+See [Human input](authoring.md#events-and-human-input) for validation and page content rules; a host must isolate pages it renders.
 
 `requestId` is new for every request. `choices` restricts the response to those
 values; `suggestions` are offered but any text is accepted; `discussion: true`
