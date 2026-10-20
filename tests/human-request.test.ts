@@ -73,3 +73,57 @@ test("Human page refuses a stray '<' or unbalanced quote that would hide a tag's
     human("Choose", { submitted: "done" }, { page });
   }
 });
+
+test("Human page reads comments as HTML does, so a comment hides no tag", () => {
+  for (const page of [
+    '<!-- <a title=" --><img src=x onerror=alert(1)>"> -->',
+    '<!-- <a title=" <img src=x onerror=alert(1)>">',
+    '<!-- --!><img src=x onerror=alert(1)> -->',
+    '<!--><img src=x onerror=alert(1)>', '<!---><img src=x onerror=alert(1)>',
+    '<!x <a title="><img src=x onerror=alert(1)>">',
+    '<?x <a title="><img src=x onerror=alert(1)>">',
+    '</1 <a title="><img src=x onerror=alert(1)>">',
+    '<svg><![CDATA[x]]></svg>', '<!DOCTYPE html>',
+    '<!--', '<!---',
+  ]) {
+    assert.throws(() => human("Choose", { submitted: "done" }, { page }), /page/u, page);
+  }
+  for (const page of [
+    '<p>a</p><!-- a note --><p>b</p>', '<!----><p>x</p>', '<!--><p>x</p>',
+    '<!---><p>x</p>', '<!----!><p>x</p>',
+    '<!-- <img src=x onerror=alert(1)> --><p>x</p>',
+  ]) {
+    human("Choose", { submitted: "done" }, { page });
+  }
+});
+
+test("Human page reads textarea and title content as text and refuses markup inside them", () => {
+  for (const page of [
+    '<textarea><a title="</textarea><img src=x onerror=alert(1)>"></textarea>',
+    '<textarea><a title="<img src=x onerror=alert(1)>">',
+    '<textarea>plain', '<title>plain', '<textarea/>plain',
+    '<title><b>x</b></title>',
+    '<svg><title><img src=x onerror=alert(1)></title></svg>',
+    '<svg><textarea><img src=x onerror=alert(1)></textarea></svg>',
+    '<textarea>x</textareax>', '<textarea>x</textarea\u00a0>',
+    '<textarea><!-- note --></textarea>', '<title><?x></title>',
+    '<textarea>x</textarea onmouseover=alert(1)>',
+    '<textarea>x</textarea><img src=x onerror=alert(1)>',
+  ]) {
+    assert.throws(() => human("Choose", { submitted: "done" }, { page }), /page/u, page);
+  }
+  for (const page of [
+    '<textarea>a < b and plain text</textarea>', '<title>Plain</title><p>x</p>',
+    '<TEXTAREA>x</TEXTAREA >', '<textarea/>x</textarea>',
+    ...["\t", "\n", "\f", "\r", " ", "/"].map(space => `<title>x</title${space}>`),
+  ]) {
+    human("Choose", { submitted: "done" }, { page });
+  }
+});
+
+test("Human page refuses elements whose content a browser reads as raw text", () => {
+  for (const name of ["noscript", "plaintext", "xmp", "noembed", "noframes"]) {
+    const page = `<${name}>plain</${name}>`;
+    assert.throws(() => human("Choose", { submitted: "done" }, { page }), /page/u, page);
+  }
+});

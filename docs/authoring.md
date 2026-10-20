@@ -352,13 +352,16 @@ the state is defined and again when its request is built at runtime.
 `page` is an HTML body fragment of at most 200,000 bytes of UTF-8. It sets no
 colours or fonts, loads nothing and runs nothing. Put Mermaid source in
 `<pre class="mermaid">` without theme or styling directives. Obvious violations
-are refused: script, style, link, meta, iframe, object, embed, base and font tags;
-html, head or body wrappers; event-handler, style and resource-loading attributes
+are refused: script, style, link, meta, iframe, object, embed, base, font, noscript,
+plaintext, xmp, noembed and noframes tags; html, head or body wrappers;
+event-handler, style and resource-loading attributes
 (including src, srcset, srcdoc, poster, background, action, formaction and data);
 and colour or font attributes. `data-*` attributes are allowed. Only `<a>` may
 have href or xlink:href; javascript, data and vbscript URLs are refused. Ordinary
-links are allowed. These checks are not an HTML sanitizer: a host must isolate
-any page it renders and may omit the page entirely.
+links are allowed. Comments must be closed; `<!` except to open a comment, `<?`
+and `</` without a tag name are refused. Textarea and title must be closed and
+may hold only text, with no markup. These checks are not an HTML sanitizer: a host
+must isolate any page it renders and may omit the page entirely.
 
 A Human state can ask an optional presenter Agent to explain its question before
 it reaches a person:
