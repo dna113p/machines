@@ -19,7 +19,7 @@ import { respondToRun } from "../src/run-inbox.ts";
 import { createRunStatusPublisher, readRunStatuses, trailLimit, type RunStatusRecord } from "../src/run-status.ts";
 import { runUiPage } from "../src/run-ui-page.ts";
 import { parsePanelOutput, readPanelSources, startRunUi, uiProjectDir, uiRuns } from "../src/run-ui.ts";
-import { presentation, presentedPrompt } from "./sleep-machines.ts";
+import { presentation, presentedPrompt, suggestedPresentation } from "./sleep-machines.ts";
 
 const run = { machine: "ticket", path: "/work/.machines/ticket.ts", cwd: "/work" };
 
@@ -724,4 +724,53 @@ test("machine ui keeps presentation visible for recorded requests and requests a
     assert.match(detail.textContent, /discard \(discards work\)/u);
     assert.ok(!detail.textContent.includes(presentation.page));
   }
+});
+
+test("machine ui keeps suggestion presentation visible for recorded requests and requests answered elsewhere", () => {
+  const stamp = new Date().toISOString();
+  for (const variant of [
+    { status: "waiting", answeredBy: "host", answer: undefined },
+    { status: "sleeping", answeredBy: undefined, answer: "approve" },
+  ]) {
+    const page = openPage(runUiPage("page-token"), "http://localhost/", async () => new Response("{}", { status: 200 }));
+    page.show({ project: { name: "test" }, directory: "/tmp", panels: [], runs: [{
+      ...run, id: "asking", state: "ask", ...variant, startedAt: stamp, updatedAt: stamp,
+      human: { prompt: presentedPrompt, requestId: "request-1", ...suggestedPresentation, answer: variant.answer },
+    }] });
+    const detail = page.document.getElementById("detail")!;
+    assert.ok(detail.textContent.indexOf(suggestedPresentation.headline) >= 0);
+    assert.ok(detail.textContent.indexOf(suggestedPresentation.headline) < detail.textContent.indexOf(presentedPrompt));
+    assert.match(detail.textContent, /suggestions: more rounds \(recommended\)/u);
+    assert.match(detail.textContent, /discard \(discards work\)/u);
+  }
+});
+
+test("machine ui labels suggestions and their effects while sending the bare suggestion", async () => {
+  const requests: Array<{ path: string; init: RequestInit }> = [];
+  const page = openPage(runUiPage("page-token"), "http://localhost/", async (path, init) => {
+    requests.push({ path, init });
+    return new Response("{}", { status: 200 });
+  });
+  const stamp = new Date().toISOString();
+  page.show({ project: { name: "test" }, directory: "/tmp", panels: [], runs: [{
+    ...run, id: "asking", status: "waiting", state: "ask", startedAt: stamp, updatedAt: stamp,
+    human: { prompt: presentedPrompt, requestId: "request-1", ...suggestedPresentation },
+  }] });
+  const detail = page.document.getElementById("detail")!;
+  const buttons = detail.querySelectorAll("button");
+  const marked = buttons.filter((button) => /recommended/u.test(button.textContent));
+  assert.equal(marked.length, 1);
+  assert.equal(marked[0]!.textContent, "more rounds (recommended)");
+  assert.ok(detail.textContent.includes(suggestedPresentation.effects["more rounds"]));
+  assert.ok(detail.textContent.includes(suggestedPresentation.effects.discard));
+  assert.ok(buttons.some((button) => button.textContent === "discard (discards work)"));
+  marked[0]!.click();
+  assert.equal(requests.length, 0, "a suggestion fills the answer without submitting");
+  assert.equal(detail.querySelectorAll("textarea")[0]!.value, "more rounds");
+  buttons.find((button) => button.textContent === "Send")!.click();
+  await new Promise((resolveTurn) => setImmediate(resolveTurn));
+  assert.equal(requests.length, 1);
+  assert.deepEqual(JSON.parse(String(requests[0]!.init.body)), {
+    runId: "asking", requestId: "request-1", response: "more rounds", question: false,
+  });
 });

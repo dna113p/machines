@@ -340,11 +340,13 @@ human("The review approved the work but returned a malformed report. Choose the 
 ```
 
 `headline` and each `effects` value must be a non-empty sentence on one line,
-at most 160 characters. `recommended` must exactly match a choice. `effects`
-maps some or all choice names to sentences describing what choosing them does.
-`discards` lists the choices that destroy work; entries must be distinct choice
-names, and none can be recommended. These three fields require `choices` and
-cannot accompany `suggestions`. `reason` explains the recommendation, requires
+at most 160 characters. `recommended` must exactly match an entry in `choices`,
+or in `suggestions` when there are no choices. `effects` maps some or all names
+from that list to sentences describing what selecting them does. `discards`
+lists entries that destroy work; names must be distinct, and none can be
+recommended. These three fields require `choices` or `suggestions`; with neither
+list they are refused. Suggestions still accept a free reply, and answers are
+matched exactly as before. `reason` explains the recommendation, requires
 `recommended`, and contains 1–1000 characters. All six fields are optional and
 fixed values, not functions. Invalid fields fail with a definition error when
 the state is defined and again when its request is built at runtime.

@@ -34,7 +34,7 @@ import {
   requiredAgentNames,
   run,
 } from "../src/index.ts";
-import { presentation, presentedPrompt } from "./sleep-machines.ts";
+import { presentation, presentedPrompt, suggestedPresentation } from "./sleep-machines.ts";
 
 test("the command loads one exact Machine file and passes its input", () => {
   const file = "tests/fixtures/input.machine.ts";
@@ -2070,4 +2070,39 @@ test("a present role must be declared optional, and an optional role cannot run 
     assert.match(message, /\bpresenter\b/u, message);
     assert.match(message, /\boptional\b/u, message);
   }
+});
+
+test("a Human publishes suggestion presentation and preserves suggested and free replies verbatim", async () => {
+  for (const answer of ["more rounds", "something else", "more rounds (recommended)", "More rounds"]) {
+    const answers: unknown[] = [];
+    const example = machine({
+      initial: "review",
+      states: {
+        review: human(presentedPrompt, { submitted: { target: "done", actions: ({ event }: { event: Event }) => { answers.push(event.value); } } }, suggestedPresentation),
+        done: final(),
+      },
+    });
+    const result = await run(example, { human: (request) => {
+      assert.deepEqual(request, { prompt: presentedPrompt, ...suggestedPresentation });
+      return answer;
+    } });
+    assert.equal(result.value, "done");
+    assert.deepEqual(answers, [answer]);
+  }
+});
+
+test("Human suggestion presentation enforces sentence limits and accepts their boundaries", () => {
+  const suggestions = ["approve", "deny"];
+  for (const [field, extra] of [
+    ["effects", { effects: { approve: "x".repeat(161) } }],
+    ["headline", { headline: "x".repeat(161) }],
+    ["reason", { recommended: "approve", reason: "x".repeat(1001) }],
+    ["page", { page: "é".repeat(100_001) }],
+  ] as const) {
+    assert.throws(() => human("Choose", { submitted: "done" }, { suggestions, ...extra }), new RegExp(field));
+  }
+  human("Choose", { submitted: "done" }, {
+    suggestions, recommended: "approve", effects: { approve: "x".repeat(160) },
+    headline: "x".repeat(160), discards: ["deny"], reason: "x".repeat(1000), page: "x".repeat(200_000),
+  });
 });

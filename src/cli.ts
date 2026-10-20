@@ -124,6 +124,7 @@ try {
     if (human.headline !== undefined) console.log(human.headline);
     console.log(`Run ${selector} is waiting for an answer to: ${human.prompt}`);
     if (human.choices !== undefined) console.log(`Choices: ${human.choices.map(choice => humanChoiceLabel(human, choice)).join(", ")}`);
+    if (human.suggestions !== undefined) console.log(`Suggestions: ${human.suggestions.map(suggestion => humanChoiceLabel(human, suggestion)).join(", ")}`);
     console.log(`Answer with: machine respond ${selector} ${human.requestId} <response>`);
     console.log(`Then wake it with: machine continue ${selector}`);
   } else {
@@ -651,7 +652,7 @@ function printRunListing(record: RunStatusRecord | ViewerRun, separate: boolean,
     ...(human.requestId === undefined ? [] : [`request: ${plain(human.requestId)}`]),
     ...(record.answeredBy === "host" ? ["answered through its host"] : []),
     ...(human.choices === undefined ? [] : [`choices: ${human.choices.map(choice => plain(humanChoiceLabel(human, choice))).join(", ")}`]),
-    ...(human.suggestions === undefined ? [] : [`suggestions: ${human.suggestions.map(plain).join(", ")}`]),
+    ...(human.suggestions === undefined ? [] : [`suggestions: ${human.suggestions.map(suggestion => plain(humanChoiceLabel(human, suggestion))).join(", ")}`]),
     ...(human.discussion === true && recorded === "waiting" ? ["discussion: questions allowed"] : []),
   ];
   if ((recorded === "running" || recorded === "waiting") && record.attempt) details.push(plain(record.attempt.text));

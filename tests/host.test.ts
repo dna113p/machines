@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { test } from "node:test";
 
 import { startMachineHost, type HostedHumanRequest } from "../src/host.ts";
-import { presentation, presentedPrompt } from "./sleep-machines.ts";
+import { presentation, presentedPrompt, suggestedPresentation } from "./sleep-machines.ts";
 
 const fixture = resolve("tests/fixtures/host.machine.ts");
 
@@ -295,4 +295,18 @@ test("parallel filesystem Operations deliver completion before exit is reported"
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
   const runs = await Promise.all(hosts.map(host => host.result));
   for (const result of runs) assert.deepEqual(result, {state: "done", output: {written: true}});
+});
+
+test("a hosted Human request carries suggestion presentation and accepts a free reply", async (context) => {
+  const human = deferred<HostedHumanRequest>();
+  const hosted = await startMachineHost({
+    machine: resolve("tests/fixtures/host-suggested.machine.ts"),
+    onHumanRequest: human.resolve,
+  });
+  context.after(() => hosted.terminate());
+  const request = await human.promise;
+  assert.equal(typeof request.requestId, "string");
+  assert.deepEqual(request, { requestId: request.requestId, prompt: presentedPrompt, ...suggestedPresentation });
+  await hosted.respond("something else", request.requestId);
+  assert.deepEqual(await hosted.result, { state: "done" });
 });

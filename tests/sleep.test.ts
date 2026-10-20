@@ -11,7 +11,7 @@ import { test, type TestContext } from "node:test";
 import { readRunStatuses, type RunStatusRecord } from "../src/run-status.ts";
 import {
   askerPrompt, askerSource, briefedAgentsSource, briefedFirstPrompt, briefedHeadlines, briefedSecondPrompt, briefedSource, briefedSummary,
-  presentation, presentedPrompt, presentedSource, retrierSource, sleeperSource,
+  presentation, presentedPrompt, presentedSource, retrierSource, sleeperSource, suggestedPresentation, suggestedSource,
 } from "./sleep-machines.ts";
 
 /** What a sleeping record adds, read loosely so the test names only what the ticket asks. */
@@ -671,4 +671,68 @@ test("a checkpoint written before presenters still continues, and the next Human
   answerAndContinue(project, record.id, "skip");
   assert.deepEqual(logLines(project), ["answer hold", "answer skip"]);
   assert.equal(onlyRecord(project).status, "completed");
+});
+
+test("a sleeping run publishes suggestion presentation, checkpoints its Human state, and continues with a free reply", async (context) => {
+  const project = await createProject(context, { every: "1h", checks: 1 });
+  writeFileSync(join(project.project, ".machines", "presented.ts"), suggestedSource);
+  const ran = cli(project, ["run", "presented", "--sleep", "--input-file", project.inputFile], {}, askerTimeout);
+  assert.equal(ran.error, undefined, `the run kept its process open at the Human request: ${String(ran.error)}`);
+  assert.equal(ran.status, 0, ran.stderr);
+
+  // The record's request carries every field as the state set it, and the checkpoint is at the Human state.
+  const record = onlyRecord(project);
+  assert.deepEqual({ status: record.status, state: record.state }, { status: "sleeping", state: "ask" });
+  const requestId = record.human?.requestId;
+  assert.equal(typeof requestId, "string");
+  assert.deepEqual(record.human, { prompt: presentedPrompt, requestId, ...suggestedPresentation });
+  const checkpoint = readCheckpoint(project, record.id);
+  assert.deepEqual({ value: checkpoint.state.value, kind: checkpoint.state.kind, sleep: checkpoint.sleep }, { value: "ask", kind: "human", sleep: true });
+
+  // machine runs shows the headline and marks the recommended choice.
+  const listed = cli(project, ["runs"], {}, askerTimeout);
+  assert.equal(listed.status, 0, listed.stderr);
+  const block = runBlocks(listed.stdout).get(record.id) ?? [];
+  assert.ok(block.includes(suggestedPresentation.headline), listed.stdout);
+  assert.ok(block.includes(presentedPrompt), listed.stdout);
+  assert.ok(block.some((line) => line.startsWith("suggestions: ") && line.includes("more rounds (recommended)")), listed.stdout);
+  assert.ok(!block.some((line) => /(stop|discard) \(recommended\)/u.test(line)), listed.stdout);
+
+  assert.ok(block.some((line) => line.includes("discard (discards work)")), listed.stdout);
+
+  // Unanswered: continue shows the headline and the recommended choice, and changes nothing.
+  const asleep = statusFiles(project);
+  const early = cli(project, ["continue", record.id], {}, askerTimeout);
+  assert.equal(early.status, 0, early.stderr);
+  const said = `${early.stdout}${early.stderr}`;
+  assert.ok(said.includes(suggestedPresentation.headline), `the headline is not reported: ${said}`);
+  assert.ok(said.includes(presentedPrompt), `the prompt is not reported: ${said}`);
+  assert.match(said, /more rounds \(recommended\)/u);
+  assert.deepEqual(statusFiles(project), asleep);
+  assert.deepEqual(logLines(project), []);
+
+  // A free reply is preserved as before.
+  const answered = cli(project, ["respond", record.id, requestId!, "something else"], {}, askerTimeout);
+  assert.equal(answered.status, 0, answered.stderr);
+  assert.equal(onlyRecord(project).human?.answer, "something else");
+
+  // Continuing takes the answer and sleeps at the second ask, which carries the same fields.
+  const woken = cli(project, ["continue", record.id], {}, askerTimeout);
+  assert.equal(woken.error, undefined, `continue kept its process open: ${String(woken.error)}`);
+  assert.equal(woken.status, 0, woken.stderr);
+  assert.deepEqual(logLines(project), ["answer something else"]);
+  const again = onlyRecord(project);
+  assert.deepEqual({ id: again.id, status: again.status, state: again.state }, { id: record.id, status: "sleeping", state: "again" });
+  const secondId = again.human?.requestId;
+  assert.equal(typeof secondId, "string");
+  assert.notEqual(secondId, requestId);
+  assert.deepEqual(again.human, { prompt: presentedPrompt, requestId: secondId, ...suggestedPresentation });
+  assert.equal(readCheckpoint(project, record.id).state.kind, "human");
+
+  const second = cli(project, ["respond", record.id, secondId!, "discard"], {}, askerTimeout);
+  assert.equal(second.status, 0, second.stderr);
+  const done = cli(project, ["continue", record.id], {}, askerTimeout);
+  assert.equal(done.status, 0, done.stderr);
+  assert.deepEqual(logLines(project), ["answer something else", "answer discard"]);
+  assert.deepEqual({ status: onlyRecord(project).status, state: onlyRecord(project).state }, { status: "completed", state: "finished" });
 });

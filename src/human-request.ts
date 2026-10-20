@@ -15,32 +15,34 @@ function shortSentence(value: unknown): boolean {
     && !/[\r\n\u2028\u2029]/u.test(value);
 }
 
-export function humanRequestProblem(request: HumanPresentation & { readonly choices?: readonly string[] }): string | undefined {
+export function humanRequestProblem(request: HumanPresentation & { readonly choices?: readonly string[]; readonly suggestions?: readonly string[] }): string | undefined {
   if (request.headline !== undefined && !shortSentence(request.headline)) {
     return "Human headline must be a non-empty sentence of at most 160 characters on one line";
   }
+  const values = request.choices ?? request.suggestions;
+  const name = request.choices === undefined ? "suggestion" : "choice";
   for (const field of ["recommended", "effects", "discards"] as const) {
-    if (request[field] !== undefined && request.choices === undefined) return `Human ${field} requires choices`;
+    if (request[field] !== undefined && values === undefined) return `Human ${field} requires choices or suggestions`;
   }
-  if (request.recommended !== undefined && !request.choices?.includes(request.recommended)) {
-    return "Human recommended must be one of the choices";
+  if (request.recommended !== undefined && !values?.includes(request.recommended)) {
+    return `Human recommended must be one of the ${name}s`;
   }
   if (request.effects !== undefined) {
     if (request.effects === null || typeof request.effects !== "object" || Array.isArray(request.effects)) {
-      return "Human effects must map choices to sentences";
+      return `Human effects must map ${name}s to sentences`;
     }
     for (const [choice, effect] of Object.entries(request.effects)) {
-      if (!request.choices?.includes(choice)) return `Human effects contains an unknown choice: ${choice}`;
+      if (!values?.includes(choice)) return `Human effects contains an unknown ${name}: ${choice}`;
       if (!shortSentence(effect)) return "Human effects must contain non-empty sentences of at most 160 characters on one line";
     }
   }
   if (request.discards !== undefined) {
-    if (!Array.isArray(request.discards) || request.discards.some(choice => !request.choices?.includes(choice))) {
-      return "Human discards must contain only choices";
+    if (!Array.isArray(request.discards) || request.discards.some(choice => !values?.includes(choice))) {
+      return `Human discards must contain only ${name}s`;
     }
-    if (new Set(request.discards).size !== request.discards.length) return "Human discards must not repeat a choice";
+    if (new Set(request.discards).size !== request.discards.length) return `Human discards must not repeat a ${name}`;
     if (request.recommended !== undefined && request.discards.includes(request.recommended)) {
-      return "Human discards must not include the recommended choice";
+      return `Human discards must not include the recommended ${name}`;
     }
   }
   if (request.reason !== undefined) {
