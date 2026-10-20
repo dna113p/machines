@@ -61,14 +61,34 @@ export function humanRequestProblem(request: HumanPresentation & { readonly choi
 /** Refuse obvious active content, not a sanitizer. Hosts must still isolate pages. */
 function pageProblem(page: string): string | undefined {
   // Scan like HTML: quotes open only at the start of an attribute value.
-  const starts = /<\/?[a-z]/giu;
+  const starts = /<[!?/a-z]/giu;
   let tag: RegExpExecArray | null;
   while ((tag = starts.exec(page)) !== null) {
-    let i = tag.index + (page[tag.index + 1] === "/" ? 2 : 1);
+    if (page.startsWith("<!--", tag.index)) {
+      const content = tag.index + 4;
+      if (page[content] === ">") starts.lastIndex = content + 1;
+      else if (page.startsWith("->", content)) starts.lastIndex = content + 2;
+      else {
+        // HTML also ends comments at '--!>', regardless of quotes inside them.
+        const ends = /--!?>/gu;
+        ends.lastIndex = content;
+        if (ends.exec(page) === null) return "Human page has an unclosed comment";
+        starts.lastIndex = ends.lastIndex;
+      }
+      continue;
+    }
+    const marker = page[tag.index + 1];
+    if (marker === "!") return 'Human page must not contain "<!" except to open a comment';
+    if (marker === "?") return 'Human page must not contain "<?"';
+    const closing = marker === "/";
+    if (closing && !/[a-z]/iu.test(page[tag.index + 2] ?? "")) {
+      return 'Human page must not contain "</" without a tag name';
+    }
+    let i = tag.index + (closing ? 2 : 1);
     const start = i;
     while (i < page.length && !/[\s/>]/u.test(page[i]!)) i += 1;
     const name = page.slice(start, i).toLowerCase();
-    if (/^(?:script|style|link|meta|iframe|object|embed|base|html|head|body|font)$/u.test(name)) {
+    if (/^(?:script|style|link|meta|iframe|object|embed|base|html|head|body|font|noscript|plaintext|xmp|noembed|noframes)$/u.test(name)) {
       return `Human page must not contain <${name}>`;
     }
     for (;;) {
@@ -115,6 +135,18 @@ function pageProblem(page: string): string | undefined {
       }
     }
     starts.lastIndex = i;
+    if (!closing && (name === "textarea" || name === "title")) {
+      // Refuse markup even in foreign content, where these may not be text-only.
+      // A self-closing slash does not close these elements in HTML.
+      const end = starts.exec(page);
+      if (end === null) return `Human page has an unclosed <${name}>`;
+      const close = page.slice(end.index, end.index + name.length + 2).toLowerCase();
+      if (close !== `</${name}` || !/[\t\n\f\r />]/u.test(page[end.index + name.length + 2] ?? "")) {
+        return `Human page must not contain markup inside <${name}>`;
+      }
+      // Check the closing tag's attributes as usual, then resume after it.
+      starts.lastIndex = end.index;
+    }
   }
   return undefined;
 }
