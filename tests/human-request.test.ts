@@ -55,3 +55,21 @@ test("Human page rejects resource attributes and active links without rejecting 
     page: '<p data-x="1" title="src=x and a > b">&lt;script&gt;</p><a href="/details">Details</a>',
   });
 });
+
+test("Human page refuses a stray '<' or unbalanced quote that would hide a tag's attributes", () => {
+  for (const page of [
+    "<img src=x onerror=alert(1) <>",
+    '<a href="javascript:alert(1)" <>go</a>',
+    '<img src=x onerror=alert(1) a=b">',
+    "<img onerror=alert(1) title='>",
+    // Whitespace around '=' and '/' between attributes do not hide anything either.
+    '<a href = "javascript:alert(1)">go</a>',
+    "<img/onerror=alert(1)>",
+  ]) {
+    assert.throws(() => human("Choose", { submitted: "done" }, { page }), /page/u, page);
+  }
+  // Text that is not a tag is still accepted.
+  for (const page of ["<p>a < b and 3 > 2</p>", "<p>I <3 this</p>", '<p title="a < b">x</p>']) {
+    human("Choose", { submitted: "done" }, { page });
+  }
+});

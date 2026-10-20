@@ -4,7 +4,7 @@ import type { AnyStateMachine, AnyStateNode } from "xstate";
 
 import { discoverMachines } from "./discovery.ts";
 import { readEndings, type MachineEndings } from "./endings.ts";
-import { loadMachineModule, readAgentRoles, readUses, requireMachineDescription } from "./machine-module.ts";
+import { loadMachineModule, readAgentRoles, readOptionalAgentRoles, readUses, requireMachineDescription } from "./machine-module.ts";
 import { machineSourceHash } from "./run-checkpoint.ts";
 
 export interface UseModule {
@@ -12,6 +12,7 @@ export interface UseModule {
   readonly path: string;
   readonly loaded: Record<string, unknown>;
   readonly endings: MachineEndings;
+  readonly optionalAgentRoles: readonly string[];
   readonly agentRoles: Readonly<Record<string, string>>;
   readonly children: ReadonlyMap<string, UseModule>;
 }
@@ -54,8 +55,9 @@ export async function loadUseTree(
       const endings = readEndings(loaded, childPath);
       if (!endings) throw new Error(`Child Machine "${childPath}" must declare endings`);
       const agentRoles = readAgentRoles(loaded, childPath);
+      const optionalAgentRoles = readOptionalAgentRoles(loaded, childPath);
       const nested = await loadUseTree(childPath, readUses(loaded, childPath), location, undefined, [...chain, canonical]);
-      children.set(selector, { path: childPath, sourceHash: machineSourceHash(childPath), loaded, endings, agentRoles, children: nested });
+      children.set(selector, { path: childPath, sourceHash: machineSourceHash(childPath), loaded, endings, agentRoles, optionalAgentRoles, children: nested });
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
       throw new Error(`Machine "${path}"${state ? ` state "${state}"` : " uses"} child "${selector}": ${message}`, { cause });

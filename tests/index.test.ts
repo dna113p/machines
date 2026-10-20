@@ -13,6 +13,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { test } from "node:test";
+import { pathToFileURL } from "node:url";
 
 import { discoverMachines } from "../src/discovery.ts";
 import { loadAgentBindings } from "../src/agent-bindings.ts";
@@ -1941,4 +1942,132 @@ test("a missing target is rejected by XState", () => {
     }),
     /Child state 'missing' does not exist/u,
   );
+});
+
+/** A Machine module that asks one question with a presenter, declaring the presenter role as `roles` says. */
+function presentedModule(name: string, roles: string, extra = ""): string {
+  return [
+    `export const description = "Asks whether to ship, explained by a presenter.";`,
+    `export const agentRoles = { ${roles} };`,
+    extra,
+    `export default function ${name}({ final, human, machine }) {`,
+    "  return machine({ initial: \"ask\", states: {",
+    "    ask: human(\"Ship the release now?\", { submitted: \"done\" }, { choices: [\"ship\", \"hold\"], present: \"presenter\" }),",
+    "    done: final(),",
+    "  } });",
+    "}",
+  ].join("\n");
+}
+
+const optionalPresenter = 'presenter: { description: "Explains a stop to a person", optional: true }';
+
+/** A project directory and an empty home, removed after the test. */
+function presenterProject(t: import("node:test").TestContext): { readonly cwd: string; readonly home: string; readonly machines: string } {
+  const cwd = mkdtempSync(join(tmpdir(), "machines-presenter-"));
+  t.after(() => rmSync(cwd, { force: true, recursive: true }));
+  const home = join(cwd, "home");
+  mkdirSync(home);
+  mkdirSync(join(cwd, ".machines"));
+  return { cwd, home, machines: join(cwd, ".machines") };
+}
+
+async function askedWith(prepared: Awaited<ReturnType<typeof prepareMachineRun>>) {
+  const requests: import("../src/index.ts").HumanRequest[] = [];
+  const snapshot = await prepared.start({ human: (request) => { requests.push(request); return "ship"; } });
+  return { value: snapshot.value, requests };
+}
+
+test("a declared optional presenter is not required: a root Machine prepares without it, and a preset of that name or an --agent override binds it", async (t) => {
+  const bare = presenterProject(t);
+  writeFileSync(join(bare.machines, "briefed.ts"), presentedModule("briefed", optionalPresenter));
+  const plain = await askedWith(await prepareMachineRun({ cwd: bare.cwd, home: bare.home, machine: "briefed" }));
+  assert.deepEqual(plain, { value: "done", requests: [{ prompt: "Ship the release now?", choices: ["ship", "hold"] }] });
+
+  const bound = presenterProject(t);
+  writeFileSync(join(bound.machines, "briefed.ts"), presentedModule("briefed", optionalPresenter));
+  writeFileSync(join(bound.machines, "agents.ts"), [
+    "export default () => ({",
+    "  presenter: { description: 'Presents', runner: () => ({ type: 'presented', headline: 'Explained by the preset.' }) },",
+    "  explainer: { description: 'Explains', runner: () => ({ type: 'presented', headline: 'Explained by the override.' }) },",
+    "});",
+  ].join("\n"));
+  const byPreset = await askedWith(await prepareMachineRun({ cwd: bound.cwd, home: bound.home, machine: "briefed" }));
+  assert.deepEqual(byPreset.requests, [{ prompt: "Ship the release now?", choices: ["ship", "hold"], headline: "Explained by the preset." }]);
+  const byOverride = await askedWith(await prepareMachineRun({
+    cwd: bound.cwd, home: bound.home, machine: "briefed", agents: { presenter: "explainer" },
+  }));
+  assert.deepEqual(byOverride.requests, [{ prompt: "Ship the release now?", choices: ["ship", "hold"], headline: "Explained by the override." }]);
+});
+
+test("a child Machine that declares an optional presenter prepares and runs with nothing bound for it", async (t) => {
+  const project = presenterProject(t);
+  const runtime = JSON.stringify(pathToFileURL(resolvePath("src/index.ts")).href);
+  writeFileSync(join(project.machines, "agents.ts"),
+    "export default () => ({ default: { description: 'Unused', runner: () => ({ type: 'completed' }) } });\n");
+  writeFileSync(join(project.machines, "asker.ts"), [
+    `import { defineEndings } from ${runtime};`,
+    `export const description = "Asks whether to ship, explained by a presenter.";`,
+    `export const agentRoles = { ${optionalPresenter} };`,
+    "export const endings = defineEndings({ asked: { kind: \"succeeded\" } });",
+    "export default function asker({ final, human, machine }) {",
+    "  return machine({ initial: \"ask\", states: {",
+    "    ask: human(\"Ship the release now?\", { submitted: \"asked\" }, { choices: [\"ship\", \"hold\"], present: \"presenter\" }),",
+    "    asked: final(endings.asked),",
+    "  } });",
+    "}",
+  ].join("\n"));
+  writeFileSync(join(project.machines, "parent.ts"), [
+    `export const description = "Runs the asker.";`,
+    "export const uses = [\"asker\"];",
+    "export default function parent({ final, machine, use }) {",
+    "  return machine({ initial: \"delegate\", states: {",
+    "    delegate: use(\"asker\", { input: () => \"\", on: { asked: \"finished\" } }),",
+    "    finished: final(),",
+    "  } });",
+    "}",
+  ].join("\n"));
+
+  const asked = await askedWith(await prepareMachineRun({ cwd: project.cwd, home: project.home, machine: "parent" }));
+  assert.deepEqual(asked, { value: "finished", requests: [{ prompt: "Ship the release now?", choices: ["ship", "hold"] }] });
+});
+
+test("machine list does not count an unbound optional presenter as a missing Agent", async (t) => {
+  const project = presenterProject(t);
+  writeFileSync(join(project.machines, "briefed.ts"), presentedModule("briefed", optionalPresenter));
+  writeFileSync(join(project.machines, "drafted.ts"), presentedModule("drafted", `writer: "Writes the notes", ${optionalPresenter}`));
+
+  const listed = await listMachines({ cwd: project.cwd, home: project.home });
+  assert.deepEqual(listed.map(({ name, agentRoles, missingAgents, error }) => ({ name, agentRoles, missingAgents, error })), [
+    { name: "briefed", agentRoles: { presenter: "Explains a stop to a person" }, missingAgents: [], error: undefined },
+    {
+      name: "drafted",
+      agentRoles: { writer: "Writes the notes", presenter: "Explains a stop to a person" },
+      missingAgents: ["writer"],
+      error: undefined,
+    },
+  ]);
+  const shown = runMachineCommand(["list"], project.cwd, { HOME: project.home, MACHINES_USER_HOME: project.home });
+  assert.equal(shown.status, 0, shown.stderr);
+  assert.match(shown.stdout, /^briefed\t.*\tready$/mu);
+  assert.match(shown.stdout, /^drafted\t.*\tmissing Agents: writer$/mu);
+});
+
+test("a present role must be declared optional, and an optional role cannot run an Agent state", async (t) => {
+  const project = presenterProject(t);
+  writeFileSync(join(project.machines, "agents.ts"),
+    "export default () => ({ presenter: { description: 'Presents', runner: () => ({ type: 'presented' }) } });\n");
+  writeFileSync(join(project.machines, "required.ts"), presentedModule("required", 'presenter: "Explains a stop to a person"'));
+  writeFileSync(join(project.machines, "working.ts"), [
+    `export const description = "Runs an Agent state with an optional role.";`,
+    `export const agentRoles = { ${optionalPresenter} };`,
+    "export default function working({ agent, final, machine }) {",
+    "  return machine({ initial: \"work\", states: { work: agent(\"Work\", { completed: \"done\" }, { using: \"presenter\" }), done: final() } });",
+    "}",
+  ].join("\n"));
+
+  for (const name of ["required", "working"]) {
+    const message = await rejectedMessage(prepareMachineRun({ cwd: project.cwd, home: project.home, machine: name }));
+    assert.match(message, /\bpresenter\b/u, message);
+    assert.match(message, /\boptional\b/u, message);
+  }
 });

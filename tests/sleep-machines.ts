@@ -291,3 +291,67 @@ export default function composer(p, input) {
 }
 `;
 }
+
+export const briefedFirstPrompt = "Ship the release now?";
+export const briefedSecondPrompt = "Tag the release as stable?";
+/** Written by the default Agent before the first question; only the run's history carries it to a presenter. */
+export const briefedSummary = "Wrote the release notes naming three fixes (summary-b41).";
+
+/**
+ * A default Agent writes notes, then two Human states ask in turn, each with
+ * a presenter. The second also gives its presenter the log path through
+ * `presentWith`. Each answer is logged.
+ */
+export const briefedSource = `import { appendFileSync } from "node:fs";
+
+export const description = "Writes notes, then asks twice, each question explained by a presenter.";
+
+export const agentRoles = { presenter: { description: "Explains a stop to a person", optional: true } };
+
+export default function briefed(p, input) {
+  const log = ({ event }) => { appendFileSync(input.log, "answer " + event.value + "\\n"); };
+  return p.machine({
+    initial: "notes",
+    states: {
+      notes: p.agent("Write the release notes.", { completed: "first" }),
+      first: p.human(${JSON.stringify(briefedFirstPrompt)}, { submitted: { target: "second", actions: log } }, {
+        choices: ["ship", "hold"], present: "presenter",
+      }),
+      second: p.human(${JSON.stringify(briefedSecondPrompt)}, { submitted: { target: "finished", actions: log } }, {
+        choices: ["tag", "skip"], present: "presenter", presentWith: () => "Evidence: " + input.log,
+      }),
+      finished: p.final(),
+    },
+  });
+}
+`;
+
+/** The headline the presenter gives each of the briefed Machine's questions. */
+export const briefedHeadlines = {
+  first: "The notes are written; nothing is shipped yet.",
+  second: "The release is shipped; only the tag is left.",
+} as const;
+
+/**
+ * Presets for the briefed Machine. The presenter appends each input it is
+ * given to the file named by PRESENTER_LOG, one JSON string per line.
+ */
+export const briefedAgentsSource = `import { appendFileSync } from "node:fs";
+
+export default () => ({
+  default: {
+    description: "Writes the notes",
+    runner: () => ({ type: "completed", summary: ${JSON.stringify(briefedSummary)} }),
+  },
+  presenter: {
+    description: "Explains a stop to a person",
+    runner: (request) => {
+      appendFileSync(process.env.PRESENTER_LOG, JSON.stringify(request.prompt) + "\\n");
+      const second = request.prompt.includes(${JSON.stringify(briefedSecondPrompt)});
+      return second
+        ? { type: "presented", headline: ${JSON.stringify(briefedHeadlines.second)}, recommended: "tag" }
+        : { type: "presented", headline: ${JSON.stringify(briefedHeadlines.first)}, recommended: "ship" };
+    },
+  },
+});
+`;

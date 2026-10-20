@@ -9,7 +9,10 @@ import { join, resolve } from "node:path";
 import { test, type TestContext } from "node:test";
 
 import { readRunStatuses, type RunStatusRecord } from "../src/run-status.ts";
-import { askerPrompt, askerSource, presentation, presentedPrompt, presentedSource, retrierSource, sleeperSource } from "./sleep-machines.ts";
+import {
+  askerPrompt, askerSource, briefedAgentsSource, briefedFirstPrompt, briefedHeadlines, briefedSecondPrompt, briefedSource, briefedSummary,
+  presentation, presentedPrompt, presentedSource, retrierSource, sleeperSource,
+} from "./sleep-machines.ts";
 
 /** What a sleeping record adds, read loosely so the test names only what the ticket asks. */
 type SleepingRecord = Omit<RunStatusRecord, "status" | "human"> & {
@@ -570,4 +573,102 @@ test("a retrying Operation run with --sleep sleeps between attempts, and each co
     { id: first.record.id, status: "completed", state: "askPush", retry: undefined },
   );
   assert.equal(existsSync(checkpointFile(project, first.record.id)), false);
+});
+
+/** A project with the briefed Machine and its presets, and where its presenter logs each input it is given. */
+async function createBriefedProject(context: TestContext): Promise<Project & { readonly presenterLog: string }> {
+  const project = await createProject(context, { every: "1h", checks: 1 });
+  writeFileSync(join(project.project, ".machines", "briefed.ts"), briefedSource);
+  writeFileSync(join(project.project, ".machines", "agents.ts"), briefedAgentsSource);
+  return { ...project, presenterLog: join(project.root, "presenter.log") };
+}
+
+/** Each input the presenter was given, in order. */
+function presenterInputs(project: { readonly presenterLog: string }): string[] {
+  return existsSync(project.presenterLog)
+    ? readFileSync(project.presenterLog, "utf8").split("\n").filter((line) => line !== "").map((line) => JSON.parse(line) as string)
+    : [];
+}
+
+function briefedCli(project: Project & { readonly presenterLog: string }, args: readonly string[]) {
+  const ran = cli(project, args, { PRESENTER_LOG: project.presenterLog }, askerTimeout);
+  assert.equal(ran.error, undefined, `machine ${args.join(" ")} kept its process open: ${String(ran.error)}`);
+  assert.equal(ran.status, 0, `${ran.stdout}${ran.stderr}`);
+  return ran;
+}
+
+/** Answers the sleeping run's request and continues it. */
+function answerAndContinue(project: Project & { readonly presenterLog: string }, id: string, answer: string): void {
+  const requestId = onlyRecord(project).human?.requestId;
+  assert.equal(typeof requestId, "string");
+  briefedCli(project, ["respond", id, requestId!, answer]);
+  briefedCli(project, ["continue", id]);
+}
+
+test("a sleeping run's presenter runs once before it sleeps, its fields are published, and continuation does not run it again", async (context) => {
+  const project = await createBriefedProject(context);
+  briefedCli(project, ["run", "briefed", "--sleep", "--input-file", project.inputFile]);
+
+  // The presenter ran once, before the run slept, and its fields are in the published request.
+  const record = onlyRecord(project);
+  assert.deepEqual({ status: record.status, state: record.state }, { status: "sleeping", state: "first" });
+  const requestId = record.human?.requestId;
+  assert.deepEqual(record.human, {
+    prompt: briefedFirstPrompt, choices: ["ship", "hold"], requestId, headline: briefedHeadlines.first, recommended: "ship",
+  });
+  assert.equal(presenterInputs(project).length, 1);
+  assert.ok(presenterInputs(project)[0]!.includes(briefedFirstPrompt));
+  // The checkpoint keeps the run's history for a presenter after continuation.
+  assert.ok(readFileSync(checkpointFile(project, record.id), "utf8").includes(briefedSummary), "the checkpoint lost the Agent summary");
+
+  // Continuation takes the answer without presenting the first question again, and presents the second once.
+  answerAndContinue(project, record.id, "ship");
+  assert.deepEqual(logLines(project), ["answer ship"]);
+  const second = onlyRecord(project);
+  assert.deepEqual({ id: second.id, status: second.status, state: second.state }, { id: record.id, status: "sleeping", state: "second" });
+  assert.deepEqual(second.human, {
+    prompt: briefedSecondPrompt, choices: ["tag", "skip"], requestId: second.human?.requestId,
+    headline: briefedHeadlines.second, recommended: "tag",
+  });
+  const inputs = presenterInputs(project);
+  assert.equal(inputs.length, 2);
+  // The second presenter, in a later process, is given the whole run's history and the presentWith text.
+  assert.ok(inputs[1]!.includes(briefedSecondPrompt), inputs[1]);
+  assert.ok(inputs[1]!.includes(briefedSummary), `the Agent summary from before the sleep is missing:\n${inputs[1]}`);
+  assert.ok(inputs[1]!.includes(`Evidence: ${project.log}`), inputs[1]);
+
+  answerAndContinue(project, record.id, "tag");
+  assert.deepEqual(logLines(project), ["answer ship", "answer tag"]);
+  assert.deepEqual({ status: onlyRecord(project).status, state: onlyRecord(project).state }, { status: "completed", state: "finished" });
+  assert.equal(presenterInputs(project).length, 2);
+});
+
+test("a checkpoint written before presenters still continues, and the next Human state is presented", async (context) => {
+  const project = await createBriefedProject(context);
+  briefedCli(project, ["run", "briefed", "--sleep", "--input-file", project.inputFile]);
+  const record = onlyRecord(project);
+  assert.equal(record.state, "first");
+  assert.equal(presenterInputs(project).length, 1);
+
+  // Keep only what a checkpoint held before this change.
+  const file = checkpointFile(project, record.id);
+  const saved = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown> & { state: Record<string, unknown> };
+  const keep = (value: Record<string, unknown>, keys: readonly string[]) =>
+    Object.fromEntries(Object.entries(value).filter(([key]) => keys.includes(key)));
+  const older = {
+    ...keep(saved, ["schemaVersion", "id", "machine", "input", "state", "data", "context", "children", "agents", "home", "cwd", "writtenAt", "sleep"]),
+    state: keep(saved.state, ["value", "kind", "enteredAt", "due", "retry", "path"]),
+  };
+  assert.ok(!JSON.stringify(older).includes(briefedSummary));
+  writeFileSync(file, `${JSON.stringify(older)}\n`);
+
+  answerAndContinue(project, record.id, "hold");
+  const second = onlyRecord(project);
+  assert.deepEqual({ status: second.status, state: second.state }, { status: "sleeping", state: "second" });
+  assert.equal(second.human?.headline, briefedHeadlines.second);
+  assert.equal(presenterInputs(project).length, 2);
+
+  answerAndContinue(project, record.id, "skip");
+  assert.deepEqual(logLines(project), ["answer hold", "answer skip"]);
+  assert.equal(onlyRecord(project).status, "completed");
 });

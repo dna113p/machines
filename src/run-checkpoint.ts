@@ -11,10 +11,11 @@ import { isFileSafeId, isProcessAlive, readRunStatuses, runStatusDirectory, clea
 export interface ChildCheckpoint {
   readonly machine: { readonly name: string; readonly path: string; readonly sourceHash: string };
   readonly input: JsonValue;
-  readonly state: Omit<StateEntry, "context"> & { readonly path: string };
+  readonly state: Omit<StateEntry, "context" | "history"> & { readonly path: string };
   readonly data: Record<string, JsonValue>;
   readonly context: JsonValue;
   readonly children?: readonly [ChildCheckpoint];
+  readonly history?: StateEntry["history"];
 }
 
 export interface RunCheckpoint extends ChildCheckpoint {
@@ -187,6 +188,11 @@ function assertCheckpointLevel(c: Partial<ChildCheckpoint> | null, id: string, c
       || c.state.retry.attempt < 2 || c.state.retry.attempt > c.state.retry.of || c.state.retry.of > 11))
     || (c.state.kind === "wait" && c.state.due === undefined)
     || !c.data || Array.isArray(c.data) || typeof c.data !== "object" || !("context" in c) || !("input" in c)
+    || (c.history !== undefined && (!c.history || typeof c.history !== "object"
+      || !Array.isArray(c.history.trail) || c.history.trail.some((state) => typeof state !== "string")
+      || !Array.isArray(c.history.summaries) || c.history.summaries.some((summary) =>
+        !summary || typeof summary !== "object" || typeof summary.state !== "string"
+        || typeof summary.role !== "string" || typeof summary.summary !== "string")))
     || (child && c.state.kind === "final")
     || (c.children !== undefined && (!childrenAllowed || !Array.isArray(c.children) || c.children.length !== 1 || c.state.kind !== "operation"))) {
     throw new Error(`Cannot continue run "${id}": invalid checkpoint`);

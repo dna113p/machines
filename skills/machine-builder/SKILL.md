@@ -81,6 +81,7 @@ their helpers. Put external work inside Operations or Agent requests so prefligh
 can finish before effects occur. Let XState choose the next state from the event
 returned by a primitive. Use Human `suggestions` when free-form feedback is useful
 and `choices` when only the declared responses are valid.
+Use `present: "presenter"` with an optional Agent role to explain a Human question from the run history; `presentWith` supplies Machine facts.
 
 Verify discovery and bindings, then exercise the intended branches with fake
 Agent runners or injected Human input where possible. A successful run reaches
@@ -128,6 +129,7 @@ error only to end the run hides it.
   [send-back helper](https://github.com/dna113p/machine-shop/blob/main/docs/catalog.md#recovery).
 - A check may be flaky: use Machine Shop's optional
   [single rerun](https://github.com/dna113p/machine-shop/blob/main/docs/catalog.md#recovery).
+- A stop that needs explanation: add an optional Human `present` role; it fills presentation fields without changing the question or blocking it.
 - A decision, scope change, used-up budget, or login: ask a person by
   [sleeping on a Human question](../../docs/integrations.md#continuing-a-run).
 - "This task cannot be done": use a

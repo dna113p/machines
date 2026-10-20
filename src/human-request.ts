@@ -60,20 +60,49 @@ export function humanRequestProblem(request: HumanPresentation & { readonly choi
 
 /** Refuse obvious active content, not a sanitizer. Hosts must still isolate pages. */
 function pageProblem(page: string): string | undefined {
-  // Consume quoted attribute values together, including any embedded '>'.
-  for (const tag of page.matchAll(/<\/?([a-z][\w:-]*)((?:[^"'<>]|"[^"]*"|'[^']*')*)>/giu)) {
-    const name = tag[1]!.toLowerCase();
+  // Scan like HTML: quotes open only at the start of an attribute value.
+  const starts = /<\/?[a-z]/giu;
+  let tag: RegExpExecArray | null;
+  while ((tag = starts.exec(page)) !== null) {
+    let i = tag.index + (page[tag.index + 1] === "/" ? 2 : 1);
+    const start = i;
+    while (i < page.length && !/[\s/>]/u.test(page[i]!)) i += 1;
+    const name = page.slice(start, i).toLowerCase();
     if (/^(?:script|style|link|meta|iframe|object|embed|base|html|head|body|font)$/u.test(name)) {
       return `Human page must not contain <${name}>`;
     }
-    for (const attr of tag[2]!.matchAll(/([^\s/="'<>`]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?/gu)) {
-      const key = attr[1]!.toLowerCase();
+    for (;;) {
+      while (i < page.length && /[\s/]/u.test(page[i]!)) i += 1;
+      if (page[i] === ">") { i += 1; break; }
+      if (i >= page.length) return "Human page has an unclosed tag";
+      const start = i;
+      // A leading '=' is an attribute name character in HTML.
+      i += 1;
+      while (i < page.length && !/[\s/>=]/u.test(page[i]!)) i += 1;
+      const key = page.slice(start, i).toLowerCase();
+      while (i < page.length && /\s/u.test(page[i]!)) i += 1;
+      let value = "";
+      if (page[i] === "=") {
+        i += 1;
+        while (i < page.length && /\s/u.test(page[i]!)) i += 1;
+        const quote = page[i];
+        if (quote === '"' || quote === "'") {
+          const end = page.indexOf(quote, i + 1);
+          if (end < 0) return "Human page has an unclosed tag";
+          value = page.slice(i + 1, end);
+          i = end + 1;
+        } else {
+          const start = i;
+          while (i < page.length && !/[\s>]/u.test(page[i]!)) i += 1;
+          value = page.slice(start, i);
+        }
+      }
       if (key.startsWith("on") || /^(?:style|src|srcset|srcdoc|poster|background|action|formaction|data|color|bgcolor|face)$/u.test(key)) {
         return `Human page must not contain the ${key} attribute`;
       }
       if (key === "href" || key === "xlink:href") {
         if (name !== "a") return `Human page must not contain ${key} on <${name}>`;
-        const href = (attr[2] ?? attr[3] ?? attr[4] ?? "")
+        const href = value
           .replace(/&#(x[\da-f]+|\d+);?/giu, (_, code: string) => {
             const point = code[0]!.toLowerCase() === "x" ? parseInt(code.slice(1), 16) : Number(code);
             return point <= 0x10ffff ? String.fromCodePoint(point) : "\ufffd";
@@ -85,6 +114,7 @@ function pageProblem(page: string): string | undefined {
         if (/^(?:javascript|data|vbscript):/iu.test(href)) return "Human page must not contain an active href";
       }
     }
+    starts.lastIndex = i;
   }
   return undefined;
 }
@@ -108,4 +138,20 @@ export function copyHumanRequest(request: HumanRequest) {
 export function humanChoiceLabel(request: HumanPresentation, choice: string): string {
   return choice + (choice === request.recommended ? " (recommended)" : "")
     + (request.discards?.includes(choice) ? " (discards work)" : "");
+}
+
+/** State fields win; each addition must also be valid alongside them. */
+export function mergePresentation(request: HumanRequest, candidate: Record<string, unknown>): {
+  request: HumanRequest; dropped: readonly string[];
+} {
+  let merged = copyHumanRequest(request);
+  const dropped: string[] = [];
+  for (const field of ["headline", "recommended", "effects", "discards", "reason", "page"] as const) {
+    if (request[field] !== undefined || candidate[field] === undefined) continue;
+    const next = { ...merged, [field]: candidate[field] } as HumanRequest;
+    const problem = humanRequestProblem(next);
+    if (problem) dropped.push(`${field}: ${problem}`);
+    else merged = copyHumanRequest(next);
+  }
+  return { request: merged, dropped };
 }
