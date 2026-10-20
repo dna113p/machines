@@ -360,6 +360,51 @@ have href or xlink:href; javascript, data and vbscript URLs are refused. Ordinar
 links are allowed. These checks are not an HTML sanitizer: a host must isolate
 any page it renders and may omit the page entirely.
 
+A Human state can ask an optional presenter Agent to explain its question before
+it reaches a person:
+
+```ts
+export const agentRoles = {
+  presenter: { description: "Explains Human questions using the run's evidence", optional: true },
+};
+
+human("The review report is malformed. Choose the next step.", { submitted: "decide" }, {
+  choices: ["retry", "stop"],
+  present: "presenter",
+  presentWith: () => `Evidence: ${reportPath}`,
+});
+```
+
+Any role name works. A role used only by `present` must be declared with
+`optional: true`; an optional role cannot also run an `agent()` state. The role
+is bound only when a preset of that name or an `--agent presenter=<preset>`
+override exists. Without a binding the request goes out plain. Direct runtime
+users can inspect `optionalAgentNames(definition)` separately from
+`requiredAgentNames(definition)`.
+
+The presenter receives the request the state built, the Machine description,
+the Mermaid graph with the current state marked, the trail of entered states,
+recent Agent outcome summaries, and the text returned by `presentWith`.
+The runtime retains the last 200 trail entries and five summaries (up to 4,000
+characters each); checkpoints carry these across continuation. Older checkpoints
+without history still continue. Direct `run()` callers can supply `description`.
+The optional facts function runs at presentation time; its text is capped at
+200,000 characters, and a failure is reported without preventing the question.
+
+The Agent returns a `presented` event with any of `headline`, `recommended`,
+`effects`, `discards`, `reason` and `page`. It can only fill fields the state left
+out, using the rules above; it cannot change the prompt, choices, suggestions or
+discussion. Each invalid field is dropped independently. Use a small, cheap model
+when this is a short explanation of facts already in the run, and keep workflow
+decisions in the Machine.
+
+There is one attempt per entry, before publication or Human sleep. A saved answer
+skips presentation on continuation. A throw, missing event or timeout sends the
+question onward with the valid fields or plain, with the fault in Agent updates.
+There is no re-ask, fallback, usage-limit wait or preset swap. The fixed time limit
+is two minutes; a late result is ignored, though the runner cannot be cancelled
+through the current Agent interface.
+
 The terminal, `machine runs` and `machine ui` show the headline before the prompt
 and mark the recommended choice. Presentation labels do not change answer matching.
 

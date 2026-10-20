@@ -434,3 +434,70 @@ async function eventually(assertion: () => void): Promise<void> {
     }
   }
 }
+
+test("presenter checkpoint history survives in-process sleep and continuation, including older checkpoints", async (context) => {
+  const { prepareMachineRun } = await import("../src/launcher.ts");
+  const { checkpointPath } = await import("../src/run-checkpoint.ts");
+  const root = await mkdtemp(join(tmpdir(), "machines-presenter-history-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const directory = join(root, ".machines");
+  const status = join(root, "status");
+  await mkdir(directory);
+  await writeFile(join(root, "package.json"), '{"type":"module"}');
+  await writeFile(join(directory, "agents.ts"), `
+    export const prompts = [];
+    export default () => ({
+      default: { description: "Writes", runner: () => ({ type: "completed", summary: "Approved the release." }) },
+      presenter: { description: "Explains", runner: (request) => {
+        prompts.push(request.prompt);
+        return { type: "presented", headline: "Ready to decide." };
+      } },
+    });
+  `);
+  await writeFile(join(directory, "briefed.ts"), `
+    export const description = "Checks before asking two questions.";
+    export const agentRoles = { presenter: { description: "Explains", optional: true } };
+    export default ({ machine, agent, human, final }) => machine({
+      initial: "work",
+      states: {
+        work: agent("Check", { completed: "first" }),
+        first: human("First?", { submitted: "second" }, { choices: ["yes"], present: "presenter" }),
+        second: human("Second?", { submitted: "done" }, {
+          choices: ["yes"], present: "presenter", presentWith: () => "Second question facts",
+        }),
+        done: final(),
+      },
+    });
+  `);
+  const { prompts } = await import(pathToFileURL(join(directory, "agents.ts")).href) as { prompts: string[] };
+  const location = { machine: "briefed", cwd: root, home: root };
+  const requests: import("../src/index.ts").HumanRequest[] = [];
+  const checkpoint = { directory: status, id: "presenter", sleep: true };
+  const start = await prepareMachineRun(location);
+  await start.start({ checkpoint, onHumanSleep: (request) => requests.push(request) });
+  const saved = JSON.parse(readFileSync(checkpointPath(status, checkpoint.id), "utf8")) as import("../src/run-checkpoint.ts").RunCheckpoint;
+  assert.deepEqual(saved.history, {
+    trail: ["work", "first"],
+    summaries: [{ state: "work", role: "default", summary: "Approved the release." }],
+  });
+  assert.equal(prompts.length, 1);
+  assert.equal(requests[0]!.headline, "Ready to decide.");
+
+  const continued = await prepareMachineRun({ ...location, continueRun: saved });
+  await continued.start({ checkpoint, answer: "yes", onHumanSleep: (request) => requests.push(request) });
+  assert.equal(prompts.length, 2);
+  assert.match(prompts[1]!, /Approved the release/u);
+  assert.match(prompts[1]!, /Second question facts/u);
+  const next = JSON.parse(readFileSync(checkpointPath(status, checkpoint.id), "utf8")) as import("../src/run-checkpoint.ts").RunCheckpoint;
+  assert.deepEqual(next.history?.trail, ["work", "first", "second"]);
+  const finish = await prepareMachineRun({ ...location, continueRun: next });
+  assert.equal((await finish.start({ checkpoint, answer: "yes" })).value, "done");
+  assert.equal(prompts.length, 2);
+
+  const { history: _history, ...older } = saved;
+  const fromOlder = await prepareMachineRun({ ...location, continueRun: older });
+  await fromOlder.start({ checkpoint, answer: "yes", onHumanSleep: (request) => requests.push(request) });
+  assert.equal(prompts.length, 3);
+  assert.doesNotMatch(prompts[2]!, /Approved the release/u);
+  assert.match(prompts[2]!, /Second question facts/u);
+});

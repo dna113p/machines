@@ -50,7 +50,15 @@ export function readAgentRoles(
   }
 
   const roles: Record<string, string> = {};
-  for (const [name, description] of Object.entries(agentRoles)) {
+  for (const [name, declaration] of Object.entries(agentRoles)) {
+    let description: unknown = declaration;
+    if (typeof declaration !== "string") {
+      if (!declaration || typeof declaration !== "object" || Array.isArray(declaration)
+        || declaration.optional !== true) {
+        throw new Error(`Agent role "${name}" in "${machinePath}" must have a description and optional: true`);
+      }
+      description = declaration.description;
+    }
     if (name.trim() === "" || name !== name.trim()) {
       throw new Error(`Machine "${machinePath}" contains a non-trimmed or empty Agent role name`);
     }
@@ -64,4 +72,11 @@ export function readAgentRoles(
     roles[name] = value;
   }
   return roles;
+}
+
+/** Metadata-only readers use the same validated optional declaration as launch. */
+export function readOptionalAgentRoles(loaded: Record<string, unknown>, machinePath: string): readonly string[] {
+  readAgentRoles(loaded, machinePath);
+  return Object.entries(loaded.agentRoles ?? {}).filter(([, value]) => typeof value !== "string")
+    .map(([name]) => name).sort();
 }

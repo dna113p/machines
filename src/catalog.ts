@@ -14,7 +14,7 @@ import { openRouterDecisionAgent, openRouterDecisionProvider } from "./openroute
 import { discoverMachines, machinesUserHome } from "./discovery.ts";
 import type { AgentRunner } from "./index.ts";
 import { readEndings, type MachineEnding } from "./endings.ts";
-import { loadMachineModule, readAgentRoles, requireMachineDescription } from "./machine-module.ts";
+import { loadMachineModule, readAgentRoles, readOptionalAgentRoles, requireMachineDescription } from "./machine-module.ts";
 
 export interface MachineSummary {
   readonly name: string;
@@ -63,6 +63,7 @@ export async function inspectMachines(
       const loaded = await loadMachineModule(found.path);
       const description = requireMachineDescription(loaded, found.path);
       const agentRoles = readAgentRoles(loaded, found.path);
+      const optional = readOptionalAgentRoles(loaded, found.path);
       const endings = readEndings(loaded, found.path);
       if (typeof loaded.default !== "function") {
         throw new Error(`Machine "${found.path}" must default-export a factory`);
@@ -77,7 +78,7 @@ export async function inspectMachines(
           })),
         }),
         missingAgents: Object.keys(agentRoles).filter((name) =>
-          bindings.value !== undefined && !Object.hasOwn(bindings.value.agents, name)),
+          !optional.includes(name) && bindings.value !== undefined && !Object.hasOwn(bindings.value.agents, name)),
         ...(bindings.error === undefined ? {} : { error: bindings.error }),
       };
     } catch (cause) {

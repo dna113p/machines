@@ -1,3 +1,5 @@
+import { presentHumanRequest, type RunHistory } from "./presenter.ts";
+import { machineGraph, statePaths } from "./run-graph.ts";
 import { copyHumanRequest, humanRequestProblem, type HumanPresentation } from "./human-request.ts";
 import { agentLimitOf, type AgentLimit } from "./agent-limit.ts";
 import { isMachineEnding, type MachineEnding } from "./endings.ts";
@@ -23,7 +25,10 @@ export interface Event {
   readonly [key: string]: unknown;
 }
 
-export type HumanOptions = Pick<HumanPresentation, "headline" | "reason" | "page"> & (
+export type HumanOptions = {
+  readonly present?: string;
+  readonly presentWith?: () => string;
+} & Pick<HumanPresentation, "headline" | "reason" | "page"> & (
   | {
     readonly recommended?: string;
     readonly effects?: Readonly<Record<string, string>>;
@@ -137,6 +142,7 @@ export { AgentLimitError, agentLimitOf, type AgentLimit } from "./agent-limit.ts
 
 export {
   machineGraph,
+  machineMermaid,
   statePaths,
   type RunGraph,
   type RunGraphEdge,
@@ -162,6 +168,7 @@ interface RetryInvocation {
 }
 
 export interface StateEntry {
+  readonly history?: RunHistory;
   readonly value: StateValue;
   readonly context: unknown;
   readonly kind: "agent" | "operation" | "human" | "wait" | "final" | "state";
@@ -171,10 +178,11 @@ export interface StateEntry {
 }
 
 export interface RunOptions {
+  readonly description?: string;
   readonly onEnter?: (entry: StateEntry) => void;
   /** Captures mutable working data before XState evaluates a step's input. */
   readonly onBeforeStep?: (context: unknown) => void;
-  readonly continueAt?: { readonly value: StateValue; readonly context: unknown; readonly due?: string; readonly retry?: StateEntry["retry"] };
+  readonly continueAt?: { readonly history?: RunHistory; readonly value: StateValue; readonly context: unknown; readonly due?: string; readonly retry?: StateEntry["retry"] };
   /** Stop at a future timed wait, after its entry has been checkpointed. */
   readonly onSleep?: (due: string) => void;
   /** Stop at a Human request, after its entry has been checkpointed. */
@@ -220,6 +228,11 @@ const machines = setup({
   },
 });
 
+const presentationKey = Symbol("presentation");
+interface HumanInvocation extends HumanRequest {
+  readonly [presentationKey]?: { readonly role: string; readonly facts?: () => string };
+}
+const presentMetaKey = "machines.present";
 const agentMetaKey = "machines.agent";
 const waitMetaKey = "machines.wait";
 const retryMetaKey = "machines.retry";
@@ -325,6 +338,13 @@ export function human<const TTransitions extends Readonly<Record<string, unknown
   on: TTransitions,
   options: HumanOptions = {},
 ) {
+  if (options.present !== undefined && (typeof options.present !== "string"
+    || !options.present.trim() || options.present !== options.present.trim())) {
+    throw new Error("Human present must be a non-empty trimmed role name");
+  }
+  if (options.presentWith !== undefined && (options.present === undefined || typeof options.presentWith !== "function")) {
+    throw new Error("Human presentWith must be a function and requires present");
+  }
   if (options.choices !== undefined && options.choices.length === 0) {
     throw new Error("Human choices must include at least one value");
   }
@@ -337,15 +357,18 @@ export function human<const TTransitions extends Readonly<Record<string, unknown
   }
 
   return {
+    ...(options.present === undefined ? {} : { meta: { [presentMetaKey]: { role: options.present } } }),
     entry: "humanInputStarted",
     exit: "humanInputFinished",
     invoke: {
       src: "human",
-      input: () => {
+      input: (): HumanRequest => {
         const request = { ...options, prompt: typeof prompt === "function" ? prompt() : prompt };
         const problem = humanRequestProblem(request);
         if (problem !== undefined) throw new Error(problem);
-        return copyHumanRequest(request);
+        return { ...copyHumanRequest(request),
+          ...(options.present === undefined ? {} : { [presentationKey]: { role: options.present, facts: options.presentWith } }),
+        };
       },
       ...actorLifecycle("Human", on),
     },
@@ -493,6 +516,19 @@ export function requiredAgentNames(
   return [...names].sort((left, right) => left.localeCompare(right));
 }
 
+/** Presenter-only roles never become required runners. */
+export function optionalAgentNames(definition: AnyStateMachine): readonly string[] {
+  const names = new Set<string>();
+  const visit = (node: AnyStateMachine["root"]) => {
+    const role = (node.meta?.[presentMetaKey] as { role?: string } | undefined)?.role;
+    if (role) names.add(role);
+    Object.values(node.states).forEach(visit);
+  };
+  visit(definition.root);
+  for (const name of requiredAgentNames(definition)) names.delete(name);
+  return [...names].sort();
+}
+
 export function run<TMachine extends AnyStateMachine>(
   definition: TMachine,
   options: RunOptions = {},
@@ -504,6 +540,10 @@ export function run<TMachine extends AnyStateMachine>(
     assertRequiredAgentRunners(definition, agentRunners);
     let waitDue: string | undefined;
     let currentEntry: StateEntry;
+    const trail = [...(options.continueAt?.history?.trail ?? [])];
+    const summaries = [...(options.continueAt?.history?.summaries ?? [])];
+    const history = (): RunHistory => ({ trail: [...trail], summaries: summaries.map((summary) => ({ ...summary })) });
+    const graph = machineGraph(definition);
     const waitUntil = async (due: string, signal: AbortSignal): Promise<void> => {
       if (options.onSleep && Date.parse(due) > Date.now()) {
         options.onSleep(due);
@@ -553,22 +593,42 @@ export function run<TMachine extends AnyStateMachine>(
           await waitUntil(due, signal);
           return { type: "due" };
         }),
-        human: fromPromise<Event, HumanRequest>(async ({ input, signal }) => {
+        human: fromPromise<Event, HumanInvocation>(async ({ input, signal }) => {
           if (answer !== undefined) {
             const submitted = answer;
             answer = undefined;
             return submittedHumanEvent(input, () => submitted);
           }
+          let request: HumanRequest = copyHumanRequest(input);
+          const presenter = input[presentationKey];
+          if (presenter && Object.hasOwn(agentRunners, presenter.role)) {
+            await Promise.resolve();
+            signal.throwIfAborted();
+            let facts: string | undefined;
+            try {
+              facts = presenter.facts?.();
+              if (facts !== undefined && typeof facts !== "string") throw new Error("presentWith must return a string");
+              facts = facts?.slice(0, 200_000);
+            } catch (cause) {
+              options.onAgentUpdate?.({ type: "attempt", role: presenter.role,
+                text: `Presenter presentWith failed: ${cause instanceof Error ? cause.message : String(cause)}` });
+              facts = undefined;
+            }
+            request = await presentHumanRequest({ request, description: options.description, graph,
+              current: statePaths(currentEntry.value).join(", "), history: history(), facts },
+            presenter.role, agentRunners[presenter.role]!, options.onAgentUpdate);
+            signal.throwIfAborted();
+          }
           if (options.onHumanSleep) {
             // As with timed waits, let the entry observer save the checkpoint first.
             await Promise.resolve();
             signal.throwIfAborted();
-            options.onHumanSleep(input);
+            options.onHumanSleep(request);
             queueMicrotask(() => actor.stop());
             await new Promise<void>((done) => signal.addEventListener("abort", () => done(), { once: true }));
             return { type: "submitted" };
           }
-          return submittedHumanEvent(input, options.human ?? terminalHuman);
+          return submittedHumanEvent(request, options.human ?? terminalHuman);
         }),
         ...(Object.keys(agentRunners).length === 0
           ? {}
@@ -576,6 +636,11 @@ export function run<TMachine extends AnyStateMachine>(
             agent: fromPromise<Event, AgentInvocation>(
               ({ input, signal }) => runAgentAttempts(
                 input, agentRunners, options.onAgentUpdate, signal, () => actor.getSnapshot().value,
+                (event, role) => {
+                  if (typeof event.summary !== "string") return;
+                  summaries.push({ state: statePaths(actor.getSnapshot().value).join(", "), role, summary: event.summary.slice(0, 4000) });
+                  if (summaries.length > 5) summaries.shift();
+                },
               ),
             ),
           }),
@@ -624,8 +689,12 @@ export function run<TMachine extends AnyStateMachine>(
       const savedRetry = firstEntry && retryOption ? options.continueAt?.retry : undefined;
       const of = retryOption ? retryOption.times + 1 : undefined;
       const retry = savedRetry && of ? { attempt: Math.min(savedRetry.attempt, of), of } : undefined;
+      for (const path of statePaths(snapshot.value)) {
+        if (trail.at(-1) !== path) trail.push(path);
+      }
+      if (trail.length > 200) trail.splice(0, trail.length - 200);
       firstEntry = false;
-      currentEntry = { value: snapshot.value, context: snapshot.context, kind, enteredAt,
+      currentEntry = { value: snapshot.value, context: snapshot.context, kind, enteredAt, history: history(),
         ...(waitDue === undefined ? {} : { due: waitDue }),
         ...(retry === undefined ? {} : { retry, due: options.continueAt?.due }) };
       options.onEnter?.(currentEntry);
@@ -707,6 +776,7 @@ async function runAgentAttempts(
   report: AgentReporter | undefined,
   signal: AbortSignal,
   state: () => StateValue,
+  onOutcome: (event: Event, role: string) => void,
 ): Promise<Event> {
   const { using, reask, fallback, onLimit, ...request } = input;
   const roles = [using, ...(reask === 1 ? [using] : []), ...(fallback === undefined ? [] : [fallback])];
@@ -737,6 +807,7 @@ async function runAgentAttempts(
         throw new Error(`the runner returned "${onLimit}", which this state reserves for its usage-limit event`);
       }
       assertHandledEvent("Agent", event, transitions, state());
+      onOutcome(event, role);
       return event;
     } catch (cause) {
       signal.throwIfAborted();

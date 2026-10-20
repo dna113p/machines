@@ -8,7 +8,7 @@ import { fallbackPresets, type AgentPreset } from "./agent-bindings.ts";
 import { createLimitMemory, defaultProbeMs, limitAwareRunner, type LimitPolicy } from "./agent-limits.ts";
 import { configuredAgentPresets, type LauncherLocation, type MachineSummary, type AgentPresetSummary } from "./catalog.ts";
 import { queryCatalog } from "./discovery-worker.ts";
-import { loadMachineModule, readAgentRoles, readUses, requireMachineDescription } from "./machine-module.ts";
+import { loadMachineModule, readAgentRoles, readOptionalAgentRoles, readUses, requireMachineDescription } from "./machine-module.ts";
 import { assertUseStates, loadUseTree, usedModules, useStates, type UseModule } from "./composition.ts";
 import { assertEndingOutput, assertEndingStates, readEndings, type MachineEndings } from "./endings.ts";
 export type { LauncherLocation, MachineSummary, AgentPresetSummary } from "./catalog.ts";
@@ -21,6 +21,7 @@ import {
   machine,
   operation,
   requiredAgentNames,
+  optionalAgentNames,
   run,
   wait,
   use,
@@ -80,6 +81,7 @@ export async function prepareMachineRun(
   const loaded = await loadMachineModule(path);
   const description = requireMachineDescription(loaded, path);
   const agentRoles = readAgentRoles(loaded, path);
+  const optional = readOptionalAgentRoles(loaded, path);
   const endings = readEndings(loaded, path);
 
   const { definition, savedData } = await buildDefinition(loaded, path,
@@ -93,15 +95,18 @@ export async function prepareMachineRun(
   const usedAgentRoles = requiredAgentNames(definition);
   const childModules = usedModules(children);
   const requiredRoles = new Set([
-    ...usedAgentRoles, ...Object.keys(agentRoles),
-    ...childModules.flatMap((child) => ["default", ...Object.keys(child.agentRoles)]),
+    ...usedAgentRoles, ...Object.keys(agentRoles).filter((name) => !optional.includes(name)),
+    ...childModules.flatMap((child) => ["default", ...Object.keys(child.agentRoles).filter((name) => !child.optionalAgentRoles.includes(name))]),
   ]);
+  const optionalRoles = new Set([...optional, ...optionalAgentNames(definition),
+    ...childModules.flatMap((child) => child.optionalAgentRoles)]);
+  const allRoles = new Set([...requiredRoles, ...optionalRoles]);
   const overrides = options.agents ?? {};
-  const agents = applyAgentOverrides(path, configured.agents, configured.presets, requiredRoles, overrides);
-  preflightAgentRoles(path, usedAgentRoles, agentRoles, agents);
-  for (const child of childModules) preflightAgentRoles(child.path, ["default"], child.agentRoles, agents);
+  const agents = applyAgentOverrides(path, configured.agents, configured.presets, allRoles, overrides);
+  preflightAgentRoles(path, usedAgentRoles, agentRoles, optional, agents, optionalAgentNames(definition));
+  for (const child of childModules) preflightAgentRoles(child.path, ["default"], child.agentRoles, child.optionalAgentRoles, agents);
   const restored = await restoreChildren(definition, children, options.continueRun, agents);
-  const limitAware = limitAwareAgents(requiredRoles, overrides, configured, limitPolicy(options.agentLimits));
+  const limitAware = limitAwareAgents(new Set([...allRoles].filter((role) => requiredRoles.has(role) || Object.hasOwn(agents, role))), overrides, configured, limitPolicy(options.agentLimits));
 
   let started = false;
   const graph = machineGraph(definition, endings);
@@ -138,6 +143,7 @@ export async function prepareMachineRun(
       };
       return runWithChildren(definition, children, shared, {
         ...runtimeOptions,
+        description,
         ...(restored ? { answer: undefined } : {}),
         ...(runtimeOptions.onSleep ? { onSleep(due: string) {
           if (!checkpoint || !existsSync(checkpointPath(checkpoint.directory, checkpoint.id))) {
@@ -152,7 +158,7 @@ export async function prepareMachineRun(
           runtimeOptions.onHumanSleep?.(request);
         } } : {}),
         agents: { ...agents, ...limitAware },
-        ...(options.continueRun ? { continueAt: { value: options.continueRun.state.value, context: options.continueRun.context,
+        ...(options.continueRun ? { continueAt: { value: options.continueRun.state.value, context: options.continueRun.context, history: options.continueRun.history,
           ...(options.continueRun.state.retry === undefined ? {} : { retry: options.continueRun.state.retry }),
           ...(options.continueRun.state.due === undefined ? {} : { due: options.continueRun.state.due }) } } : {}),
         ...hooks(0, { name: machineName(path), path, sourceHash }, options.input === undefined ? "" : options.input,
@@ -212,7 +218,7 @@ async function restoreChildren(
   assertSavedState(built.definition.root, next.state.value);
   assertEndingStates(built.definition, child.endings, child.path);
   assertUseStates(built.definition, child.path, child.children);
-  preflightAgentRoles(child.path, requiredAgentNames(built.definition), child.agentRoles, agents);
+  preflightAgentRoles(child.path, requiredAgentNames(built.definition), child.agentRoles, child.optionalAgentRoles, agents, optionalAgentNames(built.definition));
   return { ...built, saved: next, child: await restoreChildren(built.definition, child.children, next, agents) };
 }
 
@@ -268,6 +274,7 @@ function checkpointHooks(
           if (!firstEntry) frames.length = depth + 1;
           frames[depth] = captured === null ? null : {
             machine, input, ...captured!,
+            ...(entry.history === undefined ? {} : { history: entry.history }),
             state: { value: entry.value, kind: entry.kind, enteredAt: entry.enteredAt, path: statePaths(entry.value).join(", "),
               ...(entry.retry === undefined ? {} : { retry: entry.retry }),
               ...(entry.due === undefined ? {} : { due: entry.due }) },
@@ -332,7 +339,7 @@ function runWithChildren(
     const { definition, savedData } = restored ?? await buildDefinition(child.loaded, child.path, childInput);
     assertEndingStates(definition, child.endings, child.path);
     assertUseStates(definition, child.path, child.children);
-    preflightAgentRoles(child.path, requiredAgentNames(definition), child.agentRoles, shared.agents ?? {});
+    preflightAgentRoles(child.path, requiredAgentNames(definition), child.agentRoles, child.optionalAgentRoles, shared.agents ?? {}, optionalAgentNames(definition));
     const observation: { value?: StateValue; signal: AbortSignal } = { signal };
     const childGraph = machineGraph(definition, child.endings);
     const reportGraph = (next: RunGraph) => { if (!signal.aborted) grow(path, next); };
@@ -342,8 +349,9 @@ function runWithChildren(
       let slept = false;
       const snapshot = await runWithChildren(definition, child.children, shared, {
         ...shared,
+        description: requireMachineDescription(child.loaded, child.path),
         ...hooks(depth, { name: machineName(child.path), path: child.path, sourceHash: child.sourceHash }, childInput, savedData),
-        ...(restored ? { continueAt: { value: restored.saved.state.value, context: restored.saved.context,
+        ...(restored ? { continueAt: { value: restored.saved.state.value, context: restored.saved.context, history: restored.saved.history,
           ...(restored.saved.state.retry === undefined ? {} : { retry: restored.saved.state.retry }),
           ...(restored.saved.state.due === undefined ? {} : { due: restored.saved.state.due }) },
           ...(!restored.child ? { answer } : {}) } : {}),
@@ -504,8 +512,16 @@ function preflightAgentRoles(
   machinePath: string,
   usedNames: readonly string[],
   declaredRoles: Readonly<Record<string, string>>,
+  optional: readonly string[],
   agents: Readonly<Record<string, AgentRunner>>,
+  presenters: readonly string[] = [],
 ): void {
+  for (const role of presenters) {
+    if (!optional.includes(role)) throw new Error(`Machine "${machinePath}" presenter role "${role}" must be declared optional: true`);
+  }
+  for (const role of usedNames) {
+    if (optional.includes(role)) throw new Error(`Machine "${machinePath}" optional role "${role}" cannot be used by an Agent state`);
+  }
   const undeclared = usedNames.filter(
     (name) => name !== "default" && !Object.hasOwn(declaredRoles, name),
   );
@@ -515,7 +531,7 @@ function preflightAgentRoles(
     );
   }
 
-  const required = new Set([...usedNames, ...Object.keys(declaredRoles)]);
+  const required = new Set([...usedNames, ...Object.keys(declaredRoles).filter((name) => !optional.includes(name))]);
   const missing = [...required].filter((name) => !Object.hasOwn(agents, name));
   if (missing.length === 0) return;
 

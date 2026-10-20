@@ -153,3 +153,16 @@ function dedupe(edges: readonly RunGraphEdge[]): RunGraphEdge[] {
     return true;
   });
 }
+
+/** Safe local node ids and quoted labels keep state names out of Mermaid syntax. */
+export function machineMermaid(graph: RunGraph | undefined, current: string): string | undefined {
+  if (!graph) return undefined;
+  const label = (text: string) => text.replace(/[^a-zA-Z0-9 .,:_-]/gu,
+    (character) => `#${character.codePointAt(0)};`);
+  const ids = new Map(graph.states.map((state, index) => [state.id, `s${index}`]));
+  return [
+    "flowchart TD",
+    ...graph.states.map((state) => `  ${ids.get(state.id)}["${label(`${state.id} (${state.kind}${state.role ? `: ${state.role}` : ""})`)}${state.id === current ? " ← current" : ""}"]${state.id === current ? ":::current" : ""}`),
+    ...graph.edges.map((edge) => `  ${ids.get(edge.from)} -->|"${label(edge.event)}"| ${ids.get(edge.to)}`),
+  ].join("\n");
+}
