@@ -376,6 +376,7 @@ export const agentRoles = {
 human("The review report is malformed. Choose the next step.", { submitted: "decide" }, {
   choices: ["retry", "stop"],
   present: "presenter",
+  presentIn: "./review", // Optional working directory override.
   presentWith: () => `Evidence: ${reportPath}`,
 });
 ```
@@ -386,6 +387,12 @@ is bound only when a preset of that name or an `--agent presenter=<preset>`
 override exists. Without a binding the request goes out plain. Direct runtime
 users can inspect `optionalAgentNames(definition)` separately from
 `requiredAgentNames(definition)`.
+
+The presenter's runner receives the working directory of the process running the
+Machine by default, as CLI-backed presets require. Set `presentIn` to run it in
+another directory, like an Agent state's `cwd`. It requires `present` and a
+non-empty string; whitespace-only values are refused. Relative paths are passed
+as written. `presentIn` is not part of the published Human request.
 
 The presenter receives the request the state built, the Machine description,
 the Mermaid graph with the current state marked, the trail of entered states,
