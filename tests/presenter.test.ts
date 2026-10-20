@@ -108,6 +108,37 @@ test("a presenter's fields are published with the prompt and choices exactly as 
   assert.ok(presenterUpdates(updates).length > 0, JSON.stringify(updates));
 });
 
+test("a presenter's runner runs in the process's working directory when the state sets no presentIn", async () => {
+  const { presenterRequests } = await observe(asking(), () => ({ type: "presented" }));
+  assert.equal(presenterRequests.length, 1);
+  assert.equal(presenterRequests[0]!.cwd, process.cwd());
+});
+
+test("a presenter's runner runs in the state's presentIn", async () => {
+  for (const presentIn of ["/srv/review", "./review"]) {
+    const { presenterRequests, requests } = await observe(asking({ presentIn }), () => ({ type: "presented" }));
+    assert.equal(presenterRequests.length, 1);
+    assert.equal(presenterRequests[0]!.cwd, presentIn);
+    assert.equal(Object.hasOwn(requests[0]!, "presentIn"), false);
+  }
+});
+
+test("a runner that refuses a request without cwd, like the bundled ones, still presents the question", async () => {
+  const presented = {
+    headline: "Only the review report needs repair.",
+    recommended: "retry",
+    effects: { retry: "Asks the reviewer for its report again." },
+    reason: "The review passed but its report was malformed.",
+  };
+  const { snapshot, requests, updates } = await observe(asking(), (request) => {
+    if (!request.cwd) throw new Error("Claude Agent requires a working directory");
+    return { type: "presented", ...presented };
+  });
+  assert.equal(snapshot.value, "done");
+  assert.deepEqual(requests, [{ prompt, choices: [...choices], ...presented }]);
+  assert.ok(!presenterUpdates(updates).some((text) => text.includes("Presenter failed")), JSON.stringify(updates));
+});
+
 test("a state's own presentation fields win, and a presenter field that would break a rule with them is dropped", async () => {
   const definition = asking({ headline: "The state's own headline.", recommended: "stop" });
   const { requests } = await observe(definition, () => ({
@@ -357,17 +388,21 @@ test("a Human state entered again presents once per entry", async () => {
   assert.deepEqual(order, ["presenter", "human: Round 1.", "presenter", "human: Round 2."]);
 });
 
-test("human() refuses a present role that is not a non-empty trimmed name, and presentWith without present or not a function", () => {
+test("human() refuses invalid present, presentWith and presentIn options when the state is defined", () => {
   for (const options of [
     { present: "" },
     { present: " presenter" },
     { present: 7 },
     { presentWith: () => "Evidence." },
     { present: "presenter", presentWith: "Evidence." },
+    { presentIn: "/tmp" },
+    { present: "presenter", presentIn: "" },
+    { present: "presenter", presentIn: "   " },
+    { present: "presenter", presentIn: 7 },
   ]) {
     assert.throws(() => human("Choose", { submitted: "done" }, presenting(options)), /present/u, JSON.stringify(options));
   }
-  human("Choose", { submitted: "done" }, presenting({ present: "presenter", presentWith: () => "Evidence." }));
+  human("Choose", { submitted: "done" }, { present: "presenter", presentWith: () => "Evidence.", presentIn: "/tmp" });
 });
 
 test("presentWith failure is reported without blocking, and presenters request report-only usage limits", async () => {

@@ -35,7 +35,7 @@ export function presenterPrompt(input: PresenterInput): string {
 
 /** One bounded attempt; a late runner cannot publish updates or alter the request. */
 export async function presentHumanRequest(
-  input: PresenterInput, role: string, runner: AgentRunner, report?: AgentReporter,
+  input: PresenterInput, role: string, cwd: string, runner: AgentRunner, report?: AgentReporter,
 ): Promise<HumanRequest> {
   let active = true;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -43,7 +43,7 @@ export async function presentHumanRequest(
   try {
     fault(`Presenting the Human question: ${role}`);
     const event = await Promise.race([
-      Promise.resolve().then(() => runner({ prompt: presenterPrompt(input), outcomes: ["presented"], limits: "report" },
+      Promise.resolve().then(() => runner({ prompt: presenterPrompt(input), outcomes: ["presented"], limits: "report", cwd },
         (update) => { if (active) report?.(update); })),
       new Promise<never>((_, reject) => {
         timer = setTimeout(() => reject(new Error("Presenter time limit reached after 2 minutes")), presenterTimeoutMs);

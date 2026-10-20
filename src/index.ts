@@ -27,6 +27,7 @@ export interface Event {
 
 export type HumanOptions = {
   readonly present?: string;
+  readonly presentIn?: string;
   readonly presentWith?: () => string;
 } & Pick<HumanPresentation, "headline" | "reason" | "page"> & (
   | {
@@ -230,7 +231,7 @@ const machines = setup({
 
 const presentationKey = Symbol("presentation");
 interface HumanInvocation extends HumanRequest {
-  readonly [presentationKey]?: { readonly role: string; readonly facts?: () => string };
+  readonly [presentationKey]?: { readonly role: string; readonly facts?: () => string; readonly cwd?: string };
 }
 const presentMetaKey = "machines.present";
 const agentMetaKey = "machines.agent";
@@ -345,6 +346,10 @@ export function human<const TTransitions extends Readonly<Record<string, unknown
   if (options.presentWith !== undefined && (options.present === undefined || typeof options.presentWith !== "function")) {
     throw new Error("Human presentWith must be a function and requires present");
   }
+  if (options.presentIn !== undefined && (options.present === undefined
+    || typeof options.presentIn !== "string" || !options.presentIn.trim())) {
+    throw new Error("Human presentIn must be a non-empty string and requires present");
+  }
   if (options.choices !== undefined && options.choices.length === 0) {
     throw new Error("Human choices must include at least one value");
   }
@@ -367,7 +372,9 @@ export function human<const TTransitions extends Readonly<Record<string, unknown
         const problem = humanRequestProblem(request);
         if (problem !== undefined) throw new Error(problem);
         return { ...copyHumanRequest(request),
-          ...(options.present === undefined ? {} : { [presentationKey]: { role: options.present, facts: options.presentWith } }),
+          ...(options.present === undefined ? {} : {
+            [presentationKey]: { role: options.present, facts: options.presentWith, cwd: options.presentIn },
+          }),
         };
       },
       ...actorLifecycle("Human", on),
@@ -616,7 +623,7 @@ export function run<TMachine extends AnyStateMachine>(
             }
             request = await presentHumanRequest({ request, description: options.description, graph,
               current: statePaths(currentEntry.value).join(", "), history: history(), facts },
-            presenter.role, agentRunners[presenter.role]!, options.onAgentUpdate);
+            presenter.role, presenter.cwd ?? process.cwd(), agentRunners[presenter.role]!, options.onAgentUpdate);
             signal.throwIfAborted();
           }
           if (options.onHumanSleep) {
