@@ -18,6 +18,12 @@ be configured.
 - A session shows the runs it started. `machine watch` adds runs it did not,
   such as a ticket a daemon runs.
 
+A workflow can publish a current sentence with
+[`p.status({ now })`](authoring.md#run-status). `machine runs`, the Claude status
+line, and `machine ui` show it in their run lists, falling back to the usual state
+display when absent. JSON records keep both `now` and the state's name. The
+sentence survives sleep and continuation.
+
 ## Commands
 
 ```bash

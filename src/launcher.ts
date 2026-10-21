@@ -23,6 +23,8 @@ import {
   requiredAgentNames,
   optionalAgentNames,
   run,
+  status as validateStatus,
+  type WorkflowStatus,
   wait,
   use,
   type Event,
@@ -59,6 +61,8 @@ export interface PreparedMachineRun {
   start(options?: Omit<RunOptions, "agents"> & {
     /** Reports the full graph when a started child adds states or edges. */
     readonly onGraph?: (graph: RunGraph) => void;
+    /** The current sentence, initially restored from a checkpoint; null explicitly clears it. */
+    readonly onStatus?: (change: WorkflowStatus) => void;
     readonly checkpoint?: { readonly directory: string; readonly id: string; readonly sleep?: boolean };
   }): Promise<SnapshotFrom<AnyStateMachine>>;
 }
@@ -84,8 +88,16 @@ export async function prepareMachineRun(
   const optional = readOptionalAgentRoles(loaded, path);
   const endings = readEndings(loaded, path);
 
+  let now = options.continueRun?.now;
+  let statusChanged: (() => void) | undefined;
+  const status = (change: WorkflowStatus) => {
+    validateStatus(change);
+    if (change.now === undefined) return;
+    now = change.now ?? undefined;
+    statusChanged?.();
+  };
   const { definition, savedData } = await buildDefinition(loaded, path,
-    options.input === undefined ? "" : options.input, options.continueRun?.data);
+    options.input === undefined ? "" : options.input, options.continueRun?.data, status);
   const children = await loadUseTree(path, readUses(loaded, path), { cwd, home }, definition);
   assertUseStates(definition, path, children);
   assertEndingStates(definition, endings, path);
@@ -105,7 +117,7 @@ export async function prepareMachineRun(
   const agents = applyAgentOverrides(path, configured.agents, configured.presets, allRoles, overrides);
   preflightAgentRoles(path, usedAgentRoles, agentRoles, optional, agents, optionalAgentNames(definition));
   for (const child of childModules) preflightAgentRoles(child.path, ["default"], child.agentRoles, child.optionalAgentRoles, agents);
-  const restored = await restoreChildren(definition, children, options.continueRun, agents);
+  const restored = await restoreChildren(definition, children, options.continueRun, agents, status);
   const limitAware = limitAwareAgents(new Set([...allRoles].filter((role) => requiredRoles.has(role) || Object.hasOwn(agents, role))), overrides, configured, limitPolicy(options.agentLimits));
 
   let started = false;
@@ -120,21 +132,32 @@ export async function prepareMachineRun(
     start(runOptions = {}) {
       if (started) throw new Error(`Prepared Machine "${path}" has already started`);
       started = true;
-      const { checkpoint, onGraph, ...runtimeOptions } = runOptions;
+      const { checkpoint, onGraph, onStatus, ...runtimeOptions } = runOptions;
       if ((runtimeOptions.onSleep || runtimeOptions.onHumanSleep) && !checkpoint) throw new Error("Sleeping requires a checkpoint");
       const frames: (ChildCheckpoint | null)[] = [];
       if (options.continueRun) {
         let level: ChildCheckpoint | undefined = options.continueRun;
         while (level) {
           const { children: nested, ...frame }: ChildCheckpoint = level;
-          frames.push(frame);
+          // Keep run metadata out of the reusable state frames.
+          frames.push({
+            machine: frame.machine, input: frame.input, state: frame.state,
+            data: frame.data, context: frame.context,
+            ...(frame.history === undefined ? {} : { history: frame.history }),
+          });
           level = nested?.[0];
         }
       }
       const hooks = checkpointHooks(checkpoint, frames, {
         input: options.input === undefined ? "" : options.input,
         agents: options.agents ?? {}, home, cwd,
-      });
+      }, () => now);
+      statusChanged = () => {
+        // Rewrite captured frames, never recapture live data in the middle of a step.
+        hooks.write();
+        onStatus?.({ now: now ?? null });
+      };
+      statusChanged();
       const shared: RunOptions = {
         agents: { ...agents, ...limitAware },
         human: runtimeOptions.human,
@@ -163,10 +186,10 @@ export async function prepareMachineRun(
           ...(options.continueRun.state.due === undefined ? {} : { due: options.continueRun.state.due }) } } : {}),
         ...hooks(0, { name: machineName(path), path, sourceHash }, options.input === undefined ? "" : options.input,
           savedData, runtimeOptions.onEnter),
-      }, graph, onGraph, hooks, 1, restored, runtimeOptions.answer).then((snapshot) => {
+      }, graph, onGraph, hooks, status, 1, restored, runtimeOptions.answer).then((snapshot) => {
         assertEndingOutput(snapshot, endings);
         return snapshot;
-      });
+      }).finally(() => { statusChanged = undefined; });
     },
   };
 }
@@ -177,6 +200,7 @@ async function buildDefinition(
   path: string,
   input: JsonValue,
   restoredData?: object,
+  status: typeof validateStatus = validateStatus,
 ): Promise<{ definition: AnyStateMachine; savedData: object }> {
   if (typeof loaded.default !== "function") throw new Error(`Machine "${path}" must default-export a factory`);
   let savedData: object = {};
@@ -189,7 +213,7 @@ async function buildDefinition(
     return savedData as T;
   };
   const definition = await loaded.default(
-    { agent, final, human, machine, operation, wait, use, data }, input,
+    { agent, final, human, machine, operation, wait, use, data, status }, input,
   ) as AnyStateMachine;
   return { definition, savedData };
 }
@@ -206,6 +230,7 @@ async function restoreChildren(
   children: ReadonlyMap<string, UseModule>,
   saved: ChildCheckpoint | undefined,
   agents: Readonly<Record<string, AgentRunner>>,
+  status: typeof validateStatus,
 ): Promise<RestoredChild | undefined> {
   const next = saved?.children?.[0];
   if (!next || !saved) return undefined;
@@ -214,12 +239,12 @@ async function restoreChildren(
   if (!child || child.path !== next.machine.path) {
     throw new Error(`Cannot continue: saved child "${next.machine.path}" no longer matches the parent's use state`);
   }
-  const built = await buildDefinition(child.loaded, child.path, next.input, next.data);
+  const built = await buildDefinition(child.loaded, child.path, next.input, next.data, status);
   assertSavedState(built.definition.root, next.state.value);
   assertEndingStates(built.definition, child.endings, child.path);
   assertUseStates(built.definition, child.path, child.children);
   preflightAgentRoles(child.path, requiredAgentNames(built.definition), child.agentRoles, child.optionalAgentRoles, agents, optionalAgentNames(built.definition));
-  return { ...built, saved: next, child: await restoreChildren(built.definition, child.children, next, agents) };
+  return { ...built, saved: next, child: await restoreChildren(built.definition, child.children, next, agents, status) };
 }
 
 /** Each level captures before input evaluation; one writer joins the active frames. */
@@ -227,9 +252,10 @@ function checkpointHooks(
   checkpoint: { readonly directory: string; readonly id: string; readonly sleep?: boolean } | undefined,
   frames: (ChildCheckpoint | null)[],
   root: Pick<RunCheckpoint, "input" | "agents" | "home" | "cwd">,
+  now: () => string | undefined,
 ) {
   const write = () => {
-    if (!checkpoint) return;
+    if (!checkpoint || frames.length === 0) return;
     if (frames.some((frame) => frame === null)) {
       removeCheckpoint(checkpoint.directory, checkpoint.id);
       return;
@@ -238,12 +264,13 @@ function checkpointHooks(
       ...frames[depth]!,
       ...(depth + 1 < frames.length ? { children: [nest(depth + 1)] as const } : {}),
     });
+    const currentNow = now();
     writeCheckpoint(checkpoint.directory, {
-      ...root, ...nest(0), schemaVersion: 2, id: checkpoint.id,
+      ...root, ...nest(0), ...(currentNow === undefined ? {} : { now: currentNow }), schemaVersion: 2, id: checkpoint.id,
       ...(checkpoint.sleep ? { sleep: true } : {}), writtenAt: new Date().toISOString(),
     });
   };
-  return (depth: number, machine: ChildCheckpoint["machine"], input: JsonValue, savedData: object,
+  const hooks = (depth: number, machine: ChildCheckpoint["machine"], input: JsonValue, savedData: object,
     onEnter?: RunOptions["onEnter"]): Pick<RunOptions, "onBeforeStep" | "onEnter"> => {
     if (!checkpoint) return {};
     let firstEntry = true;
@@ -290,6 +317,7 @@ function checkpointHooks(
       onEnter?.(entry);
     } };
   };
+  return Object.assign(hooks, { write });
 }
 
 /** Compose child execution, observations and checkpoint hooks at each level. */
@@ -301,6 +329,7 @@ function runWithChildren(
   graph: RunGraph | undefined,
   onGraph: ((graph: RunGraph) => void) | undefined,
   hooks: ReturnType<typeof checkpointHooks>,
+  status: typeof validateStatus,
   depth: number,
   restore?: RestoredChild,
   answer?: string,
@@ -336,7 +365,7 @@ function runWithChildren(
     restore = undefined;
     const childInput = restored ? restored.saved.input : input.input;
     assertJsonValue(childInput, `Child Machine "${child.path}" input`);
-    const { definition, savedData } = restored ?? await buildDefinition(child.loaded, child.path, childInput);
+    const { definition, savedData } = restored ?? await buildDefinition(child.loaded, child.path, childInput, undefined, status);
     assertEndingStates(definition, child.endings, child.path);
     assertUseStates(definition, child.path, child.children);
     preflightAgentRoles(child.path, requiredAgentNames(definition), child.agentRoles, child.optionalAgentRoles, shared.agents ?? {}, optionalAgentNames(definition));
@@ -362,7 +391,7 @@ function runWithChildren(
           observation.value = state;
           report();
         },
-      }, childGraph, reportGraph, hooks, depth + 1, restored?.child, restored ? answer : undefined);
+      }, childGraph, reportGraph, hooks, status, depth + 1, restored?.child, restored ? answer : undefined);
       if (slept) {
         // Sleeping is not a child ending. Let the parent's stop abort this invoke.
         if (!signal.aborted) await new Promise<void>((done) => signal.addEventListener("abort", () => done(), { once: true }));

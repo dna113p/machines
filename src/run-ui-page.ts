@@ -313,7 +313,7 @@ function runCard(run, kids) {
   return h("button", { class: "run" + (run.id === selected ? " selected" : ""), onclick: function () { select(run.id); } },
     h("span", { class: "dot " + (needsAnswer(run) ? "waiting" : run.status) }),
     h("span", { class: "title", title: title(run), text: title(run) }),
-    h("span", { class: "sub" }, [run.label ? run.machine : null, stateText(run) || null].filter(Boolean).concat([""]).join(" · "),
+    h("span", { class: "sub" }, [run.label ? run.machine : null, (run.now ?? stateText(run)) || null].filter(Boolean).concat([""]).join(" · "),
       run.status === "sleeping" ? h("span", { text: sleepNote(run) }) : active(run) ? live(run.startedAt) : h("span", { text: ago(run.updatedAt) })),
     sleepingForAnswer(run) ? h("span", { class: "child", text: run.human.prompt + " · request: " + run.human.requestId }) : null,
     kids.length ? h("span", { class: "child", text: kids.length + " sub-run" + (kids.length > 1 ? "s" : "") + (running.length ? ", " + running.length + " active" : "") }) : null);
@@ -361,7 +361,7 @@ function renderDetail(run, runs, byId) {
   parts.push(graphCard(run));
   var kids = runs.filter(function (r) { return r.parent === run.id; });
   if (kids.length) parts.push(h("div", { class: "card block" }, h("h2", { text: "Sub-runs" }), h("div", { class: "subruns" }, kids.map(function (k) {
-    return h("div", { class: "subrun", onclick: function () { select(k.id); } }, h("span", { class: "dot " + k.status }), h("span", { text: title(k) }), h("span", { class: "hint", text: stateText(k) }));
+    return h("div", { class: "subrun", onclick: function () { select(k.id); } }, h("span", { class: "dot " + k.status }), h("span", { text: title(k) }), h("span", { class: "hint", text: k.now ?? stateText(k) }));
   }))));
   if (run.trail && run.trail.length) parts.push(trailCard(run));
   if (run.error) parts.push(h("div", { class: "banner error", text: run.error }));

@@ -176,6 +176,7 @@ const childMessageSchema = v.variant("type", [
     type: v.literal("status"),
     // A change to the published record. Null clears a field: IPC drops a key that holds undefined.
     change: v.strictObject({
+      now: v.optional(v.nullable(v.string())),
       state: v.optional(stateValueSchema),
       agent: v.optional(v.nullable(v.object(agentIdentity))),
       attempt: v.optional(v.nullable(v.strictObject(agentAttempt))),
@@ -395,9 +396,10 @@ function launchMachineHost(
       } else if (message.type === "agentUpdate") {
         observe(() => options.onAgentUpdate?.(message.update as AgentUpdate));
       } else if (message.type === "status") {
-        const { state, agent, limit, attempt, retry } = message.change;
+        const { state, now, agent, limit, attempt, retry } = message.change;
         published?.update({
           ...(state === undefined ? {} : { state: state as StateValue }),
+          ...(now === undefined ? {} : { now: now ?? undefined }),
           ...(agent === undefined ? {} : { agent: agent ?? undefined }),
           ...(attempt === undefined ? {} : { attempt: attempt ?? undefined }),
           ...(limit === undefined ? {} : { limit: limit ?? undefined }),
@@ -577,6 +579,7 @@ function runChildHost(): void {
       }));
       const checkpointDirectory = await ready;
       const result = await prepared.start({
+        onStatus(change) { if (reportStatus === true) send({ type: "status", change }); },
         ...(checkpointDirectory === undefined || runId === undefined ? {} : { checkpoint: { directory: checkpointDirectory, id: runId, sleep } }),
         ...(answer === undefined ? {} : { answer }),
         ...(sleep ? {

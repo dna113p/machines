@@ -22,6 +22,59 @@ test("the public module supplies all factory primitives, including validated dat
   assert.throws(() => factoryPrimitives.data({ badKey: () => 1 }), /data.badKey/u);
 });
 
+test("updating now saves checkpoint metadata without recapturing interrupted working data", async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "checkpoint-now-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const path = join(directory, "machine.ts");
+  writeFileSync(path, `export const description = "Updates status after checkpoint data was captured.";
+    export default (p) => {
+      const data = p.data({ count: 0 });
+      return p.machine({ initial: "prepare", states: {
+        prepare: p.operation(() => { data.count = 7; return { type: "done" }; }, { done: "ask" }),
+        ask: p.human(() => {
+          data.count += 1;
+          p.status({ now: "Waiting for the audit review." });
+          return "Continue?";
+        }, { submitted: "check" }),
+        check: p.operation(() => {
+          if (data.count !== 8) throw new Error("Recaptured interrupted data: " + data.count);
+          p.status({ now: null });
+          return { type: "done" };
+        }, { done: "again" }),
+        again: p.human("Approve?", { submitted: "finished" }),
+        finished: p.final(),
+      } });
+    };`);
+  const options = { machine: path, cwd: directory, home: directory };
+  const prepared = await prepareMachineRun(options);
+  await assert.rejects(prepared.start({
+    checkpoint: { directory, id: "metadata" }, human: () => { throw new Error("interrupted"); },
+  }), {
+    name: "Error",
+    message: 'Human failed in state "ask": interrupted',
+    cause: new Error("interrupted"),
+  });
+  const saved = JSON.parse(readFileSync(checkpointPath(directory, "metadata"), "utf8")) as RunCheckpoint & { now?: string };
+  assert.equal(saved.now, "Waiting for the audit review.");
+  assert.equal(saved.state.value, "ask");
+  assert.deepEqual(saved.data, { count: 7 });
+
+  const continued = await prepareMachineRun({ ...options, continueRun: saved });
+  let requests = 0;
+  await assert.rejects(continued.start({
+    checkpoint: { directory, id: "metadata" },
+    human: () => { if (++requests === 1) return "yes"; throw new Error("interrupted again"); },
+  }), {
+    name: "Error",
+    message: 'Human failed in state "again": interrupted again',
+    cause: new Error("interrupted again"),
+  });
+  const after = JSON.parse(readFileSync(checkpointPath(directory, "metadata"), "utf8")) as RunCheckpoint & { now?: string };
+  assert.equal(after.state.value, "again");
+  assert.equal(after.now, undefined);
+  assert.deepEqual(after.data, { count: 8 });
+});
+
 test("a sleeping wait checkpoint round-trips, and an early claim leaves its files untouched", (t) => {
   const directory = mkdtempSync(join(tmpdir(), "checkpoint-wait-"));
   t.after(() => rmSync(directory, { recursive: true, force: true }));

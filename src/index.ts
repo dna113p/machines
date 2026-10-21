@@ -501,7 +501,21 @@ export function data<T extends object>(initial: T): T {
   return initial;
 }
 
+/** A workflow's current sentence. Omission preserves it; null clears it. */
+export interface WorkflowStatus {
+  readonly now?: string | null;
+}
+
+/** Validate status even without a publisher; the launcher supplies the run-scoped writer. */
+export function status(change: WorkflowStatus): void {
+  if (change.now === undefined || change.now === null) return;
+  if (typeof change.now !== "string" || /[\r\n\u0085\u2028\u2029]/u.test(change.now) || [...change.now].length > 200) {
+    throw new Error("now must be one line of at most 200 characters");
+  }
+}
+
 export interface MachinePrimitives {
+  readonly status: typeof status;
   readonly data: typeof data;
   readonly agent: typeof agent;
   readonly final: typeof final;

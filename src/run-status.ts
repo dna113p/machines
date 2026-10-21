@@ -27,6 +27,8 @@ export interface RunStatusRecord {
   /** When a sleeping timed wait is due, in ISO format. */
   readonly due?: string;
   readonly state?: string;
+  /** The workflow’s current sentence, at most 200 characters on one line. */
+  readonly now?: string;
   /** When the current state was entered. */
   readonly stateSince?: string;
   readonly agent?: RunStatusAgent;
@@ -110,6 +112,7 @@ export interface RunStatusRun {
 
 /** A present key replaces its field; a present key holding `undefined` clears it. */
 export interface RunStatusChange {
+  readonly now?: string;
   readonly graph?: RunGraph;
   readonly status?: "running" | "waiting";
   readonly state?: StateValue;
@@ -232,6 +235,7 @@ export function createRunStatusPublisher(
   let deliveries: ReadonlyArray<{ readonly id: string; readonly takenAt: number }> = [];
   let error: string | undefined;
   let note: string | undefined;
+  let now = previous?.now;
   let ending: RunEnding | undefined;
   let trail: RunTrailStep[] = [...previous?.trail ?? []];
   const enter = (entered: string | undefined, at: string) => {
@@ -266,6 +270,7 @@ export function createRunStatusPublisher(
       ...(deliveries.length === 0 ? {} : { deliveries: deliveries.map((delivery) => delivery.id) }),
       ...(error === undefined ? {} : { error }),
       ...(note === undefined ? {} : { note }),
+      ...(now === undefined ? {} : { now }),
       ...(ending === undefined ? {} : { ending }),
       ...(graph === undefined ? {} : { graph }),
       ...(trail.length === 0 ? {} : { trail }),
@@ -299,6 +304,7 @@ export function createRunStatusPublisher(
         graph: "graph" in change ? change.graph : graph,
         status: change.status ?? status,
         state: nextState,
+        now: "now" in change ? change.now : now,
         agent: "agent" in change ? pickAgent(change.agent) : agent,
         // A wait belongs to the state whose Agent is waiting.
         limit: "limit" in change ? pickLimit(change.limit) : nextState === state ? limit : undefined,
@@ -312,12 +318,12 @@ export function createRunStatusPublisher(
         ],
       };
       // Repeated notifications for an unchanged run do not need another write.
-      if (JSON.stringify(next) === JSON.stringify({ graph, status, state, agent, limit, attempt, retry, human, deliveries })) return;
+      if (JSON.stringify(next) === JSON.stringify({ graph, status, state, now, agent, limit, attempt, retry, human, deliveries })) return;
       if (next.state !== state) {
         stateSince = new Date().toISOString();
         enter(next.state, stateSince);
       }
-      ({ graph, status, state, agent, limit, attempt, retry, human, deliveries } = next);
+      ({ graph, status, state, now, agent, limit, attempt, retry, human, deliveries } = next);
       publish();
     },
     sleep(until) {
@@ -397,11 +403,11 @@ export function runStatusObserver(
   let arriving: Extract<AgentUpdate, { type: "identity" }> | undefined;
   return {
     onEnter(entry) {
-      // On continuation this precedes onState; publish the state with its retry
-      // so that the first state announcement cannot clear the restored count.
+      // Entry precedes invoked work and onState. Publish the current state now,
+      // together with its retry so a continued entry preserves its saved count.
       update(entry.retry && entry.due
         ? { state: entry.value, retry: { ...entry.retry, due: entry.due } }
-        : { retry: undefined });
+        : { state: entry.value, retry: undefined });
     },
     onAgentUpdate(agent) {
       if (agent.type === "identity") {
@@ -565,6 +571,7 @@ function isRunStatusRecord(value: unknown): value is RunStatusRecord {
     && typeof record.cwd === "string"
     && (record.status === "running" || record.status === "waiting"
       || record.status === "sleeping" || record.status === "completed" || record.status === "failed")
+    && isOptionalString(record.now)
     && isOptionalString(record.state)
     && (agent === undefined || (agent !== null && typeof agent === "object" && typeof agent.harness === "string"
       && isOptionalString(agent.model) && isOptionalString(agent.thinking)))

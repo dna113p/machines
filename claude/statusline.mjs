@@ -91,13 +91,13 @@ export function runStatusLines(records, options = {}) {
     const failed = lost || record.status === "failed";
     const code = waiting ? 33 : sleeping ? "2;34" : completed ? 32 : failed ? 31 : 36;
     const symbol = waiting ? "◆" : sleeping ? "◇" : completed ? "✓" : failed ? "✕" : "●";
-    let state = waiting
+    let state = record.now ?? (waiting
       ? "input needed"
       : lost
         ? "lost"
         : failed
           ? "failed"
-          : record.state ?? "starting";
+          : record.state ?? "starting");
     if (sleeping && !waiting) {
       const due = Date.parse(record.due);
       const note = record.due !== undefined
@@ -170,6 +170,7 @@ function isRecord(value) {
     && ["running", "waiting", "sleeping", "completed", "failed"].includes(value.status)
     && (value.due === undefined || isTimestamp(value.due))
     && (value.status !== "sleeping" || value.due !== undefined || typeof human?.requestId === "string")
+    && isOptionalString(value.now)
     && isOptionalString(value.state)
     && (agent === undefined || (agent !== null && typeof agent === "object" && typeof agent.harness === "string"
       && isOptionalString(agent.model) && isOptionalString(agent.thinking)))
