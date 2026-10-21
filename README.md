@@ -203,7 +203,7 @@ Other ways:
 - Without a project dependency: `npx @dna113p/machines list`.
 - Globally: `npm install --global @dna113p/machines`, then `machine list`.
 - From a checkout: `npm ci && npm pack`, then
-  `npm install /absolute/path/to/machines/dna113p-machines-0.7.2.tgz`.
+  `npm install /absolute/path/to/machines/dna113p-machines-0.8.0.tgz`.
 
 The command is always `machine`. The package ships JavaScript and TypeScript
 declarations; import `{ machine, agent, human, operation, wait, final, run, defineEndings, Type }`
