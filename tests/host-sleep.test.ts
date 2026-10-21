@@ -174,6 +174,59 @@ function answer(project: Project, record: SleepingRecord, response: string): voi
   assert.equal(recordOf(project, record.id).human?.answer, response);
 }
 
+for (const kind of ["timed", "Human"] as const) {
+  test(`workflow now survives ${kind} sleep and continuation in both status and the next checkpoint`, async (context) => {
+    const project = await createProject(context);
+    const now = "The audit is written; waiting for its review.";
+    const path = join(project.project, ".machines", "now.ts");
+    writeFileSync(path, `
+      export const description = "Keeps its now line while asleep and after continuation.";
+      export default (p) => p.machine({ initial: "publish", states: {
+        publish: p.operation(() => {
+          p.status({ now: ${JSON.stringify(now)} }); return { type: "ready" };
+        }, { ready: "rest" }),
+        rest: ${kind === "timed"
+          ? 'p.wait({ every: "50ms" }, { due: "again" })'
+          : 'p.human("Review the audit?", { submitted: "again" })'},
+        again: p.human("Approve the findings?", { submitted: "finished" }),
+        finished: p.final(),
+      } });
+    `);
+    const started = await host(context, {
+      machine: path, cwd: project.project, home: project.home, sleep: true, publishRunStatus: true,
+    });
+    const first = await settled(started, `the ${kind} run`);
+    assert.equal(first.state, "rest");
+    const before = recordOf(project, started.id) as SleepingRecord & { now?: string };
+    assert.equal(before.status, "sleeping");
+    assert.equal(before.now, now);
+    const saved = readCheckpoint(project, started.id) as Checkpoint & { now?: string };
+    assert.equal(saved.now, now);
+    assert.equal(saved.state.kind, kind === "timed" ? "wait" : "human");
+    if (kind === "timed") {
+      assert.ok(first.sleeping?.due);
+      await until(Date.parse(first.sleeping.due));
+    } else {
+      answer(project, before, "yes");
+    }
+
+    // The publishing Operation cannot run again: continuation begins at rest.
+    // Sleep a second time so the continued checkpoint is available to inspect.
+    const continued = await host(context, { continue: started.id });
+    assert.equal(continued.id, started.id);
+    const second = await settled(continued, "the continued now run");
+    assert.equal(second.state, "again");
+    assert.ok(second.sleeping?.human);
+    const after = recordOf(project, started.id) as SleepingRecord & { now?: string };
+    assert.equal(after.status, "sleeping");
+    assert.equal(after.now, now);
+    const checkpoint = readCheckpoint(project, started.id) as Checkpoint & { now?: string };
+    assert.equal(checkpoint.now, now);
+    assert.equal(checkpoint.state.value, "again");
+    assert.equal(checkpoint.state.kind, "human");
+  });
+}
+
 test("a sleeping hosted run has no ending until its continuation reaches the declared final", async (context) => {
   const project = await createProject(context);
   const entry = pathToFileURL(resolve("src/index.ts")).href;
@@ -484,4 +537,35 @@ test("a hosted retrying run with the sleep option publishes its attempt, and the
   const after = recordOf(project, hosted.id) as SleepingRecord & { readonly retry?: unknown };
   assert.deepEqual({ status: after.status, state: after.state, retry: after.retry }, { status: "completed", state: "askPush", retry: undefined });
   assert.equal(existsSync(checkpointFile(project, hosted.id)), false);
+});
+
+
+test("hosted now replacements and explicit clears cross IPC and continuation", async (context) => {
+  const project = await createProject(context);
+  const path = join(project.project, ".machines", "clear-now.ts");
+  writeFileSync(path, `export const description = "Replaces and clears a run's sentence.";
+    export default (p) => p.machine({ initial: "publish", states: {
+      publish: p.operation(() => {
+        p.status({ now: "Writing the audit." });
+        p.status({ now: "Reviewing the audit." });
+        return { type: "ready" };
+      }, { ready: "ask" }),
+      ask: p.human("Approve?", { submitted: "clear" }),
+      clear: p.operation(() => { p.status({ now: null }); return { type: "ready" }; }, { ready: "again" }),
+      again: p.human("Continue?", { submitted: "finished" }),
+      finished: p.final(),
+    } });`);
+  const started = await host(context, {
+    machine: path, cwd: project.project, home: project.home, sleep: true, publishRunStatus: true,
+  });
+  await settled(started, "the replaced now run");
+  const before = recordOf(project, started.id);
+  assert.equal(before.now, "Reviewing the audit.");
+  answer(project, before, "yes");
+  const continued = await host(context, { continue: started.id });
+  await settled(continued, "the cleared now run");
+  assert.equal(recordOf(project, started.id).now, undefined);
+  const checkpoint = readCheckpoint(project, started.id) as Checkpoint & { now?: string };
+  assert.equal(checkpoint.now, undefined);
+  assert.equal(checkpoint.state.value, "again");
 });

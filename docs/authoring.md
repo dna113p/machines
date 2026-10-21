@@ -97,6 +97,30 @@ record carries `ending: { name, kind }`; `status` remains `completed` for all th
 kinds, and `state` and `note` keep their existing meanings. Without an `endings`
 export, these optional fields are absent.
 
+## Run status
+
+Use `p.status({ now: "Writing the audit of blocked ticket runs." })` inside a
+state to say what the run is doing in the owner's terms. For example:
+
+```ts
+write: p.operation(() => {
+  p.status({ now: "Writing the audit of blocked ticket runs." });
+  return { type: "ready" };
+}, { ready: "review" }),
+```
+
+`now` must be one line of at most 200 characters. Invalid values throw an error
+naming `now`, even when status publication is off. A string sets or replaces the
+sentence, `p.status({ now: null })` clears it, and `p.status({})` preserves it.
+The sentence persists across transitions, sleep, and continuation. Nested
+`p.use` Machines share their enclosing run's sentence; separately launched runs
+have their own. Updating it does not recapture an interrupted state's working data.
+
+The launcher publishes updates immediately through the CLI or a host with
+`publishRunStatus: true`. `machine runs`, the Claude status line, and `machine ui`
+show the sentence in their run lists, with their usual state display when it is
+absent. The run's `label`, state identity, and final-output `note` are unchanged.
+
 ## Using another Machine
 
 Use `p.use(selector, { input, on })` to run a child and route on its declared

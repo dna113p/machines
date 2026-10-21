@@ -215,6 +215,9 @@ async function runMachine(machinePath: string, args: string[], continuation?: Co
         published.sleepForAnswer({ ...request, requestId });
         sleptForAnswer = requestId;
       } } : {}),
+      onStatus(change) {
+        if (change.now !== undefined) published.update({ now: change.now ?? undefined });
+      },
       onEnter(entry) { observed.onEnter(entry); },
       onAgentUpdate(update) {
         observed.onAgentUpdate(update);
@@ -631,7 +634,7 @@ function plain(text: string) {
 /** A run as tab-separated columns: its label follows the four that were always there. */
 function runColumns(record: RunStatusRecord | ViewerRun) {
   const label = record.label === undefined ? "" : plain(record.label);
-  return [record.id, record.machine, runStatus(record), record.state ?? "starting"].map(plain).concat(label === "" ? [] : [label]);
+  return [record.id, record.machine, runStatus(record), record.now ?? record.state ?? "starting"].map(plain).concat(label === "" ? [] : [label]);
 }
 
 function finishedRunNote(record: RunStatusRecord | ViewerRun): string | undefined {
@@ -640,7 +643,7 @@ function finishedRunNote(record: RunStatusRecord | ViewerRun): string | undefine
 }
 
 function printRunListing(record: RunStatusRecord | ViewerRun, separate: boolean, watched: boolean) {
-  const state = record.state ?? "starting";
+  const state = record.now ?? record.state ?? "starting";
   const recorded = runStatus(record);
   const sleep = runSleep(record);
   const human = recorded === "waiting" || sleep?.for === "answer" ? record.human : undefined;

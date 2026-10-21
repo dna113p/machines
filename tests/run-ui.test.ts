@@ -372,6 +372,53 @@ function clock(iso: string) {
   return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
+test("machine ui cards show now, update it live, and fall back to state when cleared", () => {
+  const page = openPage(runUiPage("page-token"), "http://localhost/", async () => new Response("{}"));
+  const stamp = new Date().toISOString();
+  const published = {
+    ...run, id: "audit", label: "Audit blocked runs", status: "running", state: "implement",
+    startedAt: stamp, updatedAt: stamp, now: "Writing the audit of blocked ticket runs.",
+    graph: { initial: "implement", states: [{ id: "implement", kind: "operation" }], edges: [] },
+  };
+  const fallback = { ...published, id: "fallback", label: "Review findings", state: "review", now: undefined, graph: undefined };
+  const show = (now: string | undefined) => page.show({
+    project: { name: "test" }, directory: "/tmp", panels: [], runs: [{ ...published, now }, fallback],
+  });
+  const card = () => runSections(page.document).get("Running")!.get("Audit blocked runs")!;
+  const subtitle = () => card().children.find((node) => node.hasClass("sub"))!.textContent;
+
+  show(published.now);
+  assert.match(subtitle(), /Writing the audit of blocked ticket runs\./u);
+  assert.doesNotMatch(subtitle(), /implement/u);
+  assert.match(runSections(page.document).get("Running")!.get("Review findings")!.textContent, /review/u);
+  card().click();
+  const nodes = page.document.getElementById("detail")!.descendants().filter((node) => node.tagName === "g" && node.hasClass("node"));
+  assert.ok(nodes.some((node) => node.hasClass("current") && node.textContent.includes("implement")), "now does not replace the graph's state identity");
+
+  show("Checking the audit findings.");
+  assert.match(subtitle(), /Checking the audit findings\./u);
+  assert.doesNotMatch(subtitle(), /Writing the audit/u);
+  show(undefined);
+  assert.match(subtitle(), /implement/u);
+  assert.doesNotMatch(subtitle(), /Checking the audit/u);
+});
+
+test("machine ui child listings prefer each child's now with state fallback", () => {
+  const page = openPage(runUiPage("page-token"), "http://localhost/", async () => new Response("{}"));
+  const stamp = new Date().toISOString();
+  const parent = { ...run, id: "parent", label: "Audit", status: "running", state: "delegate", startedAt: stamp, updatedAt: stamp };
+  const child = { ...parent, id: "child", parent: "parent", label: "Find blocked tickets", state: "implement", now: "Counting ticket runs blocked on ceremony." };
+  const fallback = { ...parent, id: "fallback", parent: "parent", label: "Review counts", state: "review" };
+  page.show({ project: { name: "test" }, directory: "/tmp", panels: [], runs: [parent, child, fallback] });
+  runSections(page.document).get("Running")!.get("Audit")!.click();
+  const listings = page.document.getElementById("detail")!.descendants().filter((node) => node.hasClass("subrun"));
+  const published = listings.find((node) => node.textContent.includes(child.label));
+  assert.ok(published);
+  assert.match(published.textContent, /Counting ticket runs blocked on ceremony\./u);
+  assert.doesNotMatch(published.textContent, /implement/u);
+  assert.match(listings.find((node) => node.textContent.includes(fallback.label))!.textContent, /review/u);
+});
+
 test("machine ui shows a request's headline and marks its recommended choice, and a choice still answers with its name", async () => {
   const requests: Array<{ path: string; init: RequestInit }> = [];
   const page = openPage(runUiPage("page-token"), "http://localhost/", async (path, init) => {

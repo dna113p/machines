@@ -27,6 +27,30 @@ const fixture = resolve("tests/fixtures/human-inbox.machine.ts");
 const prompt = "Approve the plan?\nIt changes three files.";
 const publicationOff = /^Run status publication is off: unset MACHINES_RUN_STATUS_DIR to use the standard directory, or set it /u;
 
+test("machine runs prints now instead of the state, falls back without it, and retains both in JSON", async (context) => {
+  const directory = await temporaryDirectory(context);
+  const now = "Writing the audit of blocked ticket runs.";
+  const published = { id: "with-now", state: "implement", label: "Audit blocked runs", now };
+  await writeRecord(directory, published);
+  await writeRecord(directory, { id: "without-now", state: "review" });
+
+  const listed = machine(directory, "runs");
+  assert.equal(listed.status, 0, listed.stderr);
+  const lines = listed.stdout.trimEnd().split("\n");
+  assert.ok(lines.includes(`with-now\tticket\trunning\t${now}\tAudit blocked runs`), listed.stdout);
+  assert.ok(lines.includes("without-now\tticket\trunning\treview"), listed.stdout);
+  assert.doesNotMatch(listed.stdout, /\timplement(?:\t|\n)/u);
+
+  const json = machine(directory, "runs", "--json");
+  assert.equal(json.status, 0, json.stderr);
+  const records = JSON.parse(json.stdout) as Array<RunStatusRecord & { now?: string }>;
+  const record = records.find(({ id }) => id === "with-now");
+  assert.equal(record?.now, now);
+  assert.equal(record?.state, "implement");
+  assert.equal(record?.label, "Audit blocked runs");
+  assert.equal(records.find(({ id }) => id === "without-now")?.now, undefined);
+});
+
 test("a sleeping Human answer uses the continuation claim and only records one valid plain response", async (context) => {
   const directory = await temporaryDirectory(context);
   const publisher = createRunStatusPublisher({

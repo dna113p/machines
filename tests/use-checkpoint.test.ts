@@ -200,3 +200,43 @@ test("nested state and graph observations survive sleeping and continuation with
   assert.ok(graphs.at(-1)?.states.some((state) => state.id === "delegate.inner.ask" && state.kind === "human"));
   assert.equal(existsSync(checkpointPath(p.directory, p.checkpoint.id)), false);
 });
+
+
+test("nested now updates preserve captured data, survive continuation, and clear for the enclosing run", async (t) => {
+  const p = project(t, `import { defineEndings } from ${JSON.stringify(runtime)};
+    export const description = "Reports a child's current work.";
+    export const endings = defineEndings({ rested: { kind: "succeeded" }, restless: { kind: "failed" } });
+    export default (p) => {
+      const data = p.data({ evaluations: 0 });
+      return p.machine({ initial: "ask", states: {
+        ask: p.human(() => {
+          data.evaluations += 1;
+          p.status({ now: "The child is waiting for review." });
+          return "Review?";
+        }, { submitted: "clear" }),
+        clear: p.operation(() => {
+          if (data.evaluations !== 1) throw new Error("Recaptured interrupted data");
+          p.status({ now: null });
+          return { type: "ready" };
+        }, { ready: "again" }),
+        again: p.human("Approve?", { submitted: "rested" }),
+        rested: p.final(endings.rested), restless: p.final(endings.restless),
+      } });
+    };`);
+  const published: Array<string | null | undefined> = [];
+  const observe = { onStatus: (change: { now?: string | null }) => published.push(change.now) };
+  const first = await prepareMachineRun(p.options);
+  await first.start({ ...observe, checkpoint: p.checkpoint, onHumanSleep() {} });
+  const saved = p.read();
+  assert.equal(saved.now, "The child is waiting for review.");
+  assert.equal(published.at(-1), saved.now);
+  assert.deepEqual(deepest(saved).data, { evaluations: 0 });
+  const second = await prepareMachineRun({ ...p.options, continueRun: saved });
+  published.length = 0;
+  await second.start({ ...observe, checkpoint: p.checkpoint, answer: "yes", onHumanSleep() {} });
+  assert.equal(published[0], saved.now);
+  assert.equal(published.at(-1), null);
+  assert.equal(p.read().now, undefined);
+  assert.equal(deepest(p.read()).state.value, "again");
+  assert.deepEqual(deepest(p.read()).data, { evaluations: 1 });
+});

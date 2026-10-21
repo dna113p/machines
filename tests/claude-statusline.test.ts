@@ -13,6 +13,47 @@ const script = resolve("claude/statusline.mjs");
 const now = Date.parse("2026-03-04T05:06:07.000Z");
 const alive = { now, sessionId: "session", projectDir: "/work/project", color: false, isAlive: () => true };
 
+test("the status line prefers now while preserving the label, timing, Agent and state fallback", () => {
+  const published = {
+    ...record({
+      id: "now-run", label: "Audit blocked runs", state: "implement", startedAt: ago(65_000), stateSince: ago(5_000),
+      agent: { harness: "claude", model: "opus" },
+    }),
+    now: "Writing the audit of blocked ticket runs.",
+  };
+  const fallback = record({ id: "fallback", state: "review" });
+  assert.deepEqual(runStatusLines([published, fallback], alive), [
+    "● Audit blocked runs",
+    "  ticket › Writing the audit of blocked ticket runs. · 5s (1m 5s total) · claude · opus",
+    "● fallback  ticket › review · 0s",
+  ]);
+  assert.equal(published.state, "implement");
+});
+
+test("the status line sanitizes and truncates now with the existing terminal rules", () => {
+  const published = { ...record({ id: "now-run", state: "implement" }), now: "Writing\x1b[2J the\taudit." };
+  const lines = runStatusLines([published], alive);
+  assert.deepEqual(lines, ["● now-run  ticket › Writing [2J the audit. · 0s"]);
+  assert.deepEqual(runStatusLines([published], { ...alive, color: true }).map(stripVTControlCharacters), lines);
+  assert.deepEqual(runStatusLines([published], { ...alive, columns: 30 }), ["● now-run  ticket › Writing […"]);
+});
+
+test("the standalone status line reads now from the published record", async (context) => {
+  const directory = await temporaryDirectory(context);
+  const published = {
+    ...record({ id: "now-run", owner: "session", pid: process.pid, state: "implement" }),
+    now: "Writing the audit of blocked ticket runs.",
+  };
+  await writeFile(join(directory, "now-run.json"), JSON.stringify(published));
+  const result = runScript(JSON.stringify({ session_id: "session" }), {
+    MACHINES_RUN_STATUS_DIR: directory, NO_COLOR: "1",
+    NODE_OPTIONS: `--import=data:text/javascript,Date.now=()=>${now}`,
+  });
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, "● now-run  ticket › Writing the audit of blocked ticket runs. · 0s\n");
+});
+
 test("a labelled run leads with its label, then workflow, time in state, and Agent", () => {
   const labelled = record({
     id: "1a2b3c4d-0000", label: "org-2 → machines: Continue a chat", state: "change",

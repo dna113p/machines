@@ -11,6 +11,7 @@ import { runStatusDirectory as statusLineDirectory, runStatusLines } from "../cl
 import { MachineSession as McpSession } from "../mcp/server.ts";
 import { startMachineHost, type HostedHumanRequest } from "../src/host.ts";
 import type { JsonValue } from "../src/json.ts";
+import { prepareMachineRun } from "../src/launcher.ts";
 import { respondToRun } from "../src/run-inbox.ts";
 import {
   createRunStatusPublisher,
@@ -34,6 +35,107 @@ const structured = resolve("tests/fixtures/structured.machine.ts");
 const endingsFixture = resolve("tests/fixtures/endings/matching.machine.ts");
 /** Where a run publishes when nothing says where, under the home it is given. */
 const standardDirectory = (home: string) => join(home, ".local", "state", "machines", "runs");
+
+test("a workflow publishes now immediately, replaces and clears it, and retains it across transitions", async (context) => {
+  const root = await temporaryDirectory(context);
+  const directory = join(root, "status");
+  const observed = join(root, "observed.json");
+  const path = join(root, "now.machine.ts");
+  await writeFile(path, `
+    import { writeFileSync } from "node:fs";
+    import { readRunStatuses } from ${JSON.stringify(resolve("src/run-status.ts"))};
+    export const description = "Publishes what this run is doing.";
+    export default (p) => {
+      const observations = [];
+      const observe = () => {
+        observations.push(readRunStatuses(${JSON.stringify(directory)})[0]);
+        writeFileSync(${JSON.stringify(observed)}, JSON.stringify(observations));
+      };
+      return p.machine({ initial: "write", output: () => ({ summary: "The audit is written." }), states: {
+        write: p.operation(() => {
+          p.status({ now: "Writing the audit." }); observe();
+          p.status({ now: "Checking the audit findings." }); observe();
+          p.status({}); observe();
+          return { type: "next" };
+        }, { next: "check" }),
+        check: p.operation(() => {
+          observe();
+          p.status({ now: null }); observe();
+          p.status({ now: "The audit is ready for review." }); observe();
+          return { type: "done" };
+        }, { done: "finished" }),
+        finished: p.final(),
+      } });
+    };
+  `);
+  const result = runCli([], root, { MACHINES_RUN_STATUS_DIR: directory }, path);
+  assert.equal(result.status, 0, result.stderr);
+  const observations = JSON.parse(await readFile(observed, "utf8")) as Array<RunStatusRecord & { now?: string }>;
+  assert.deepEqual(observations.map(({ state, now }) => ({ state, now })), [
+    { state: "write", now: "Writing the audit." },
+    { state: "write", now: "Checking the audit findings." },
+    { state: "write", now: "Checking the audit findings." },
+    { state: "check", now: "Checking the audit findings." },
+    { state: "check", now: undefined },
+    { state: "check", now: "The audit is ready for review." },
+  ]);
+  const [record] = readRunStatuses(directory) as Array<RunStatusRecord & { now?: string }>;
+  assert.ok(record);
+  assert.equal(record.now, "The audit is ready for review.");
+  assert.equal(record.state, "finished");
+  assert.equal(record.note, "The audit is written.");
+  const raw = JSON.parse(await readFile(join(directory, `${record.id}.json`), "utf8")) as { now?: string };
+  assert.equal(raw.now, record.now);
+});
+
+for (const publication of ["enabled", "disabled"] as const) {
+  test(`workflow now accepts 200 characters with publication ${publication}`, async (context) => {
+    const root = await temporaryDirectory(context);
+    const directory = join(root, "status");
+    const path = join(root, "boundary.machine.ts");
+    const now = "x".repeat(200);
+    await writeFile(path, `export const description = "Sets a boundary-length now line.";
+      export default (p) => p.machine({ initial: "work", states: {
+        work: p.operation(() => { p.status({ now: ${JSON.stringify(now)} }); return { type: "done" }; }, { done: "finished" }),
+        finished: p.final(),
+      } });`);
+    if (publication === "disabled") {
+      publishFrom(context, { MACHINES_RUN_STATUS_DIR: "off" });
+      const prepared = await prepareMachineRun({ machine: path, cwd: root, home: root });
+      assert.equal((await prepared.start()).value, "finished");
+      return;
+    }
+    const result = runCli([], root, { MACHINES_RUN_STATUS_DIR: directory }, path);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal((readRunStatuses(directory)[0] as RunStatusRecord & { now?: string }).now, now);
+  });
+
+  for (const [kind, now] of [["201 characters", "x".repeat(201)], ["line feed", "Writing\nthe audit."], ["carriage return", "Writing\rthe audit."]] as const) {
+    test(`workflow now refuses ${kind} and names the field with publication ${publication}`, async (context) => {
+      const root = await temporaryDirectory(context);
+      const path = join(root, "validation.machine.ts");
+      await writeFile(path, `export const description = "Refuses an invalid now line.";
+        export default (p) => p.machine({ initial: "work", states: {
+          work: p.operation(() => { p.status({ now: ${JSON.stringify(now)} }); return { type: "done" }; }, { done: "finished" }),
+          finished: p.final(),
+        } });`);
+      if (publication === "disabled") {
+        publishFrom(context, { MACHINES_RUN_STATUS_DIR: "off" });
+        const prepared = await prepareMachineRun({ machine: path, cwd: root, home: root });
+        await assert.rejects(prepared.start(), (cause: unknown) => {
+          assert.ok(cause instanceof Error);
+          assert.match(cause.message, /\bnow\b/iu);
+          return true;
+        });
+        return;
+      }
+      const result = runCli([], root, { MACHINES_RUN_STATUS_DIR: join(root, "status") }, path);
+      assert.equal(result.status, 1, result.stderr);
+      assert.match(result.stderr, /\bnow\b/iu);
+      assert.doesNotMatch(result.stderr, /is not a function/iu, "the now validator must refuse the value");
+    });
+  }
+}
 
 test("sleeping status records preserve their deadline and ignore later updates", async (context) => {
   const directory = await temporaryDirectory(context);
@@ -2068,4 +2170,28 @@ test("a hosted run publishes its child's state and graph under its use state, an
   assert.deepEqual(await hosted.result, { state: "accepted" });
   assert.ok(states.some((state) => JSON.stringify(state) === nestedState), JSON.stringify(states));
   assert.ok(graphStates(published()).has("review.review"));
+});
+
+
+test("prepared runs of the same workflow have independent now channels", async (context) => {
+  const root = await temporaryDirectory(context);
+  const path = join(root, "independent.ts");
+  await writeFile(path, `export const description = "Names its own work.";
+    export default (p, input) => p.machine({ initial: "work", states: {
+      work: p.operation(async () => {
+        p.status({ now: input });
+        await Promise.resolve();
+        p.status({});
+        return { type: "done" };
+      }, { done: "finished" }),
+      finished: p.final(),
+    } });`);
+  const options = { machine: path, cwd: root, home: root };
+  const first = await prepareMachineRun({ ...options, input: "Writing the first audit." });
+  const second = await prepareMachineRun({ ...options, input: "Reviewing the second audit." });
+  const seen: Array<Array<string | null | undefined>> = [[], []];
+  await Promise.all([first, second].map((prepared, index) => prepared.start({
+    onStatus(change) { seen[index]!.push(change.now); },
+  })));
+  assert.deepEqual(seen, [[null, "Writing the first audit."], [null, "Reviewing the second audit."]]);
 });

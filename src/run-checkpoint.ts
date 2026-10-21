@@ -19,6 +19,7 @@ export interface ChildCheckpoint {
 }
 
 export interface RunCheckpoint extends ChildCheckpoint {
+  readonly now?: string;
   readonly schemaVersion: 1 | 2;
   readonly id: string;
   readonly agents: Readonly<Record<string, string>>;
@@ -165,6 +166,7 @@ function readCheckpoint(file: string, id: string): RunCheckpoint {
   const saved: unknown = JSON.parse(readFileSync(file, "utf8"));
   const c = saved as Partial<RunCheckpoint> | null;
   if (!c || typeof c !== "object" || jsonProblem(c) !== undefined || (c.schemaVersion !== 1 && c.schemaVersion !== 2) || c.id !== id
+    || (c.now !== undefined && (typeof c.now !== "string" || /[\r\n\u0085\u2028\u2029]/u.test(c.now) || [...c.now].length > 200))
     || typeof c.cwd !== "string" || typeof c.home !== "string"
     || (c.sleep !== undefined && c.sleep !== true)
     || typeof c.writtenAt !== "string" || !Number.isFinite(Date.parse(c.writtenAt))
