@@ -42,6 +42,14 @@ launcher), so an Agent is held to the same gates a person runs. Where the
 project's checks stop at the first failure, prefer running every gate and
 reporting all failures at once: one repair round then sees them all.
 
+Start with the audit when Machine Shop is at hand: from the umbrella,
+`npm run audit -- <project-dir>` runs Machine Shop's `audit-project`, which
+inventories the project, has one analyst propose the Machines, gates and role
+bindings that fit it, and writes a page with a drift table and routing map.
+Accept it to install and refresh the defaults, or run with `--apply`. A project
+with no `.machines/` is the setup case. The steps below are what the audit does
+by hand, and what it cannot judge for you.
+
 Inspect the existing orchestrator instructions and any `.machines/README.md`.
 Run `machine list` and `machine agents` in the actual work directories, or use
 `machine_list` / `machine_agents` with the correct workspace. Read candidate
