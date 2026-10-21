@@ -175,6 +175,70 @@ function answer(project: Project, record: SleepingRecord, response: string): voi
 }
 
 for (const kind of ["timed", "Human"] as const) {
+  test(`workflow note and page survive ${kind} sleep and continuation in record and checkpoint`, async (context) => {
+    const project = await createProject(context);
+    const note = "The audit is ready. Needs: review the findings.";
+    const page = "<h1>Run audit</h1><p>Changed: recorded every finding.</p>";
+    const path = join(project.project, ".machines", "page.ts");
+    writeFileSync(path, `
+      export const description = "Keeps its note and page through two sleeps.";
+      export default (p) => p.machine({ initial: "publish", output: () => ({ summary: "Fallback summary." }), states: {
+        publish: p.operation(() => {
+          p.status({ note: ${JSON.stringify(note)}, page: ${JSON.stringify(page)} });
+          return { type: "ready" };
+        }, { ready: "rest" }),
+        rest: ${kind === "timed"
+          ? 'p.wait({ every: "50ms" }, { due: "again" })'
+          : 'p.human("Review the audit?", { submitted: "again" })'},
+        again: p.human("Approve the findings?", { submitted: "finished" }),
+        finished: p.final(),
+      } });
+    `);
+    const started = await host(context, {
+      machine: path, cwd: project.project, home: project.home, sleep: true, publishRunStatus: true,
+    });
+    const first = await settled(started, `the ${kind} page run`);
+    assert.equal(first.state, "rest");
+    const before = recordOf(project, started.id) as SleepingRecord & { page?: string };
+    assert.equal(before.status, "sleeping");
+    assert.equal(before.note, note);
+    assert.equal(before.page, page);
+    const saved = readCheckpoint(project, started.id) as Checkpoint & { note?: string; page?: string };
+    assert.equal(saved.note, note);
+    assert.equal(saved.page, page);
+    assert.equal(saved.state.kind, kind === "timed" ? "wait" : "human");
+    if (kind === "timed") {
+      assert.ok(first.sleeping?.due);
+      await until(Date.parse(first.sleeping.due));
+    } else answer(project, before, "yes");
+
+    // Continuation skips publish, then sleeps again so the restored pair is observable on disk.
+    const continued = await host(context, { continue: started.id });
+    assert.equal(continued.id, started.id);
+    const second = await settled(continued, "the continued page run");
+    assert.equal(second.state, "again");
+    assert.ok(second.sleeping?.human);
+    const after = recordOf(project, started.id) as SleepingRecord & { page?: string };
+    assert.equal(after.status, "sleeping");
+    assert.equal(after.note, note);
+    assert.equal(after.page, page);
+    const checkpoint = readCheckpoint(project, started.id) as Checkpoint & { note?: string; page?: string };
+    assert.equal(checkpoint.state.value, "again");
+    assert.equal(checkpoint.note, note);
+    assert.equal(checkpoint.page, page);
+
+    answer(project, after, "yes");
+    const finished = await host(context, { continue: started.id });
+    assert.equal((await settled(finished, "the delivered page run")).state, "finished");
+    const completed = recordOf(project, started.id) as SleepingRecord & { page?: string };
+    assert.equal(completed.status, "completed");
+    assert.equal(completed.note, note, "completion must not replace the note with output.summary");
+    assert.equal(completed.page, page);
+    assert.equal(existsSync(checkpointFile(project, started.id)), false);
+  });
+}
+
+for (const kind of ["timed", "Human"] as const) {
   test(`workflow now survives ${kind} sleep and continuation in both status and the next checkpoint`, async (context) => {
     const project = await createProject(context);
     const now = "The audit is written; waiting for its review.";

@@ -22,6 +22,93 @@ test("the public module supplies all factory primitives, including validated dat
   assert.throws(() => factoryPrimitives.data({ badKey: () => 1 }), /data.badKey/u);
 });
 
+test("updating a note and page rewrites checkpoint metadata without recapturing interrupted working data", async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "checkpoint-page-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const path = join(directory, "machine.ts");
+  const page = "<p>Changed: the audit is written. Needs: review.</p>";
+  writeFileSync(path, `export const description = "Updates its page after checkpoint data was captured.";
+    export default (p) => {
+      const data = p.data({ count: 0 });
+      return p.machine({ initial: "prepare", states: {
+        prepare: p.operation(() => { data.count = 7; return { type: "done" }; }, { done: "ask" }),
+        ask: p.human(() => {
+          data.count += 1;
+          p.status({ note: "Audit ready.", page: ${JSON.stringify(page)} });
+          return "Continue?";
+        }, { submitted: "check" }),
+        check: p.operation(() => {
+          if (data.count !== 8) throw new Error("Recaptured interrupted data: " + data.count);
+          p.status({ note: "Reviewed without attachment." });
+          return { type: "done" };
+        }, { done: "again" }),
+        again: p.human("Approve?", { submitted: "finished" }), finished: p.final(),
+      } });
+    };`);
+  const options = { machine: path, cwd: directory, home: directory };
+  const prepared = await prepareMachineRun(options);
+  await assert.rejects(prepared.start({
+    checkpoint: { directory, id: "metadata" }, human: () => { throw new Error("interrupted"); },
+  }), /Human failed in state "ask": interrupted/u);
+  const saved = JSON.parse(readFileSync(checkpointPath(directory, "metadata"), "utf8")) as RunCheckpoint & { note?: string; page?: string };
+  assert.equal(saved.note, "Audit ready.");
+  assert.equal(saved.page, page);
+  assert.equal(saved.state.value, "ask");
+  assert.deepEqual(saved.data, { count: 7 }, "status updates must preserve the captured entry data");
+
+  const continued = await prepareMachineRun({ ...options, continueRun: saved });
+  let requests = 0;
+  await assert.rejects(continued.start({
+    checkpoint: { directory, id: "metadata" },
+    human: () => { if (++requests === 1) return "yes"; throw new Error("interrupted again"); },
+  }), /Human failed in state "again": interrupted again/u);
+  const after = JSON.parse(readFileSync(checkpointPath(directory, "metadata"), "utf8")) as RunCheckpoint & { note?: string; page?: string };
+  assert.equal(after.state.value, "again");
+  assert.equal(after.note, "Reviewed without attachment.");
+  assert.equal("page" in after, false, "the replacement note clears the attachment in the checkpoint too");
+  assert.deepEqual(after.data, { count: 8 });
+});
+
+test("checkpoint readers retain valid note/page pairs and reject malformed attachments", (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "checkpoint-page-read-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const path = join(directory, "machine.ts");
+  writeFileSync(path, "source");
+  const due = new Date(Date.now() - 1_000).toISOString();
+  const saved: RunCheckpoint = {
+    schemaVersion: 1, id: "page", machine: { name: "machine", path, sourceHash: "old" },
+    input: "", agents: {}, cwd: directory, home: directory, sleep: true,
+    state: { value: "rest", path: "rest", kind: "wait", due, enteredAt: due },
+    data: {}, context: {}, writtenAt: due,
+  };
+  createRunStatusPublisher({ id: "page", machine: "machine", path, cwd: directory }, { MACHINES_RUN_STATUS_DIR: directory }).sleep(due);
+  const page = "<p>Changed: the audit is written.</p>";
+  writeCheckpoint(directory, { ...saved, note: "Audit ready.", page } as RunCheckpoint);
+  const continued = claimContinuation("page", directory);
+  try {
+    assert.equal((continued.checkpoint as RunCheckpoint & { page?: string }).page, page);
+    assert.equal((continued.checkpoint as RunCheckpoint & { note?: string }).note, "Audit ready.");
+  } finally { continued.release(); }
+
+  const invalid: Array<Record<string, unknown>> = [
+    { note: "Audit.", page: "x".repeat(200_001) }, { note: "Audit.", page: "<script>alert(1)</script>" },
+    { note: "Audit.", page: "<html>Document</html>" }, { note: "Audit.", page: 7 },
+    { page }, { note: "  ", page }, { note: 7, page },
+  ];
+  for (const fields of invalid) {
+    // Corrupt on disk to exercise the reader independently of write-side validation.
+    writeFileSync(checkpointPath(directory, "page"), JSON.stringify({ ...saved, ...fields }));
+    assert.throws(() => {
+      const claim = claimContinuation("page", directory);
+      claim.release();
+    }, /invalid checkpoint|page/iu, JSON.stringify(fields).slice(0, 100));
+  }
+  writeCheckpoint(directory, saved);
+  const legacy = claimContinuation("page", directory);
+  try { assert.deepEqual(legacy.checkpoint, saved, "legacy checkpoints without a note or page remain readable"); }
+  finally { legacy.release(); }
+});
+
 test("updating now saves checkpoint metadata without recapturing interrupted working data", async (t) => {
   const directory = mkdtempSync(join(tmpdir(), "checkpoint-now-"));
   t.after(() => rmSync(directory, { recursive: true, force: true }));

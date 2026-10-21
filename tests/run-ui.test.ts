@@ -3,7 +3,7 @@ import "./environment.ts";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
-import { request } from "node:http";
+import { request, type IncomingHttpHeaders } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -176,7 +176,7 @@ test("lost runs are told apart, and panels come from the project's ui.json", asy
   assert.throws(() => parsePanelOutput("x", "{}"), /items array/u);
 });
 
-interface Reply { readonly status: number; readonly body: string }
+interface Reply { readonly status: number; readonly body: string; readonly headers: IncomingHttpHeaders }
 
 function call(url: string, options: { method?: string; host?: string; headers?: Record<string, string>; body?: string } = {}): Promise<Reply> {
   return new Promise((resolveReply, rejectReply) => {
@@ -187,7 +187,7 @@ function call(url: string, options: { method?: string; host?: string; headers?: 
     }, (response) => {
       let body = "";
       response.on("data", (chunk) => { body += String(chunk); });
-      response.on("end", () => resolveReply({ status: response.statusCode ?? 0, body }));
+      response.on("end", () => resolveReply({ status: response.statusCode ?? 0, body, headers: response.headers }));
     });
     sent.on("error", rejectReply);
     sent.end(options.body);
@@ -371,6 +371,72 @@ function runSections(document: FakeDocument) {
 function clock(iso: string) {
   return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
+
+for (const status of ["completed", "failed", "sleeping"] as const) {
+  test(`machine ui shows a ${status} run page below its note in an isolated frame and removes it for a plain note`, () => {
+    const ui = openPage(runUiPage("page-token"), "http://localhost/", async () => new Response("{}"));
+    const stamp = new Date().toISOString();
+    const page = '<h1>Audit delivery</h1><p>Changed: recorded the findings.</p><a href="https://example.com/review">Review findings</a>';
+    const runWithPage = {
+      ...run, id: "delivered", label: "Delivered audit", status, state: "finished",
+      startedAt: stamp, updatedAt: stamp, note: "Audit ready for review.", page,
+      ...(status === "sleeping" ? { due: stamp } : {}),
+    };
+    const snapshot = (record: unknown) => ({ project: { name: "test" }, directory: "/tmp", panels: [], runs: [record] });
+    ui.show(snapshot(runWithPage));
+    const detail = ui.document.getElementById("detail")!;
+    const frames = detail.querySelectorAll("iframe");
+    assert.equal(frames.length, 1, "the attached page has one frame");
+    const frame = frames[0]!;
+    assert.equal(frame.getAttribute("sandbox"), "", "the page gets no sandbox capabilities");
+    assert.equal(frame.getAttribute("src"), null, "the frame loads no external resource");
+    const srcdoc = frame.getAttribute("srcdoc");
+    assert.ok(srcdoc, "the frame uses srcdoc");
+    assert.ok(srcdoc.includes(page), "the page is HTML inside the isolated document");
+    assert.equal(detail.querySelectorAll("a").length, 0, "page links are never inserted into the parent document");
+    const note = detail.descendants().find((node) => node.hasClass("note"));
+    assert.ok(note);
+    assert.equal(note.textContent, runWithPage.note);
+    assert.ok(detail.descendants().indexOf(note) < detail.descendants().indexOf(frame), "the frame follows its note");
+
+    const policyTag = srcdoc.match(/<meta\b[^>]*http-equiv=["']Content-Security-Policy["'][^>]*>/iu)?.[0];
+    assert.ok(policyTag, "the child document supplies its own content policy");
+    // Read either quoting style and HTML character references used inside an attribute.
+    const policy = /\bcontent=("([^"]*)"|'([^']*)')/iu.exec(policyTag);
+    assert.ok(policy);
+    const csp = (policy[2] ?? policy[3]!).replace(/&#39;|&#x27;|&apos;/giu, "'").replace(/&quot;/giu, '"');
+    assert.match(csp, /(?:^|;)\s*default-src\s+'none'(?:\s*;|\s*$)/iu);
+    assert.match(csp, /(?:^|;)\s*base-uri\s+'none'(?:\s*;|\s*$)/iu);
+    assert.match(csp, /(?:^|;)\s*form-action\s+'none'(?:\s*;|\s*$)/iu);
+    assert.doesNotMatch(csp, /unsafe-inline|unsafe-eval|https?:|data:|\*/iu, "the child policy enables no scripts, styles, or resource loading");
+    for (const directive of csp.split(";")) {
+      const [name, ...sources] = directive.trim().split(/\s+/u);
+      if (/^(?:default|script|style|img|connect|font|frame|media|object|child|manifest|worker)-src(?:-elem|-attr)?$/u.test(name ?? "")) {
+        assert.deepEqual(sources, ["'none'"], `${name} must not override the ban on resource loading`);
+      }
+    }
+    const inert = /<(?:body|main|div|section)\b[^>]*\binert(?=[\s=>])[^>]*>/iu.exec(srcdoc);
+    assert.ok(inert, "the page is inert so its ordinary links cannot be activated");
+    assert.ok(inert.index < srcdoc.indexOf(page), "inert covers the page rather than an unrelated element");
+
+    const { page: _page, ...plain } = runWithPage;
+    ui.show(snapshot({ ...plain, note: "A plain delivery note." }));
+    assert.match(detail.textContent, /A plain delivery note\./u);
+    assert.equal(detail.querySelectorAll("iframe").length, 0, "a run without a page has no frame");
+  });
+}
+
+test("machine ui's parent content policy permits its isolated srcdoc frame", async (context) => {
+  const directory = await temporary(context);
+  const project = await temporary(context);
+  const ui = await startRunUi({ directory, projectDir: project, port: 0 });
+  context.after(() => ui.close());
+  const response = await call(ui.url);
+  assert.equal(response.status, 200);
+  const csp = response.headers["content-security-policy"];
+  assert.equal(typeof csp, "string");
+  assert.match(csp as string, /(?:^|;)\s*frame-src\s+[^;]*(?:'self'|about:)/iu);
+});
 
 test("machine ui cards show now, update it live, and fall back to state when cleared", () => {
   const page = openPage(runUiPage("page-token"), "http://localhost/", async () => new Response("{}"));

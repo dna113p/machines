@@ -24,6 +24,14 @@ line, and `machine ui` show it in their run lists, falling back to the usual sta
 display when absent. JSON records keep both `now` and the state's name. The
 sentence survives sleep and continuation.
 
+A workflow can also leave a lasting note with an optional HTML page using
+[`p.status({ note, page })`](authoring.md#run-status). `machine ui` shows the page
+under its note in a sandboxed frame with scripts, styles, resource loading and
+links disabled. Finished or failed notes in `machine runs` have `(page)` appended
+when an attachment is present. JSON status records expose `note` and `page` for
+other observers. The pair survives sleep, continuation and stopping; an explicit
+note takes precedence over the final output summary.
+
 ## Commands
 
 ```bash

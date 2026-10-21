@@ -1,3 +1,4 @@
+import { formatNote, runNoteProblem } from "./run-note.ts";
 import { copyHumanRequest, type HumanPresentation } from "./human-request.ts";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -48,8 +49,10 @@ export interface RunStatusRecord {
   /** Names the inbox responses the run took lately, so that each sender can tell; never a response. */
   readonly deliveries?: readonly string[];
   readonly error?: string;
-  /** The finished run's summary, at most 2000 characters including any ellipsis. */
+  /** The authored note or final output summary, at most 2000 characters. */
   readonly note?: string;
+  /** An isolated HTML body fragment attached to this note. */
+  readonly page?: string;
   /** The declared ending reached by a completed run. */
   readonly ending?: RunEnding;
   /** The Machine's states and transitions, when it is small enough to draw. */
@@ -112,6 +115,9 @@ export interface RunStatusRun {
 
 /** A present key replaces its field; a present key holding `undefined` clears it. */
 export interface RunStatusChange {
+  /** Replaces the note and its page together; omitting page removes it. */
+  readonly note?: string;
+  readonly page?: string;
   readonly now?: string;
   readonly graph?: RunGraph;
   readonly status?: "running" | "waiting";
@@ -202,8 +208,9 @@ export function runDeliveryPath(directory: string, id: string, delivery: string)
 
 /**
  * Publishes one run for hosts that can only read files, such as a status line,
- * in `runStatusDirectory`. Publication is presentation: it never throws, and it
- * records no Machine input and only the supplied summary of its output.
+ * in `runStatusDirectory`. Invalid note/page updates throw; publication failures
+ * do not. Records contain no Machine input and only the supplied output summary
+ * or authored note/page.
  * A run whose first record cannot be written, as in a read-only home, is not
  * published at all.
  */
@@ -234,7 +241,8 @@ export function createRunStatusPublisher(
   let human: RunStatusHuman | undefined;
   let deliveries: ReadonlyArray<{ readonly id: string; readonly takenAt: number }> = [];
   let error: string | undefined;
-  let note: string | undefined;
+  let note = previous?.note;
+  let page = previous?.page;
   let now = previous?.now;
   let ending: RunEnding | undefined;
   let trail: RunTrailStep[] = [...previous?.trail ?? []];
@@ -270,6 +278,7 @@ export function createRunStatusPublisher(
       ...(deliveries.length === 0 ? {} : { deliveries: deliveries.map((delivery) => delivery.id) }),
       ...(error === undefined ? {} : { error }),
       ...(note === undefined ? {} : { note }),
+      ...(page === undefined ? {} : { page }),
       ...(now === undefined ? {} : { now }),
       ...(ending === undefined ? {} : { ending }),
       ...(graph === undefined ? {} : { graph }),
@@ -299,12 +308,16 @@ export function createRunStatusPublisher(
     directory,
     update(change) {
       if (status === "completed" || status === "failed" || status === "sleeping") return;
+      const problem = runNoteProblem(change);
+      if (problem) throw new Error(problem);
       const nextState = "state" in change ? formatState(change.state) : state;
       const next = {
         graph: "graph" in change ? change.graph : graph,
         status: change.status ?? status,
         state: nextState,
         now: "now" in change ? change.now : now,
+        note: "note" in change ? formatNote(change.note) : note,
+        page: "note" in change ? change.page : page,
         agent: "agent" in change ? pickAgent(change.agent) : agent,
         // A wait belongs to the state whose Agent is waiting.
         limit: "limit" in change ? pickLimit(change.limit) : nextState === state ? limit : undefined,
@@ -318,12 +331,12 @@ export function createRunStatusPublisher(
         ],
       };
       // Repeated notifications for an unchanged run do not need another write.
-      if (JSON.stringify(next) === JSON.stringify({ graph, status, state, now, agent, limit, attempt, retry, human, deliveries })) return;
+      if (JSON.stringify(next) === JSON.stringify({ graph, status, state, now, note, page, agent, limit, attempt, retry, human, deliveries })) return;
       if (next.state !== state) {
         stateSince = new Date().toISOString();
         enter(next.state, stateSince);
       }
-      ({ graph, status, state, now, agent, limit, attempt, retry, human, deliveries } = next);
+      ({ graph, status, state, now, note, page, agent, limit, attempt, retry, human, deliveries } = next);
       publish();
     },
     sleep(until) {
@@ -354,7 +367,7 @@ export function createRunStatusPublisher(
       } else {
         status = "completed";
         state = formatState(outcome.state) ?? state;
-        note = formatNote(outcome.note);
+        note ??= formatNote(outcome.note);
         ending = outcome.ending === undefined ? undefined : { name: outcome.ending.name, kind: outcome.ending.kind };
         enter(state, new Date().toISOString());
       }
@@ -591,7 +604,7 @@ function isRunStatusRecord(value: unknown): value is RunStatusRecord {
     && (record.continuedBy === undefined || record.continuedBy === "host")
     && isOptionalStrings(record.deliveries)
     && isOptionalString(record.error)
-    && isOptionalString(record.note)
+    && runNoteProblem(record) === undefined
     && (record.ending === undefined || (record.ending !== null && typeof record.ending === "object"
       && !Array.isArray(record.ending) && typeof (record.ending as RunEnding).name === "string"
       && isEndingKind((record.ending as RunEnding).kind)))
@@ -663,17 +676,6 @@ export function runOutputSummary(output: unknown): string | undefined {
   if (output === null || typeof output !== "object" || Array.isArray(output)) return undefined;
   const summary = (output as Record<string, unknown>).summary;
   return typeof summary === "string" && summary.trim() !== "" ? summary : undefined;
-}
-
-function formatNote(note: string | undefined): string | undefined {
-  const text = note?.trim();
-  if (!text) return undefined;
-  if (text.length <= 2000) return text;
-  // Reserve one character for the ellipsis, keeping the last whole word that fits.
-  let end = 1999;
-  while (end > 0 && !/\s/u.test(text[end]!)) end -= 1;
-  // A single word longer than the limit still has to fit in the record.
-  return `${text.slice(0, end || 1999).trimEnd()}…`;
 }
 
 /** One short line: a label is a caption, not a place for task text. */

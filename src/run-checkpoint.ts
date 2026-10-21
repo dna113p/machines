@@ -1,3 +1,4 @@
+import { runNoteProblem } from "./run-note.ts";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -19,6 +20,8 @@ export interface ChildCheckpoint {
 }
 
 export interface RunCheckpoint extends ChildCheckpoint {
+  readonly note?: string;
+  readonly page?: string;
   readonly now?: string;
   readonly schemaVersion: 1 | 2;
   readonly id: string;
@@ -71,7 +74,7 @@ export function writeCheckpoint(directory: string, checkpoint: RunCheckpoint): v
   const file = checkpointPath(directory, checkpoint.id);
   const temporary = join(directory, `.${checkpoint.id}.${process.pid}.${temporaryFiles += 1}.tmp`);
   try {
-    const problem = jsonProblem(checkpoint, "checkpoint");
+    const problem = runNoteProblem(checkpoint) ?? jsonProblem(checkpoint, "checkpoint");
     if (problem) throw new Error(`Cannot save checkpoint: ${problem}`);
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     writeFileSync(temporary, `${JSON.stringify(checkpoint)}\n`, { mode: 0o600 });
@@ -173,6 +176,8 @@ function readCheckpoint(file: string, id: string): RunCheckpoint {
     || !c.agents || typeof c.agents !== "object" || Array.isArray(c.agents) || Object.values(c.agents).some((value) => typeof value !== "string")) {
     throw new Error(`Cannot continue run "${id}": invalid checkpoint`);
   }
+  const problem = runNoteProblem(c);
+  if (problem) throw new Error(`Cannot continue run "${id}": invalid checkpoint: ${problem}`);
   assertCheckpointLevel(c, id, c.schemaVersion === 2);
   return saved as RunCheckpoint;
 }

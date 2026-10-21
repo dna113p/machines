@@ -1,3 +1,4 @@
+import { runNoteProblem } from "./run-note.ts";
 import { presentHumanRequest, type RunHistory } from "./presenter.ts";
 import { machineGraph, statePaths } from "./run-graph.ts";
 import { copyHumanRequest, humanRequestProblem, type HumanPresentation } from "./human-request.ts";
@@ -501,13 +502,17 @@ export function data<T extends object>(initial: T): T {
   return initial;
 }
 
-/** A workflow's current sentence. Omission preserves it; null clears it. */
+/** Run presentation. A new note replaces its page; omission preserves the pair. */
 export interface WorkflowStatus {
+  readonly note?: string;
+  readonly page?: string;
   readonly now?: string | null;
 }
 
 /** Validate status even without a publisher; the launcher supplies the run-scoped writer. */
 export function status(change: WorkflowStatus): void {
+  const problem = runNoteProblem(change);
+  if (problem) throw new Error(problem);
   if (change.now === undefined || change.now === null) return;
   if (typeof change.now !== "string" || /[\r\n\u0085\u2028\u2029]/u.test(change.now) || [...change.now].length > 200) {
     throw new Error("now must be one line of at most 200 characters");

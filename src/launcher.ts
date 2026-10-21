@@ -1,3 +1,4 @@
+import { formatNote, runNoteProblem } from "./run-note.ts";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { existsSync } from "node:fs";
 
@@ -61,7 +62,7 @@ export interface PreparedMachineRun {
   start(options?: Omit<RunOptions, "agents"> & {
     /** Reports the full graph when a started child adds states or edges. */
     readonly onGraph?: (graph: RunGraph) => void;
-    /** The current sentence, initially restored from a checkpoint; null explicitly clears it. */
+    /** Current presentation, restored from a checkpoint; null now or an empty note clears that field. */
     readonly onStatus?: (change: WorkflowStatus) => void;
     readonly checkpoint?: { readonly directory: string; readonly id: string; readonly sleep?: boolean };
   }): Promise<SnapshotFrom<AnyStateMachine>>;
@@ -88,12 +89,20 @@ export async function prepareMachineRun(
   const optional = readOptionalAgentRoles(loaded, path);
   const endings = readEndings(loaded, path);
 
+  const noteProblem = runNoteProblem(options.continueRun ?? {});
+  if (noteProblem) throw new Error(`Cannot continue: ${noteProblem}`);
+  let note = options.continueRun?.note;
+  let page = options.continueRun?.page;
   let now = options.continueRun?.now;
   let statusChanged: (() => void) | undefined;
   const status = (change: WorkflowStatus) => {
     validateStatus(change);
-    if (change.now === undefined) return;
-    now = change.now ?? undefined;
+    if (change.now === undefined && change.note === undefined) return;
+    if (change.now !== undefined) now = change.now ?? undefined;
+    if (change.note !== undefined) {
+      note = formatNote(change.note);
+      page = change.page;
+    }
     statusChanged?.();
   };
   const { definition, savedData } = await buildDefinition(loaded, path,
@@ -151,11 +160,17 @@ export async function prepareMachineRun(
       const hooks = checkpointHooks(checkpoint, frames, {
         input: options.input === undefined ? "" : options.input,
         agents: options.agents ?? {}, home, cwd,
-      }, () => now);
+      }, () => ({
+        ...(now === undefined ? {} : { now }),
+        ...(note === undefined ? {} : { note }),
+        ...(page === undefined ? {} : { page }),
+      }));
       statusChanged = () => {
         // Rewrite captured frames, never recapture live data in the middle of a step.
         hooks.write();
-        onStatus?.({ now: now ?? null });
+        onStatus?.({ now: now ?? null, note: note ?? "",
+          ...(page === undefined ? {} : { page }),
+        });
       };
       statusChanged();
       const shared: RunOptions = {
@@ -252,7 +267,7 @@ function checkpointHooks(
   checkpoint: { readonly directory: string; readonly id: string; readonly sleep?: boolean } | undefined,
   frames: (ChildCheckpoint | null)[],
   root: Pick<RunCheckpoint, "input" | "agents" | "home" | "cwd">,
-  now: () => string | undefined,
+  presentation: () => Pick<RunCheckpoint, "now" | "note" | "page">,
 ) {
   const write = () => {
     if (!checkpoint || frames.length === 0) return;
@@ -264,9 +279,8 @@ function checkpointHooks(
       ...frames[depth]!,
       ...(depth + 1 < frames.length ? { children: [nest(depth + 1)] as const } : {}),
     });
-    const currentNow = now();
     writeCheckpoint(checkpoint.directory, {
-      ...root, ...nest(0), ...(currentNow === undefined ? {} : { now: currentNow }), schemaVersion: 2, id: checkpoint.id,
+      ...root, ...nest(0), ...presentation(), schemaVersion: 2, id: checkpoint.id,
       ...(checkpoint.sleep ? { sleep: true } : {}), writtenAt: new Date().toISOString(),
     });
   };
