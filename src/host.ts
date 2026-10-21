@@ -177,6 +177,8 @@ const childMessageSchema = v.variant("type", [
     // A change to the published record. Null clears a field: IPC drops a key that holds undefined.
     change: v.strictObject({
       now: v.optional(v.nullable(v.string())),
+      note: v.optional(v.string()),
+      page: v.optional(v.string()),
       state: v.optional(stateValueSchema),
       agent: v.optional(v.nullable(v.object(agentIdentity))),
       attempt: v.optional(v.nullable(v.strictObject(agentAttempt))),
@@ -396,10 +398,11 @@ function launchMachineHost(
       } else if (message.type === "agentUpdate") {
         observe(() => options.onAgentUpdate?.(message.update as AgentUpdate));
       } else if (message.type === "status") {
-        const { state, now, agent, limit, attempt, retry } = message.change;
+        const { state, now, note, page, agent, limit, attempt, retry } = message.change;
         published?.update({
           ...(state === undefined ? {} : { state: state as StateValue }),
           ...(now === undefined ? {} : { now: now ?? undefined }),
+          ...(note === undefined ? {} : { note, page }),
           ...(agent === undefined ? {} : { agent: agent ?? undefined }),
           ...(attempt === undefined ? {} : { attempt: attempt ?? undefined }),
           ...(limit === undefined ? {} : { limit: limit ?? undefined }),

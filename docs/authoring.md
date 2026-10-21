@@ -119,7 +119,35 @@ have their own. Updating it does not recapture an interrupted state's working da
 The launcher publishes updates immediately through the CLI or a host with
 `publishRunStatus: true`. `machine runs`, the Claude status line, and `machine ui`
 show the sentence in their run lists, with their usual state display when it is
-absent. The run's `label`, state identity, and final-output `note` are unchanged.
+absent. The run's `label` and state identity are unchanged.
+
+Use `p.status({ note, page })` to leave a lasting explanation beside the run:
+
+```ts
+p.status({
+  note: "The audit is ready. Review the findings before delivery.",
+  page: "<h1>Run audit</h1><p>Changed: recorded every finding.</p>",
+});
+```
+
+The note is trimmed and shortened to 2000 characters, including an ellipsis when
+needed. A new note replaces both fields: omitting `page` clears the previous
+attachment. Omitting both fields preserves them, including when updating `now`.
+A page requires a non-empty note in the same call. A blank note without a page
+clears the pair. At completion, an explicitly set non-empty note wins over
+`output.summary`; the summary remains the fallback when there is no note.
+
+The optional page follows the Human page rules: an HTML body fragment of at most
+200,000 UTF-8 bytes, with no document wrapper, scripts, styles, event handlers or
+resource loading. Ordinary links may appear as text but cannot be activated in
+`machine ui`. Invalid pages throw an error naming the rule even when publication
+is off. The UI isolates the fragment in a sandboxed frame under the note.
+
+Notes and pages publish immediately and persist in the status record and
+checkpoint through transitions, timed or Human sleep, continuation, and failure
+or stopping. Metadata updates preserve the interrupted state's captured working
+data. Completed runs retain the pair in their status record; completion removes
+the checkpoint as usual. Nested `p.use` Machines share the enclosing run's pair.
 
 ## Using another Machine
 

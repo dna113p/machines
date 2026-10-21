@@ -37,6 +37,7 @@ const page = String.raw`<!doctype html>
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; }
+.run-page { display: block; width: 100%; height: 60vh; margin-top: 16px; border: 1px solid var(--line); background: white; }
 body { background: var(--bg); color: var(--ink); font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
 button { font: inherit; color: inherit; }
 .top { display: flex; align-items: center; gap: 16px; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 5; }
@@ -365,7 +366,7 @@ function renderDetail(run, runs, byId) {
   }))));
   if (run.trail && run.trail.length) parts.push(trailCard(run));
   if (run.error) parts.push(h("div", { class: "banner error", text: run.error }));
-  if (run.note) parts.push(h("div", { class: "card block" }, h("h2", { text: "Result" }), h("div", { class: "note", text: run.note })));
+  if (run.note) parts.push(h("div", { class: "card block" }, h("h2", { text: "Result" }), h("div", { class: "note", text: run.note }), run.page === undefined ? null : runPageFrame(run.page)));
   var keep = document.activeElement && document.activeElement.tagName === "TEXTAREA" ? document.activeElement : null;
   if (keep && el.contains(keep)) {
     // Someone is typing an answer: leave the page as it is until they stop.
@@ -373,6 +374,15 @@ function renderDetail(run, runs, byId) {
   }
   el.replaceChildren.apply(el, parts);
   drawGraph(run);
+}
+
+// The body stays inert even when a fragment closes ordinary container elements.
+// The sandbox and child CSP independently deny scripts, styles and resource loads.
+function runPageFrame(page) {
+  var document = '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
+    + '<meta http-equiv="Content-Security-Policy" content="default-src &#39;none&#39;; base-uri &#39;none&#39;; form-action &#39;none&#39;">'
+    + '</head><body inert>' + page + '</body></html>';
+  return h("iframe", { class: "run-page", title: "Run page", sandbox: "", srcdoc: document });
 }
 
 function choiceLabel(human, choice) {

@@ -36,6 +36,244 @@ const endingsFixture = resolve("tests/fixtures/endings/matching.machine.ts");
 /** Where a run publishes when nothing says where, under the home it is given. */
 const standardDirectory = (home: string) => join(home, ".local", "state", "machines", "runs");
 
+type PageRecord = RunStatusRecord & { readonly page?: string };
+const deliveryNote = "The audit is ready. Needs: review the findings.";
+const deliveryPage = "<h1>Run audit</h1><p>Changed: recorded every finding.</p>";
+
+test("workflow note/page updates publish immediately, replace together, and survive transitions", async (context) => {
+  const root = await temporaryDirectory(context);
+  const directory = join(root, "status");
+  const observed = join(root, "observed.json");
+  const path = join(root, "page.machine.ts");
+  await writeFile(path, `
+    import { writeFileSync } from "node:fs";
+    import { readRunStatuses } from ${JSON.stringify(resolve("src/run-status.ts"))};
+    export const description = "Publishes the note and page for its work.";
+    export default (p) => {
+      const observations = [];
+      const observe = () => {
+        observations.push(readRunStatuses(${JSON.stringify(directory)})[0]);
+        writeFileSync(${JSON.stringify(observed)}, JSON.stringify(observations));
+      };
+      return p.machine({ initial: "write", states: {
+        write: p.operation(() => {
+          p.status({ note: ${JSON.stringify(deliveryNote)}, page: ${JSON.stringify(deliveryPage)} }); observe();
+          p.status({}); observe();
+          p.status({ now: "Reviewing findings." }); observe();
+          p.status({ note: "A revised audit.", page: "<p>Revised findings.</p>" }); observe();
+          p.status({ note: "A note without an attachment." }); observe();
+          p.status({ note: ${JSON.stringify(deliveryNote)}, page: ${JSON.stringify(deliveryPage)} });
+          return { type: "next" };
+        }, { next: "check" }),
+        check: p.operation(() => { observe(); return { type: "done" }; }, { done: "finished" }),
+        finished: p.final(),
+      } });
+    };
+  `);
+  const result = runCli([], root, { MACHINES_RUN_STATUS_DIR: directory }, path);
+  assert.equal(result.status, 0, result.stderr);
+  const observations = JSON.parse(await readFile(observed, "utf8")) as PageRecord[];
+  const pair = { note: deliveryNote, page: deliveryPage };
+  assert.deepEqual(observations.map(({ note, page }) => ({ note, page })), [
+    pair, pair, pair, { note: "A revised audit.", page: "<p>Revised findings.</p>" },
+    { note: "A note without an attachment.", page: undefined }, pair,
+  ]);
+  assert.equal("page" in observations[4]!, false, "a new note clears the previous attachment");
+  const [record] = readRunStatuses(directory) as PageRecord[];
+  assert.equal(record?.state, "finished");
+  assert.equal(record.note, deliveryNote);
+  assert.equal(record.page, deliveryPage);
+  const raw = JSON.parse(await readFile(join(directory, `${record.id}.json`), "utf8")) as PageRecord;
+  assert.equal(raw.page, deliveryPage, "the observing side can read the page from the record file");
+});
+
+for (const route of ["CLI", "host"] as const) {
+  test(`${route} completion retains the explicit note and page instead of output.summary`, async (context) => {
+    const root = await temporaryDirectory(context);
+    const directory = join(root, "status");
+    const path = join(root, "delivered.machine.ts");
+    await writeFile(path, `export const description = "Delivers an explicit note and page.";
+      export default (p) => p.machine({ initial: "work", output: () => ({ summary: "Unrelated fallback summary." }), states: {
+        work: p.operation(() => {
+          p.status({ note: ${JSON.stringify(deliveryNote)}, page: ${JSON.stringify(deliveryPage)} });
+          return { type: "done" };
+        }, { done: "finished" }), finished: p.final(),
+      } });`);
+    if (route === "CLI") {
+      const result = runCli([], root, { MACHINES_RUN_STATUS_DIR: directory }, path);
+      assert.equal(result.status, 0, result.stderr);
+    } else {
+      publishFrom(context, { MACHINES_RUN_STATUS_DIR: directory });
+      const hosted = await startMachineHost({ machine: path, cwd: root, home: root, publishRunStatus: true });
+      context.after(() => hosted.terminate());
+      assert.deepEqual(await hosted.result, { state: "finished", output: { summary: "Unrelated fallback summary." } });
+    }
+    const [record] = readRunStatuses(directory) as PageRecord[];
+    assert.equal(record?.status, "completed");
+    assert.equal(record.note, deliveryNote);
+    assert.equal(record.page, deliveryPage);
+  });
+}
+
+test("hosted note replacement clears its page through IPC and preserves the new note at completion", async (context) => {
+  const root = await temporaryDirectory(context);
+  const directory = join(root, "status");
+  publishFrom(context, { MACHINES_RUN_STATUS_DIR: directory });
+  const path = join(root, "replace-page.machine.ts");
+  await writeFile(path, `export const description = "Replaces a page with a plain note.";
+    export default (p) => p.machine({ initial: "work", output: () => ({ summary: "Fallback." }), states: {
+      work: p.operation(() => {
+        p.status({ note: "Attached note.", page: "<p>Original attachment.</p>" });
+        return { type: "ready" };
+      }, { ready: "ask" }),
+      ask: p.human("Continue?", { submitted: "replace" }),
+      replace: p.operation(() => {
+        p.status({ note: "  Replacement note.  " });
+        return { type: "done" };
+      }, { done: "finished" }), finished: p.final(),
+    } });`);
+  const ready = deferred<HostedHumanRequest>();
+  const hosted = await startMachineHost({
+    machine: path, cwd: root, home: root, publishRunStatus: true, onHumanRequest: ready.resolve,
+  });
+  context.after(() => hosted.terminate());
+  const request = await ready.promise;
+  const attached = readRunStatuses(directory).find((record) => record.id === hosted.id)!;
+  assert.equal(attached.note, "Attached note.");
+  assert.equal(attached.page, "<p>Original attachment.</p>");
+  await hosted.respond("yes", request.requestId);
+  await hosted.result;
+  const replaced = readRunStatuses(directory).find((record) => record.id === hosted.id)!;
+  assert.equal(replaced.note, "Replacement note.");
+  assert.equal("page" in replaced, false);
+});
+
+for (const ending of ["failed", "stopped"] as const) {
+  test(`a ${ending} hosted run retains the workflow's note and page`, async (context) => {
+    const root = await temporaryDirectory(context);
+    const directory = join(root, "status");
+    publishFrom(context, { MACHINES_RUN_STATUS_DIR: directory });
+    const path = join(root, "interrupted.machine.ts");
+    await writeFile(path, `export const description = "Leaves a page when interrupted.";
+      export default (p) => p.machine({ initial: "work", states: {
+        work: p.operation(() => {
+          p.status({ note: ${JSON.stringify(deliveryNote)}, page: ${JSON.stringify(deliveryPage)} });
+          ${ending === "failed" ? 'throw new Error("audit interrupted");' : 'return { type: "ready" };'}
+        }, { ready: "ask" }),
+        ask: p.human("Review?", { submitted: "finished" }), finished: p.final(),
+      } });`);
+    const ready = deferred<HostedHumanRequest>();
+    const hosted = await startMachineHost({ machine: path, cwd: root, home: root, publishRunStatus: true, onHumanRequest: ready.resolve });
+    context.after(() => hosted.terminate());
+    // Observe rejection from the start, including when termination rejects the result.
+    const result = hosted.result.then(() => undefined, (cause: unknown) => cause);
+    if (ending === "stopped") {
+      await ready.promise;
+      hosted.terminate();
+    }
+    assert.ok(await result instanceof Error);
+    const record = (readRunStatuses(directory) as PageRecord[]).find((candidate) => candidate.id === hosted.id);
+    assert.equal(record?.status, "failed");
+    assert.equal(record.note, deliveryNote);
+    assert.equal(record.page, deliveryPage);
+  });
+}
+
+for (const publication of ["enabled", "disabled"] as const) {
+  test(`workflow page accepts exactly 200,000 UTF-8 bytes with publication ${publication}`, async (context) => {
+    const root = await temporaryDirectory(context);
+    const directory = join(root, "status");
+    const path = join(root, "boundary.machine.ts");
+    // Multibyte text ensures the limit counts bytes rather than characters.
+    const page = `<p>${"é".repeat(99_996)}x</p>`;
+    assert.equal(Buffer.byteLength(page, "utf8"), 200_000);
+    await writeFile(path, `export const description = "Leaves a boundary-sized page.";
+      export default (p) => p.machine({ initial: "work", states: {
+        work: p.operation(() => { p.status({ note: "Boundary page.", page: ${JSON.stringify(page)} }); return { type: "done" }; }, { done: "finished" }),
+        finished: p.final(),
+      } });`);
+    if (publication === "disabled") {
+      publishFrom(context, { MACHINES_RUN_STATUS_DIR: "off" });
+      const seen: unknown[] = [];
+      const prepared = await prepareMachineRun({ machine: path, cwd: root, home: root });
+      assert.equal((await prepared.start({ onStatus: (change) => seen.push(change) })).value, "finished");
+      assert.ok(seen.some((change) => (change as PageRecord).page === page), "the run-scoped status channel retains the page even without disk publication");
+    } else {
+      const result = runCli([], root, { MACHINES_RUN_STATUS_DIR: directory }, path);
+      assert.equal(result.status, 0, result.stderr);
+      assert.ok((readRunStatuses(directory)[0] as PageRecord).page === page, "the record retains the complete boundary-sized page");
+    }
+  });
+
+  const refused: Array<[string, Record<string, unknown>, RegExp]> = [
+    ["200,001 bytes", { note: "Too large.", page: "x".repeat(200_001) }, /200,?000.*(?:bytes|UTF-8)/iu],
+    ["multibyte overflow", { note: "Too large.", page: "é".repeat(100_001) }, /200,?000.*(?:bytes|UTF-8)/iu],
+    ["script", { note: "Unsafe.", page: "<script>alert(1)</script>" }, /script/iu],
+    ["document instead of fragment", { note: "Document.", page: "<html><body>Audit</body></html>" }, /fragment|<html>/iu],
+    ["style", { note: "Unsafe.", page: "<style>p { color: red }</style>" }, /style/iu],
+    ["resource loading", { note: "Unsafe.", page: '<img src="https://example.com/a.png">' }, /src/iu],
+    ["page without note", { page: "<p>Unpaired.</p>" }, /non.?empty.*note|note.*(?:required|empty)|requires.*note/iu],
+    ["page with blank note", { note: " \n ", page: "<p>Unpaired.</p>" }, /non.?empty.*note|note.*(?:required|empty)|requires.*note/iu],
+  ];
+  for (const [rule, change, diagnostic] of refused) {
+    test(`workflow page refuses ${rule} and names the rule with publication ${publication}`, async (context) => {
+      const root = await temporaryDirectory(context);
+      const path = join(root, "invalid.machine.ts");
+      await writeFile(path, `export const description = "Refuses an invalid run page.";
+        export default (p) => p.machine({ initial: "work", states: {
+          work: p.operation(() => { p.status(${JSON.stringify(change)}); return { type: "done" }; }, { done: "finished" }),
+          finished: p.final(),
+        } });`);
+      if (publication === "disabled") {
+        publishFrom(context, { MACHINES_RUN_STATUS_DIR: "off" });
+        const prepared = await prepareMachineRun({ machine: path, cwd: root, home: root });
+        await assert.rejects(prepared.start(), (cause: unknown) => {
+          assert.ok(cause instanceof Error);
+          assert.match(cause.message, /page/iu);
+          assert.match(cause.message, diagnostic);
+          return true;
+        });
+      } else {
+        const result = runCli([], root, { MACHINES_RUN_STATUS_DIR: join(root, "status") }, path);
+        assert.equal(result.status, 1, result.stderr);
+        assert.match(result.stderr, /page/iu);
+        assert.match(result.stderr, diagnostic);
+      }
+    });
+  }
+}
+
+test("status record readers retain valid pages and reject invalid or unpaired pages", async (context) => {
+  const directory = await temporaryDirectory(context);
+  await writeRecord(directory, { id: "valid", status: "completed", note: deliveryNote, page: deliveryPage } as Partial<PageRecord>);
+  await writeRecord(directory, { id: "legacy", status: "completed", note: "Old note." });
+  const invalid: Array<Record<string, unknown>> = [
+    { note: "Invalid.", page: 7 }, { note: "Invalid.", page: "x".repeat(200_001) },
+    { note: "Invalid.", page: "<script>alert(1)</script>" }, { note: "Invalid.", page: "<body>Document</body>" },
+    { page: deliveryPage }, { note: "   ", page: deliveryPage },
+  ];
+  for (const [index, change] of invalid.entries()) {
+    await writeRecord(directory, { id: `invalid-${index}`, status: "completed", ...change });
+  }
+  const records = readRunStatuses(directory) as PageRecord[];
+  assert.deepEqual(records.map(({ id }) => id).sort(), ["legacy", "valid"]);
+  assert.equal(records.find(({ id }) => id === "valid")?.page, deliveryPage);
+  assert.equal("page" in records.find(({ id }) => id === "legacy")!, false);
+});
+
+test("machine runs marks a note with an attached page and leaves a plain note unmarked", async (context) => {
+  const directory = await temporaryDirectory(context);
+  await writeRecord(directory, { id: "attached", status: "completed", note: "Audit delivered.", page: deliveryPage } as Partial<PageRecord>);
+  await writeRecord(directory, { id: "plain", status: "completed", note: "Plain delivery." });
+  const listed = spawnSync(process.execPath, [resolve("src/cli.ts"), "runs", "--all"], {
+    encoding: "utf8", env: { ...process.env, MACHINES_RUN_STATUS_DIR: directory },
+  });
+  assert.equal(listed.status, 0, listed.stderr);
+  assert.match(listed.stdout, /Audit delivered\. \(page\)/u);
+  assert.doesNotMatch(listed.stdout, /Plain delivery\. \(page\)/u);
+  assert.doesNotMatch(listed.stdout, /<h1>/u);
+});
+
 test("a workflow publishes now immediately, replaces and clears it, and retains it across transitions", async (context) => {
   const root = await temporaryDirectory(context);
   const directory = join(root, "status");

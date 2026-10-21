@@ -216,7 +216,10 @@ async function runMachine(machinePath: string, args: string[], continuation?: Co
         sleptForAnswer = requestId;
       } } : {}),
       onStatus(change) {
-        if (change.now !== undefined) published.update({ now: change.now ?? undefined });
+        published.update({
+          ...(change.now === undefined ? {} : { now: change.now ?? undefined }),
+          ...(change.note === undefined ? {} : { note: change.note, page: change.page }),
+        });
       },
       onEnter(entry) { observed.onEnter(entry); },
       onAgentUpdate(update) {
@@ -639,7 +642,8 @@ function runColumns(record: RunStatusRecord | ViewerRun) {
 
 function finishedRunNote(record: RunStatusRecord | ViewerRun): string | undefined {
   if (record.status !== "completed" && record.status !== "failed") return undefined;
-  return record.note?.split(/\r?\n/u).map(plain).find((line) => line !== "");
+  const note = record.note?.split(/\r?\n/u).map(plain).find((line) => line !== "");
+  return note === undefined ? undefined : note + (record.page === undefined ? "" : " (page)");
 }
 
 function printRunListing(record: RunStatusRecord | ViewerRun, separate: boolean, watched: boolean) {
