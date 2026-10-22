@@ -186,6 +186,14 @@ Example prompts:
 > Use machine-delegation to review the parser and its tests. Reuse an existing
 > Machine if one fits, or create one for this task, then bring back the findings.
 
+Project setup can establish and later audit one reusable project-agent binding,
+keeping its stable identity separate from individual requests and runs. It can
+use a Machine-backed route or an Overlord manager; Drip feedback reuses the shared
+project binding. These are optional, discovered integrations, not implementations
+provided by the skill. Setup records ownership, capabilities, cost and limits in
+the map; unpaid availability checks preserve existing permissions and budgets.
+See [project orchestrator setup](docs/integrations.md#project-orchestrator-setup).
+
 A few rules of thumb:
 
 - Run setup when onboarding a project or when coverage has a real gap, not for

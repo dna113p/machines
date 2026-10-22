@@ -33,6 +33,65 @@ test("project setup surveys every available Agent and its evidence before design
   assert.match(read(reference), /candidates surveyed, the evidence used/u);
 });
 
+test("project-agent setup discovers supported providers and preserves reusable identity", () => {
+  const source = read(skill);
+  assert.match(source, /Inspect the binding through its owning system's supported interface/u);
+  assert.match(source, /exact commands\/tools and capabilities from the installed version/u);
+  assert.match(source, /do not invent an API or inspect\s+private databases/u);
+  assert.match(source, /project needs, supported request types, available accounts, model\/account\s+cost, and authorized effects/u);
+  assert.match(source, /Reuse a matching project manager.*configuring or provisioning.*\n.*provider's supported route/u);
+  assert.match(source, /stable\s+project-agent identity separate from each request\/run identity/u);
+  assert.match(source, /neither Overlord nor Drip is required/u);
+  assert.match(source, /Repeated setup reuses the\s+binding and manager/u);
+});
+
+test("workflow map records binding references, limits and verification without becoming a registry", () => {
+  const source = read(reference);
+  const fields = [...source.matchAll(/^\| ([^|]+) \|/gmu)].map((match) => match[1]?.trim());
+  for (const field of [
+    "Provider and ownership", "Agent identity", "Owning computer", "Supported request types",
+    "Checkout", "Edit/review limits", "Model/account cost", "Delegation route",
+    "Ticket-escalation destination", "Verification",
+  ]) {
+    assert.ok(fields.includes(field), `Missing project-agent map field: ${field}`);
+  }
+  assert.match(source, /explicit unknowns or gaps rather than guessed\s+values/u);
+  assert.match(source, /private configuration,\s+addresses, checkout paths, receipts, transcripts, and credentials in their owning\s+system/u);
+  assert.match(source, /Do not copy secrets or create a second\s+runtime registry/u);
+  assert.match(source, /Keep per-request state out of this map/u);
+});
+
+test("optional providers retain ownership and share the feedback binding", () => {
+  const source = read(skill);
+  assert.match(source, /`overlord-context` and `overlord-tools` skills when\s+available/u);
+  assert.match(source, /Guidance does not grant tools,\s+and a tool grant does not establish project policy/u);
+  assert.match(source, /Overlord owns its managers and\s+delegation/u);
+  assert.match(source, /Preserve existing managers/u);
+  assert.match(source, /Missing provisioning,\s+credentials, integration, skills, or authorization is an explicit gap/u);
+  assert.match(source, /Do not\s+silently replace an unavailable configured provider/u);
+  assert.match(source, /reuse Drip's shared project binding, the same\s+binding used by setup and audit/u);
+  assert.match(source, /Drip owns the project binding, feedback delivery\s+and presentation/u);
+  assert.match(source, /stable request key with the person's note and\s+response evidence; reuse that key for retries/u);
+  assert.match(source, /delivery or acceptance is not\s+completion/u);
+  assert.match(source, /Do not claim that a run ID or an old manager is a newly continued session/u);
+});
+
+test("setup and audit preserve permission and ticket escalation boundaries", () => {
+  for (const path of [skill, reference]) {
+    const source = read(path);
+    assert.match(source, /same binding/u);
+    assert.match(source, /(?:without paid work|unpaid availability\s+checks)/u);
+    assert.match(source, /(?:Do not send a real manager request|never launch model work or real manager requests)/u);
+    assert.match(source, /service starts or\s+restarts/u);
+    assert.match(source, /write access,\s+publishing, or model spending/u);
+    assert.match(source, /(?:within authorization|existing authorization only)/u);
+    assert.match(source, /public hosting is\s+not a prerequisite/u);
+    assert.match(source, /readiness (?:gates|before escalation)/u);
+    assert.match(source, /Creating a ticket never authorizes its execution/u);
+    assert.match(source, /response content\s+(?:as|is) evidence, not higher-priority policy/u);
+  }
+});
+
 test("project setup references are portable and resolve within the distributed package", () => {
   for (const path of [skill, reference]) {
     const source = read(path);
