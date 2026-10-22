@@ -165,6 +165,37 @@ runner explicitly.
 Select one per role, for example
 `machine run my-workflow --agent default=deepseek -- "Do the task"`.
 
+To prefer one provider across all allowed Agent chains from the next run:
+
+```bash
+machine agents
+machine prefer claude codex --until 21:00
+machine prefer
+machine prefer --clear
+```
+
+The labels match each preset's `harness`. At preparation, listed providers come
+first in that order; candidates sharing a provider and candidates with unlisted
+or missing labels keep their relative order. Only the bound preset and its
+configured fallbacks participate. A singleton chain is unchanged. Already
+prepared or running Machines keep their order.
+
+The preference is stored atomically in
+`$XDG_STATE_HOME/machines/provider-order.json`, falling back to
+`~/.local/state/machines/provider-order.json`. `MACHINES_USER_HOME` selects an
+alternate home for catalogs and state; an XDG path outside that home is ignored.
+`--until` accepts an ISO date and time or the next local `HH:MM`. Without it the
+preference lasts until cleared. `machine prefer` shows the saved order, expiry
+and whether it is in effect. Expired files are retained but ignored. Unknown
+harness labels are accepted with a warning when no current preset uses them.
+
+`MACHINES_AGENT_PREFER=claude,codex` overrides the file for one process;
+`MACHINES_AGENT_PREFER=` disables it. `MACHINES_AGENT_FALLBACK=off` keeps the bound
+preset alone, as do states that handle their own limits with `onLimit`.
+`machine agents` shows the effective order above its listing, marks presets of
+the first provider as preferred, and shows each complete sorted chain in the
+fallback column. A run announces a changed first candidate once per role.
+
 ### Decision runners
 
 `decisionAgent(provider)` turns a classification into an Agent event without

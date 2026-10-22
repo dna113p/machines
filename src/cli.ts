@@ -14,6 +14,10 @@ import { blue, bold, cyan, dim, green, magenta, red, yellow } from "yoctocolors"
 
 import { assertJsonValue, isJsonValue, type JsonValue } from "./json.ts";
 import { discoverMachines, machinesUserHome } from "./discovery.ts";
+import {
+  clearProviderOrder, effectiveProviderOrder, providerOrderExpired, providerOrderUntil,
+  readProviderOrder, sortProviderCandidates, writeProviderOrder,
+} from "./provider-order.ts";
 import { runEnding } from "./endings.ts";
 import {
   type AgentPresetSummary,
@@ -69,9 +73,18 @@ try {
   } else if (command === "agents" && selector === undefined) {
     const presets = await listAgentPresets({ cwd: process.cwd() });
     if (presets.length === 0) console.log("No Agent presets found.");
+    const order = await effectiveProviderOrder();
+    if (order.length > 0) console.log(`Provider order: ${order.join(", ")}`);
+    const byName = new Map(presets.map((preset) => [preset.name, preset]));
     presets.forEach((preset, index) => {
-      printAgentListing(preset, index > 0);
+      const names = process.env.MACHINES_AGENT_FALLBACK === "off" ? [] : preset.fallback ?? [];
+      const chain = sortProviderCandidates([preset, ...names.map((name) => byName.get(name) ?? { name, harness: undefined })], order);
+      printAgentListing(order.length === 0 ? preset : {
+        ...preset, fallback: chain.map((candidate) => candidate.name),
+      }, index > 0, order.length > 0 && preset.harness === order[0]);
     });
+  } else if (command === "prefer") {
+    await prefer(runsOptions);
   } else if (command === "show" && selector !== undefined) {
     const machinePath = await resolveMachine(selector);
     console.log(`Machine: ${machinePath}`);
@@ -102,6 +115,7 @@ try {
       "Usage:",
       "  machine list",
       "  machine agents",
+      "  machine prefer [<harness>...] [--until <ISO-time|HH:MM>] | --clear",
       "  machine show <name-or-file>",
       "  machine run <name-or-file> [--sleep] [--agent role=preset]... [--input-file <file|->] [--] [input]",
       "  machine continue <run-id>",
@@ -131,6 +145,48 @@ try {
     console.error(cause instanceof Error ? cause.message : String(cause));
     process.exitCode = 1;
   }
+}
+
+async function prefer(args: readonly string[]): Promise<void> {
+  if (args.includes("--clear")) {
+    if (args.length !== 1) throw new Error("machine prefer --clear takes no other arguments");
+    await clearProviderOrder();
+    console.log("Provider preference cleared.");
+    return;
+  }
+  const order: string[] = [];
+  let until: string | undefined;
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index]!;
+    if (arg === "--until") {
+      const value = args[++index];
+      if (until !== undefined || value === undefined) throw new Error("--until needs one ISO time or HH:MM");
+      until = providerOrderUntil(value);
+    } else if (arg.startsWith("-") || arg.trim() === "") {
+      throw new Error(`Unknown machine prefer argument: ${arg}`);
+    } else order.push(arg);
+  }
+  if (args.length > 0) {
+    if (order.length === 0) throw new Error("machine prefer --until requires at least one harness");
+    const presets = await listAgentPresets({ cwd: process.cwd() });
+    for (const harness of new Set(order)) {
+      if (!presets.some((preset) => preset.harness === harness)) {
+        console.error(`Warning: no configured preset in this workspace has harness "${harness}".`);
+      }
+    }
+    await writeProviderOrder({ order, ...(until === undefined ? {} : { until }) });
+  }
+  const preference = await readProviderOrder();
+  const override = process.env.MACHINES_AGENT_PREFER;
+  if (preference !== undefined) {
+    const status = providerOrderExpired(preference) ? "expired" : override === undefined ? "in effect" : "overridden by MACHINES_AGENT_PREFER";
+    console.log(`Provider order: ${preference.order.join(", ")}; until ${preference.until ?? "cleared"}; ${status}.`);
+  }
+  if (override !== undefined) {
+    const effective = await effectiveProviderOrder();
+    console.log(effective.length === 0 ? "No provider preference."
+      : `Provider order (MACHINES_AGENT_PREFER): ${effective.join(", ")}; no expiry; in effect.`);
+  } else if (preference === undefined) console.log("No provider preference.");
 }
 
 function continueDueRuns(): void {
@@ -605,12 +661,12 @@ function printMachineListing(found: MachineSummary, separate: boolean) {
   }
 }
 
-function printAgentListing(preset: AgentPresetSummary, separate: boolean) {
+function printAgentListing(preset: AgentPresetSummary, separate: boolean, preferred = false) {
   const identity = [preset.harness, preset.model, preset.thinking].filter(Boolean);
   if (!process.stdout.isTTY) {
     console.log([
       preset.name,
-      preset.description,
+      preset.description + (preferred ? " (preferred)" : ""),
       preset.harness ?? "",
       preset.model ?? "",
       preset.thinking ?? "",
@@ -621,7 +677,7 @@ function printAgentListing(preset: AgentPresetSummary, separate: boolean) {
   }
 
   if (separate) console.log();
-  console.log(bold(cyan(preset.name)));
+  console.log(bold(cyan(preset.name)) + (preferred ? " (preferred)" : ""));
   console.log(`  ${preset.description}`);
   if (identity.length > 0) console.log(`  ${magenta(identity.join(" · "))}`);
   if (preset.fallback !== undefined) console.log(`  fallback: ${preset.fallback.join(", ") || "none"}`);

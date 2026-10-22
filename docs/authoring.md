@@ -649,7 +649,14 @@ actual identity during execution. Optional `fallback` names the presets that tak
 over at a [usage limit](#usage-limits). Harness configuration belongs in the runner
 command, arguments, or `env` option; labels do not change model settings.
 
-Use `machine agents` to inspect configured names. Rebind a role for one run:
+Use `machine agents` to inspect configured names. `machine prefer claude codex`
+puts presets labelled `harness: "claude"` first in every allowed chain from the
+next prepared run, followed by Codex. It does not change a preset's model settings.
+With a preference, the listing shows the effective provider order, marks the first
+provider's presets as preferred, and shows the complete sorted chain in the
+fallback column.
+
+Rebind a role for one run:
 
 ```bash
 machine run review-task --agent implementer=anotherConfiguredPreset -- "Implement the task"
@@ -704,8 +711,37 @@ A role's chain is the preset it is bound to, after any `--agent role=preset`
 override, followed by that preset's fallbacks. A fallback's own `fallback` is not
 followed, so two presets may name each other. `machine agents` lists each
 preset's fallbacks; outside a terminal they are the last tab-separated column.
+With a provider preference, that column shows the whole sorted chain instead.
 A fallback name that is not a configured preset fails preflight for the Machines
 whose roles would use it, and never breaks a listing.
+
+To prefer a provider without editing those chains:
+
+```bash
+machine prefer claude codex --until 21:00
+machine prefer                         # show the saved order, expiry and status
+machine prefer --clear
+MACHINES_AGENT_PREFER=codex machine run review-task "Review the change"
+```
+
+`--until` accepts an ISO date and time or `HH:MM`, meaning the next occurrence in
+local time. Without it, the order lasts until cleared. The per-login file is
+`$XDG_STATE_HOME/machines/provider-order.json`, or
+`~/.local/state/machines/provider-order.json`. Writes replace it atomically.
+An alternate `MACHINES_USER_HOME` selects that home's state too; an inherited
+XDG path outside the selected home is ignored. Expired files stay readable by
+`machine prefer`, but have no effect. Unknown harness labels are accepted with a
+warning when no configured preset in the current workspace uses them.
+
+At preparation, the launcher stably sorts the bound preset and its allowed
+fallbacks by their `harness` labels. Unlisted or missing labels come last in their
+original order. It adds no candidates, and `fallback: []` remains a singleton.
+Changes apply to the next prepared run, not one already prepared or running.
+A changed first candidate produces one `attempt` update per role explaining the
+preference. `MACHINES_AGENT_PREFER=claude,codex` replaces the file for one process;
+an explicitly empty `MACHINES_AGENT_PREFER=` disables the preference.
+`MACHINES_AGENT_FALLBACK=off` and requests with `onLimit` still run only the
+original bound preset, regardless of preference.
 
 The replacement starts a new turn: no session or conversation is carried over.
 Files the limited Agent already changed stay in the workspace, so the re-issued
