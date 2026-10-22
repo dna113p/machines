@@ -746,9 +746,21 @@ original bound preset, regardless of preference.
 The replacement starts a new turn: no session or conversation is carried over.
 Files the limited Agent already changed stay in the workspace, so the re-issued
 prompt ends with a note that a previous Agent was interrupted by a usage limit,
-and asks the new one to inspect the current state and continue the same
-assignment rather than start over. The allowed outcomes and working directory are
-unchanged. An action the first Agent completed outside the workspace, such as
+with its reported harness and model, the limit kind when known, its count of
+distinct tool calls, the titles of its last five tools, and its last report quoted.
+The report is capped at 2000 characters including a truncation marker, cut at the
+last available line break or, if none fits, within the line. Only reporter updates
+supply this context; the runner does not read workspace files. With no updates,
+the note only says the Agent was interrupted and may have left partial work.
+Every note asks the new Agent to inspect the current state and continue the same
+assignment rather than start over. Up to three interruption notes are retained,
+oldest first, within the current request; successful traces are discarded.
+Retrying the same preset after a wait also starts a new session with these notes.
+The `swapped` and `resumed` limit updates end with `handing over N tool calls`
+when the interrupted attempt reported tools.
+
+The allowed outcomes and working directory are unchanged. An action the first
+Agent completed outside the workspace, such as
 sending a message or publishing a package, could be repeated; give a preset that
 performs one `fallback: []`. A swapped preset runs with its own harness, model,
 and permissions, which may be wider or narrower than those of the preset the
