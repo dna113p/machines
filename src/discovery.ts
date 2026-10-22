@@ -117,3 +117,11 @@ async function isFile(path: string): Promise<boolean> {
 function isMissing(cause: unknown): cause is NodeJS.ErrnoException {
   return cause instanceof Error && "code" in cause && cause.code === "ENOENT";
 }
+
+/** Shared usage-limit memory, with the same home isolation as run status. */
+export function agentLimitsFile(environment: NodeJS.ProcessEnv = process.env): string | undefined {
+  const configured = environment.MACHINES_AGENT_LIMITS_FILE;
+  if (configured === "none") return undefined;
+  if (configured !== undefined && configured !== "") return resolve(configured);
+  return join(machinesStateDirectory(machinesUserHome(environment), environment), "agent-limits.json");
+}

@@ -18,6 +18,11 @@ implement (Agent) → check (Operation) → review (Human) → done
 XState runs the transitions. The same workflow runs from a terminal, Pi or
 Codex.
 
+Provider usage limits are [remembered across runs](docs/authoring.md#usage-limits),
+so roles sharing a provider skip its known limit and use their configured
+fallbacks. Inspect them with `machine limits`; clear a preset with
+`machine limits --forget <preset>`.
+
 For ready-made software workflows, see
 [Machine Shop](https://github.com/dna113p/machine-shop). To run a Machine for
 each ticket automatically, see

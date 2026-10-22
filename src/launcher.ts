@@ -7,7 +7,7 @@ import { fromPromise, type AnyStateMachine, type SnapshotFrom, type StateValue }
 import { assertJsonValue, jsonProblem, type JsonValue } from "./json.ts";
 import { fallbackPresets, type AgentPreset } from "./agent-bindings.ts";
 import { effectiveProviderOrder, sortProviderCandidates } from "./provider-order.ts";
-import { createLimitMemory, defaultProbeMs, limitAwareRunner, type LimitPolicy } from "./agent-limits.ts";
+import { launcherLimitMemory, defaultProbeMs, limitAwareRunner, type LimitPolicy } from "./agent-limits.ts";
 import { configuredAgentPresets, type LauncherLocation, type MachineSummary, type AgentPresetSummary } from "./catalog.ts";
 import { queryCatalog } from "./discovery-worker.ts";
 import { loadMachineModule, readAgentRoles, readOptionalAgentRoles, readUses, requireMachineDescription } from "./machine-module.ts";
@@ -483,7 +483,7 @@ function applyAgentOverrides(
 /**
  * Wraps each role the Machine uses or declares so that a usage limit swaps to
  * the bound preset's fallbacks or waits for a reset. The roles share one memory
- * of limited presets, kept only for this prepared run.
+ * of limited presets across runs, unless persistence is disabled.
  */
 function limitAwareAgents(
   roles: ReadonlySet<string>,
@@ -493,7 +493,7 @@ function limitAwareAgents(
   providerOrder: readonly string[],
 ): Readonly<Record<string, AgentRunner>> {
   const swapping = fallbackEnabled();
-  const memory = createLimitMemory();
+  const memory = launcherLimitMemory();
   const wrapped: Record<string, AgentRunner> = {};
   for (const role of roles) {
     const bound = Object.hasOwn(overrides, role) ? overrides[role] ?? role : role;
@@ -509,7 +509,11 @@ function limitAwareAgents(
           `Agent preset "${bound}" for role "${role}" falls back to "${name}", which is not a configured preset. Available presets: ${available}`,
         );
       }
-      return { name, runner: preset.runner, ...(preset.harness === undefined ? {} : { harness: preset.harness }) };
+      return {
+        name, runner: preset.runner,
+        ...(preset.harness === undefined ? {} : { harness: preset.harness }),
+        ...(preset.model === undefined ? {} : { model: preset.model }),
+      };
     });
     wrapped[role] = limitAwareRunner(role, sortProviderCandidates(candidates, providerOrder), memory, policy, candidates[0]);
   }
