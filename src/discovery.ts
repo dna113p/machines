@@ -1,6 +1,6 @@
 import { readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 
 /** Select a separate global catalog without changing the process's real home. */
 export function machinesUserHome(environment: NodeJS.ProcessEnv = process.env): string {
@@ -104,4 +104,15 @@ async function isFile(path: string): Promise<boolean> {
 
 function isMissing(cause: unknown): cause is NodeJS.ErrnoException {
   return cause instanceof Error && "code" in cause && cause.code === "ENOENT";
+}
+
+/** Shared usage-limit memory, with the same home isolation as run status. */
+export function agentLimitsFile(environment: NodeJS.ProcessEnv = process.env): string | undefined {
+  const configured = environment.MACHINES_AGENT_LIMITS_FILE;
+  if (configured === "none") return undefined;
+  if (configured !== undefined && configured !== "") return resolve(configured);
+  const state = environment.XDG_STATE_HOME;
+  const directory = environment.MACHINES_USER_HOME === undefined && state !== undefined && isAbsolute(state)
+    ? state : join(machinesUserHome(environment), ".local", "state");
+  return join(directory, "machines", "agent-limits.json");
 }

@@ -703,7 +703,8 @@ each one is optional:
 A role's chain is the preset it is bound to, after any `--agent role=preset`
 override, followed by that preset's fallbacks. A fallback's own `fallback` is not
 followed, so two presets may name each other. `machine agents` lists each
-preset's fallbacks; outside a terminal they are the last tab-separated column.
+preset's fallbacks and any remembered limit covering it; outside a terminal a
+covering limit is appended after the fallback column.
 A fallback name that is not a configured preset fails preflight for the Machines
 whose roles would use it, and never breaks a listing.
 
@@ -718,19 +719,48 @@ performs one `fallback: []`. A swapped preset runs with its own harness, model,
 and permissions, which may be wider or narrower than those of the preset the
 role names. List only presets you would accept for the same work.
 
-Within one run, a preset found at its limit is not tried again by any role until
-its reset. A limit with no stated reset, such as Codex's, is tried again with the
-real request every 15 minutes. Nothing is remembered between runs. When no preset
-becomes available in time, the state fails with an `AgentLimitError` whose
-message names each preset tried, and whose `limits` lists each one's limit.
+Usage limits are remembered across runs in `agent-limits.json` under
+`$XDG_STATE_HOME/machines/`, or `~/.local/state/machines/`. An explicit
+`MACHINES_USER_HOME` keeps this file under that home's `.local/state/machines/`,
+ignoring the real home's XDG directory. Only failed turns are remembered; no
+quota or credentials are read. Writes merge atomically, and every candidate
+attempt and waiting tick refreshes the file. Expired resets are removed on read;
+a corrupt file is moved aside with a warning. If the file cannot be read or
+written, or its lock times out, that run warns once and keeps limits in memory
+for the rest of the run. Runs and Agent listings continue without shared storage.
+
+The preset's declared `harness` and `model` determine which other presets a
+limit covers. Claude `five_hour`, `seven_day`, and `overage`, and Codex `usage`
+cover the whole harness. Claude `seven_day_opus` and `seven_day_sonnet` cover
+that model family, including aliases such as `opus` and full names containing
+it. Unknown kinds and presets without a declared harness cover only the
+original preset. Even matching preset names require matching declared harnesses:
+a Claude limit never covers a Codex preset of the same name, and an entry with
+no declared harness cannot cover a preset with a known harness.
+A runner may explicitly set `AgentLimit.scope` to `provider`,
+`model`, or `preset`; its choice takes precedence. Declare harness and model
+metadata on presets to enable shared coverage.
+
+A limit with no stated reset, such as Codex's, is tried again with a real
+request every 15 minutes. Its last probe time is shared, so one run probes for
+all. A successful probe clears the remembered failure unless a newer failure
+has replaced it. When no preset becomes available in time, the state fails
+with an `AgentLimitError` whose message names each preset tried, and whose
+`limits` lists each one's limit.
+
+`machine limits` lists the preset, harness, kind, scope, reset or next probe,
+and recording run. `machine limits --forget <preset>` removes that preset's
+recorded failure; `machine limits --forget-all` clears the file.
 
 None of this applies to a state that names an `onLimit` event: it
 [handles the limit in the Machine](#handling-a-usage-limit-in-the-machine), so
 its preset is tried alone and the limit arrives as that event. A limit found
-either way is remembered for the run's other states.
+either way is remembered for other states and runs.
 
-Two environment variables adjust this for a run:
+These environment variables adjust this for a run:
 
+- `MACHINES_AGENT_LIMITS_FILE=<path>`: use another memory file. `none` keeps
+  memory only within each prepared run, for isolated evaluations.
 - `MACHINES_AGENT_LIMIT_WAIT_MINUTES`: the longest one Agent state waits, `360`
   by default. `0` never waits.
 - `MACHINES_AGENT_FALLBACK=off`: never swap, whatever is configured. A limited

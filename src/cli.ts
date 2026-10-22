@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { launcherLimitMemory, readLimits, forgetLimits, limitCovers, type RememberedLimit } from "./agent-limits.ts";
 import { humanChoiceLabel } from "./human-request.ts";
 
 import { randomUUID } from "node:crypto";
@@ -69,9 +70,28 @@ try {
   } else if (command === "agents" && selector === undefined) {
     const presets = await listAgentPresets({ cwd: process.cwd() });
     if (presets.length === 0) console.log("No Agent presets found.");
+    const limits = await readLimits(launcherLimitMemory());
     presets.forEach((preset, index) => {
-      printAgentListing(preset, index > 0);
+      printAgentListing(preset, index > 0, limits.find((entry) => limitCovers(entry, preset)));
     });
+  } else if (command === "limits") {
+    const memory = launcherLimitMemory();
+    if (selector === "--forget" && argumentsAfterSelector.length === 1 && argumentsAfterSelector[0]?.trim()) {
+      await forgetLimits(memory, argumentsAfterSelector[0]);
+    } else if (selector === "--forget-all" && argumentsAfterSelector.length === 0) {
+      await forgetLimits(memory);
+    } else if (selector !== undefined) {
+      throw new Error("Usage: machine limits [--forget <preset> | --forget-all]");
+    }
+    const limits = await readLimits(memory);
+    if (limits.length === 0) console.log("No usage limits remembered.");
+    else {
+      console.log("Preset\tHarness\tKind\tScope\tReset or next probe\tRun");
+      for (const entry of limits) console.log([
+        entry.preset, entry.harness ?? entry.limit.harness, entry.limit.kind ?? "unknown", entry.scope,
+        `${entry.known ? "reset" : "next probe"} ${new Date(entry.until).toISOString()}`, entry.run,
+      ].map(plain).join("\t"));
+    }
   } else if (command === "show" && selector !== undefined) {
     const machinePath = await resolveMachine(selector);
     console.log(`Machine: ${machinePath}`);
@@ -102,6 +122,7 @@ try {
       "Usage:",
       "  machine list",
       "  machine agents",
+      "  machine limits [--forget <preset> | --forget-all]",
       "  machine show <name-or-file>",
       "  machine run <name-or-file> [--sleep] [--agent role=preset]... [--input-file <file|->] [--] [input]",
       "  machine continue <run-id>",
@@ -605,7 +626,10 @@ function printMachineListing(found: MachineSummary, separate: boolean) {
   }
 }
 
-function printAgentListing(preset: AgentPresetSummary, separate: boolean) {
+function printAgentListing(preset: AgentPresetSummary, separate: boolean, limit?: RememberedLimit) {
+  const remembered = limit === undefined ? undefined : plain(
+    `usage limit: ${limit.preset} (${limit.limit.kind ?? "unknown"}, ${limit.scope}; ${limit.known ? "reset" : "next probe"} ${new Date(limit.until).toISOString()})`,
+  );
   const identity = [preset.harness, preset.model, preset.thinking].filter(Boolean);
   if (!process.stdout.isTTY) {
     console.log([
@@ -616,6 +640,7 @@ function printAgentListing(preset: AgentPresetSummary, separate: boolean) {
       preset.thinking ?? "",
       preset.source,
       preset.fallback?.join(", ") ?? "",
+      ...(remembered === undefined ? [] : [remembered]),
     ].join("\t"));
     return;
   }
@@ -625,6 +650,7 @@ function printAgentListing(preset: AgentPresetSummary, separate: boolean) {
   console.log(`  ${preset.description}`);
   if (identity.length > 0) console.log(`  ${magenta(identity.join(" · "))}`);
   if (preset.fallback !== undefined) console.log(`  fallback: ${preset.fallback.join(", ") || "none"}`);
+  if (remembered !== undefined) console.log(`  ${yellow(remembered)}`);
   console.log(`  ${dim(preset.source)}`);
 }
 

@@ -9,3 +9,6 @@ delete process.env.MACHINES_RUN_LABEL;
 // A developer's usage-limit settings must not change which preset a test run uses or how long it waits.
 delete process.env.MACHINES_AGENT_FALLBACK;
 delete process.env.MACHINES_AGENT_LIMIT_WAIT_MINUTES;
+// Ordinary launcher tests must not read or write the developer's remembered limits.
+// Persistence tests select their own temporary file or Machines home explicitly.
+process.env.MACHINES_AGENT_LIMITS_FILE = "none";

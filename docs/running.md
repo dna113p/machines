@@ -35,6 +35,8 @@ note takes precedence over the final output summary.
 ## Commands
 
 ```bash
+machine limits [--forget <preset> | --forget-all]  # shared usage limits and their reset or next probe
+machine agents                                  # presets, fallbacks and covering usage limits
 machine runs [--json] [--all]                      # running, waiting and sleeping runs; --all adds finished and lost ones
 machine runs --for [<session>] [--project <dir>] [--json] [--all]   # the runs one viewer shows
 machine respond <run-id> <request-id> <response>   # answer a waiting run
@@ -43,6 +45,8 @@ machine unwatch <run-id-or-label-start> | --dir <path> | --all
 machine ui [--port <port>] [--project <dir>]       # a live page of every run, with its Machine drawn as a graph
 ```
 
+- `machine limits` lists remembered failures across runs. See
+  [Usage limits](authoring.md#usage-limits) for scopes, storage and isolation.
 - `machine runs` shows each waiting run's prompt, request id and choices.
 - A run started without a terminal, for example by a coordinating agent or a
   script, waits for `machine respond` instead of failing.
