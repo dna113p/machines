@@ -1,8 +1,14 @@
+import "./environment.ts";
+import { randomUUID } from "node:crypto";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import assert from "node:assert/strict";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { test } from "node:test";
 
 import machinesExtension from "../pi-extension/index.ts";
+import { readRunWatches, writeRunWatches } from "../src/run-watch.ts";
+import { writeRunStatusRecord, type RunStatusRecord } from "../src/run-status.ts";
 
 interface Result {
   readonly content: readonly [{ readonly type: "text"; readonly text: string }];
@@ -30,6 +36,7 @@ interface RegisteredTool {
 interface Context {
   readonly cwd: string;
   readonly ui: FakeUi;
+  readonly sessionManager?: { getSessionId(): string };
 }
 
 interface Theme {
@@ -71,20 +78,19 @@ class FakeUi {
   }
 }
 
-function setup(cwd = resolve("tests/fixtures/pi-project")) {
+function setup(cwd = resolve("tests/fixtures/pi-project"), sessionId = randomUUID()) {
   const tools = new Map<string, RegisteredTool>();
-  let shutdown: ((event: unknown, context: Context) => void | Promise<void>) | undefined;
+  const handlers = new Map<string, (event: unknown, context: Context) => void | Promise<void>>();
+  const commands = new Map<string, { handler(args: string, context: Context): Promise<void> }>();
   machinesExtension({
     registerTool(tool) {
       tools.set(tool.name, tool as RegisteredTool);
     },
-    on(event, handler) {
-      assert.equal(event, "session_shutdown");
-      shutdown = handler;
-    },
+    registerCommand(name, command) { commands.set(name, command); },
+    on(event, handler) { handlers.set(event, handler); },
   });
   const ui = new FakeUi();
-  const context = { cwd, ui };
+  const context: Context = { cwd, ui, sessionManager: { getSessionId: () => sessionId } };
   const execute = (name: string, params: Record<string, unknown> = {}) => {
     const tool = tools.get(name);
     if (tool === undefined) throw new Error(`Tool ${name} was not registered`);
@@ -92,14 +98,17 @@ function setup(cwd = resolve("tests/fixtures/pi-project")) {
   };
   return {
     tools,
+    commands,
+    sessionId,
     ui,
     context,
     execute,
-    shutdown: () => shutdown?.({}, context),
+    start: () => handlers.get("session_start")?.({}, context),
+    shutdown: () => handlers.get("session_shutdown")?.({}, context),
   };
 }
 
-test("registers the five small Machine tools with discovery guidance", () => {
+test("registers Machine tools and read-only subscriptions with discovery guidance", () => {
   const extension = setup();
   assert.deepEqual([...extension.tools.keys()], [
     "machine_list",
@@ -107,7 +116,10 @@ test("registers the five small Machine tools with discovery guidance", () => {
     "machine_start",
     "machine_status",
     "machine_respond",
+    "machine_watch",
+    "machine_unwatch",
   ]);
+  assert.deepEqual([...extension.commands.keys()], ["machine-watch", "machine-unwatch"]);
   assert.match(extension.tools.get("machine_list")?.promptSnippet ?? "", /Discover/u);
   assert.match(
     extension.tools.get("machine_start")?.promptGuidelines?.join(" ") ?? "",
@@ -330,4 +342,138 @@ test("Pi gives project orchestrators the same project setup entry point", () => 
   assert.match(guidance, /machine-project-setup/u);
   assert.match(guidance, /major work/u);
   assert.match(guidance, /not.*every task/u);
+});
+
+
+function publishedRun(change: Partial<RunStatusRecord> = {}): RunStatusRecord {
+  const now = new Date().toISOString();
+  return {
+    schemaVersion: 2, id: "dispatch-attempt-1", pid: process.pid,
+    machine: "ticket", label: "fix-login Fix the login page", cwd: "/elsewhere",
+    path: "/elsewhere/.machines/ticket.ts", status: "running", state: "implement",
+    startedAt: now, updatedAt: now, ...change,
+  };
+}
+
+function statusDirectory(context: import("node:test").TestContext): string {
+  const directory = mkdtempSync(join(tmpdir(), "pi-watch-"));
+  const previous = process.env.MACHINES_RUN_STATUS_DIR;
+  process.env.MACHINES_RUN_STATUS_DIR = directory;
+  context.after(() => {
+    if (previous === undefined) delete process.env.MACHINES_RUN_STATUS_DIR;
+    else process.env.MACHINES_RUN_STATUS_DIR = previous;
+    rmSync(directory, { recursive: true, force: true });
+  });
+  return directory;
+}
+
+test("a Pi subscription sees future Dispatch attempts in the same widget without taking ownership", async context => {
+  const directory = statusDirectory(context);
+  const extension = setup(); context.after(() => extension.shutdown());
+  await extension.start();
+  const watched = await extension.execute("machine_watch", { target: "fix-login" });
+  assert.match(watched.content[0].text, /1 subscription.*0 visible runs/u);
+  assert.equal(extension.ui.widget, undefined);
+  const record = publishedRun();
+  writeRunStatusRecord(directory, record);
+  // No further tool call: the widget must poll while the ticket has not yet started.
+  await eventually(() => assert.match(extension.ui.widget?.join("\n") ?? "", /fix-login Fix the login page.*implement/u));
+  const human = { prompt: "Approve login change?", requestId: "request-1", choices: ["approve", "deny"] };
+  writeRunStatusRecord(directory, { ...record, status: "waiting", human });
+  await eventually(() => assert.match(extension.ui.widget?.join("\n") ?? "", /Approve login change/u));
+  assert.match(extension.ui.widget!.join("\n"), /Watching only/u);
+  assert.deepEqual(extension.ui.selections, []);
+  assert.deepEqual(extension.ui.inputs, []);
+  await assert.rejects(extension.execute("machine_respond", {
+    runId: record.id, requestId: human.requestId, response: "approve",
+  }), /Unknown|not found/u);
+  const before = readFileSync(join(directory, `${record.id}.json`), "utf8");
+  await extension.execute("machine_unwatch", { target: "fix-login" });
+  assert.equal(extension.ui.widget, undefined);
+  assert.equal(readFileSync(join(directory, `${record.id}.json`), "utf8"), before);
+  await extension.shutdown();
+  assert.equal(readFileSync(join(directory, `${record.id}.json`), "utf8"), before);
+  await assert.rejects(extension.execute("machine_watch", { target: "fix-login" }), /closed/u);
+});
+
+test("subscriptions are scoped to Pi's actual session, survive reload, and see CLI watch changes", async context => {
+  const directory = statusDirectory(context);
+  const first = setup(); const other = setup();
+  context.after(() => { first.shutdown(); other.shutdown(); });
+  const record = publishedRun();
+  writeRunStatusRecord(directory, record);
+  await first.commands.get("machine-watch")!.handler("fix-login", first.context);
+  await first.execute("machine_watch", { target: "fix-login" });
+  assert.deepEqual(readRunWatches(directory, first.sessionId), [{ text: "fix-login" }]);
+  await other.start();
+  assert.equal(other.ui.widget, undefined);
+  await first.shutdown();
+  const resumed = setup(undefined, first.sessionId); context.after(() => resumed.shutdown());
+  await resumed.start();
+  assert.match(resumed.ui.widget?.join("\n") ?? "", /fix-login/u);
+  writeRunWatches(directory, other.sessionId, [{ text: "fix-login" }]);
+  await eventually(() => assert.match(other.ui.widget?.join("\n") ?? "", /fix-login/u));
+  await resumed.commands.get("machine-unwatch")!.handler("fix-login", resumed.context);
+  assert.equal(resumed.ui.widget, undefined);
+  assert.deepEqual(readRunWatches(directory, other.sessionId), [{ text: "fix-login" }]);
+});
+
+test("published selection ignores malformed, nested, unrelated, and expired runs and follows a new attempt", async context => {
+  const directory = statusDirectory(context);
+  const extension = setup(); context.after(() => extension.shutdown());
+  writeFileSync(join(directory, "broken.json"), "{");
+  for (const record of [
+    publishedRun({ id: "nested", parent: "parent" }),
+    publishedRun({ id: "other", label: "fix-login-extra unrelated" }),
+    publishedRun({ status: "completed", updatedAt: new Date(Date.now() - 60_000).toISOString() }),
+  ]) writeRunStatusRecord(directory, record);
+  await extension.execute("machine_watch", { target: "fix-login" });
+  assert.equal(extension.ui.widget, undefined);
+  writeRunStatusRecord(directory, publishedRun({ id: "dispatch-attempt-2", state: "review" }));
+  await eventually(() => assert.match(extension.ui.widget?.join("\n") ?? "", /fix-login.*review/u));
+  writeRunStatusRecord(directory, publishedRun({ id: "dispatch-attempt-2", status: "completed", state: "delivered" }));
+  await extension.execute("machine_watch");
+  await eventually(() => assert.match(extension.ui.widget?.join("\n") ?? "", /✓.*delivered/u));
+});
+
+test("sleeping published runs remain visible without a live process and lost runs are not shown as running", async context => {
+  const directory = statusDirectory(context);
+  const extension = setup(); context.after(() => extension.shutdown());
+  // An invalid PID cannot be live on the supported platforms.
+  const record = publishedRun({ pid: 2147483647, status: "sleeping", human: { prompt: "Choose a fix", requestId: "q1" } });
+  writeRunStatusRecord(directory, record);
+  await extension.execute("machine_watch", { target: "fix-login" });
+  assert.match(extension.ui.widget?.join("\n") ?? "", /input needed/u);
+  writeRunStatusRecord(directory, { ...record, human: { ...record.human!, answer: "fix" } });
+  await extension.execute("machine_watch");
+  assert.match(extension.ui.widget?.join("\n") ?? "", /awaiting continuation/u);
+  writeRunStatusRecord(directory, { ...record, human: undefined, due: new Date(Date.now() + 60_000).toISOString() });
+  await extension.execute("machine_watch");
+  assert.match(extension.ui.widget?.join("\n") ?? "", /sleeping until/u);
+  writeRunStatusRecord(directory, { ...record, status: "running", human: undefined });
+  await extension.execute("machine_watch");
+  assert.match(extension.ui.widget?.join("\n") ?? "", /✕.*lost/u);
+});
+
+test("owned and watched copies share one widget row; an owned run still uses Pi's Human dialog", async context => {
+  statusDirectory(context);
+  const extension = setup(); context.after(() => extension.shutdown());
+  const started = await extension.execute("machine_start", { machine: "wait", input: "owned" });
+  const id = runId(started);
+  await extension.execute("machine_watch", { target: id });
+  await eventually(() => assert.equal(extension.ui.selections.length, 1));
+  await extension.execute("machine_watch");
+  assert.equal(extension.ui.widget?.filter(line => line.includes(id.slice(0, 8))).length, 1);
+});
+
+test("subscriptions reject disabled publication, missing identity, and invalid targets", async context => {
+  const extension = setup(); context.after(() => extension.shutdown());
+  await assert.rejects(extension.execute("machine_watch", { target: "fix-login" }), /publication is off/u);
+  statusDirectory(context);
+  await assert.rejects(extension.execute("machine_watch", { target: "bad\nlabel" }), /one line/u);
+  await assert.rejects(extension.execute("machine_watch", { target: "  " }), /Expected/u);
+  const noIdentity = { cwd: extension.context.cwd, ui: extension.ui };
+  await assert.rejects(extension.tools.get("machine_watch")!.execute("test", { target: "fix-login" }, undefined, undefined, noIdentity), /session id/u);
+  await extension.commands.get("machine-unwatch")!.handler("", extension.context);
+  assert.match(extension.ui.notifications.at(-1)!.message, /Usage:/u);
 });

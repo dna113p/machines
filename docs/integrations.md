@@ -196,9 +196,40 @@ a status widget and native Human dialogs. Canceling a dialog leaves its Machine
 waiting; answer later through `machine_respond` with the current request ID.
 Pi exit, session replacement, and reload terminate its session-owned runs.
 
+To show a ticket that Dispatch runs in that same widget, subscribe from the
+Pi session that should display it:
+
+```text
+/machine-watch fix-login
+/machine-watch
+/machine-unwatch fix-login
+```
+
+`/machine-watch` without an argument lists subscriptions. The corresponding
+agent tools are `machine_watch({ target: "fix-login" })`, `machine_watch({})`,
+and `machine_unwatch({ target: "fix-login" })`. A target is a ticket's id at the
+start of its published label, or a run id prefix. Ticket subscriptions also
+match later attempts, including tickets that have not started yet. They do not
+launch work. Sub-runs and unrelated tickets stay hidden.
+
+Subscriptions use Pi's actual session id and the existing run watch-list files.
+They survive reload and resume of that session, but a new session has its own
+list. The widget refreshes once a second, even while a subscription has no run.
+It shows the ticket label, state, Agent, and pending question, alongside Pi-owned
+runs without duplicate rows. Sleeping tickets stay visible; finished or lost
+published runs disappear after 30 seconds from their last update.
+
+Watching is read-only. External questions do not open Pi's native input dialog;
+answer a ticket through Dispatch. `machine_status` and `machine_respond` still
+refer only to Pi-owned runs. Unwatching or closing Pi never stops a watched run.
+Both Pi and Dispatch must read the same run-status directory (below); subscribing
+reports that directory, and refuses when publication is off. The adapter also
+picks up changes made by `machine watch` when that CLI uses the same session id.
+
 ## Run status for host status lines
 
-Pi and MCP Apps clients render run snapshots in-process. A host that can only run
+Pi and MCP Apps clients render their own run snapshots in-process; Pi also reads
+published runs for its subscriptions. A host that can only run
 a command, such as Claude Code's status line, reads published run status instead.
 Publication is on by default and needs no setup: every process of one user
 publishes to and reads from the same private directory, so a run started

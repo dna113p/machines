@@ -10,6 +10,8 @@ import type { HostedHumanRequest } from "../src/host.ts";
 import type { HumanRequest } from "../src/index.ts";
 import type { MachineSession, RunSnapshot } from "../src/session.ts";
 import { machineCoordinatorGuidelines, machineDiscoveryDescription } from "../src/coordinator-guidance.ts";
+import { readRunStatuses, runStatusDirectory, runsForViewer, type ViewerRun } from "../src/run-viewer.ts";
+import { readRunWatches, runWatch, sameRunWatch, writeRunWatches } from "../src/run-watch.ts";
 
 const sourceFile = realpathSync(fileURLToPath(import.meta.url));
 const sourceRoot = resolve(dirname(sourceFile), "..");
@@ -56,6 +58,7 @@ interface UiLike {
 interface ToolContextLike {
   readonly cwd: string;
   readonly ui: UiLike;
+  readonly sessionManager?: { getSessionId(): string };
 }
 
 interface ThemeLike {
@@ -100,8 +103,12 @@ interface ToolDefinitionLike {
 
 interface PiLike {
   registerTool(tool: ToolDefinitionLike): void;
+  registerCommand(name: string, command: {
+    readonly description: string;
+    handler(args: string, context: ToolContextLike): Promise<void>;
+  }): void;
   on(
-    event: "session_shutdown",
+    event: "session_start" | "session_shutdown",
     handler: (event: unknown, context: ToolContextLike) => void | Promise<void>,
   ): void;
 }
@@ -113,24 +120,43 @@ export default function machinesExtension(pi: PiLike): void {
   let session: MachineSession | undefined;
   let pendingSession: Promise<MachineSession> | undefined;
   let ui: UiLike | undefined;
+  let viewerId: string | undefined;
   let elapsedTimer: NodeJS.Timeout | undefined;
   let shuttingDown = false;
   const dialogAbort = new AbortController();
   let dialogQueue = Promise.resolve();
 
   const useContext = (context: ToolContextLike) => {
+    if (shuttingDown) return;
     ui = context.ui;
+    viewerId = context.sessionManager?.getSessionId();
+    renderWidget();
+  };
+
+  const watchedRuns = (): ViewerRun[] => {
+    const directory = runStatusDirectory();
+    if (directory === undefined || viewerId === undefined) return [];
+    return runsForViewer(readRunStatuses(directory), {
+      sessionId: viewerId,
+      watches: readRunWatches(directory, viewerId),
+    });
   };
 
   const renderWidget = () => {
-    if (ui === undefined) return;
+    if (ui === undefined || shuttingDown) return;
     const now = Date.now();
-    const visible = (session?.status() ?? []).filter(
+    const owned = session?.status() ?? [];
+    const visible: WidgetRun[] = owned.filter(
       (run) => isActive(run.status) || now - Date.parse(run.updatedAt) < terminalWidgetDurationMs,
     );
+    const ownedIds = new Set(owned.map((run) => run.id));
+    visible.push(...watchedRuns().filter((run) => !ownedIds.has(run.id)));
+    // Keep polling even before a watched ticket starts, or a CLI watch is added.
+    const watching = viewerId !== undefined && runStatusDirectory() !== undefined;
     if (visible.length === 0) {
       ui.setWidget(widgetKey, undefined);
-      stopTimer();
+      if (watching) startTimer();
+      else stopTimer();
       return;
     }
 
@@ -281,6 +307,7 @@ export default function machinesExtension(pi: PiLike): void {
       const run = await runs.start({
         machine,
         cwd: context.cwd,
+        ...(viewerId === undefined ? {} : { owner: viewerId }),
         ...(input === undefined ? {} : { input }),
         ...(agents === undefined ? {} : { agents }),
       });
@@ -352,6 +379,62 @@ export default function machinesExtension(pi: PiLike): void {
     renderResult: compactResult,
   });
 
+  const changeWatch = (target: string | undefined, remove: boolean, context: ToolContextLike) => {
+    if (shuttingDown) throw new Error("Machine session is closed");
+    useContext(context);
+    const directory = runStatusDirectory();
+    if (directory === undefined) throw new Error("Run status publication is off; Pi and Dispatch must use the same run-status directory");
+    if (viewerId === undefined) throw new Error("Pi did not provide a session id for this subscription");
+    let watches = readRunWatches(directory, viewerId);
+    if (target !== undefined) {
+      const watch = runWatch({ text: target });
+      watches = remove
+        ? watches.filter((entry) => !sameRunWatch(entry, watch))
+        : watches.some((entry) => sameRunWatch(entry, watch)) ? watches : [...watches, watch];
+      writeRunWatches(directory, viewerId, watches);
+    }
+    renderWidget();
+    const runs = watchedRuns();
+    const summary = `${watches.length} subscription${watches.length === 1 ? "" : "s"} · ${runs.length} visible run${runs.length === 1 ? "" : "s"}`;
+    const list = watches.map((watch) => "text" in watch ? watch.text : `directory: ${watch.dir}`).join("\n");
+    return result(`${summary}\n${list || "No subscriptions."}\nWatching is read-only; respond through the run's owner.\nStatus directory: ${directory}`, {
+      summary, sessionId: viewerId, directory, watches, runs,
+    });
+  };
+
+  for (const remove of [false, true]) {
+    const name = remove ? "machine_unwatch" : "machine_watch";
+    const description = remove
+      ? "Unsubscribe this Pi session from a ticket or run without stopping it."
+      : "Subscribe this Pi session to a published ticket or run in the Machines widget; omit target to list subscriptions. Read-only, including future ticket attempts.";
+    const target = Type.String({ description: "Ticket id (label prefix) or run id prefix" });
+    pi.registerTool({
+      name,
+      label: remove ? "Unwatch Machine" : "Watch Machine",
+      description,
+      parameters: Type.Object({ target: remove ? target : Type.Optional(target) }, { additionalProperties: false }),
+      async execute(_id, params, _signal, _onUpdate, context) {
+        return changeWatch(remove ? requiredString(params.target, "target") : optionalString(params.target, "target"), remove, context);
+      },
+      renderCall: (params, theme) => line(`${theme.fg("toolTitle", theme.bold(name))} ${String(params.target ?? "")}`),
+      renderResult: compactResult,
+    });
+    pi.registerCommand(remove ? "machine-unwatch" : "machine-watch", {
+      description,
+      async handler(args, context) {
+        try {
+          const target = args.trim() === "" ? undefined : args;
+          if (remove && target === undefined) throw new Error("Usage: /machine-unwatch <ticket-or-run-id>");
+          context.ui.notify(changeWatch(target, remove, context).content[0].text, "info");
+        } catch (cause) {
+          context.ui.notify(errorMessage(cause), "error");
+        }
+      },
+    });
+  }
+
+  pi.on("session_start", (_event, context) => useContext(context));
+
   pi.on("session_shutdown", (_event, context) => {
     shuttingDown = true;
     dialogAbort.abort();
@@ -393,8 +476,10 @@ function compactResult(
   return line(`${theme.fg("success", "✓")} ${summary} ${theme.fg("dim", "(Ctrl+O for details)")}`);
 }
 
+type WidgetRun = RunSnapshot | ViewerRun;
+
 function widgetLines(
-  runs: readonly RunSnapshot[],
+  runs: readonly WidgetRun[],
   theme: ThemeLike,
   width: number,
 ): string[] {
@@ -406,9 +491,11 @@ function widgetLines(
     `${theme.fg("borderAccent", "┌─")}${theme.fg("accent", theme.bold(title))}${theme.fg("borderAccent", `${topRule}┐`)}`,
   ];
   for (const run of runs) {
-    const waiting = run.status === "waiting";
+    const external = "shown" in run;
+    const sleeping = external && run.status === "sleeping";
+    const waiting = run.status === "waiting" || (sleeping && run.sleep?.for === "answer" && !run.sleep.answered);
     const completed = run.status === "completed";
-    const failed = run.status === "failed";
+    const failed = run.status === "failed" || run.status === "lost";
     const color = waiting
       ? "warning"
       : completed
@@ -420,15 +507,20 @@ function widgetLines(
     const state = waiting
       ? "input needed"
       : failed
-        ? "failed"
-        : formatState(run.state) ?? "starting";
+        ? run.status
+        : sleeping
+          ? run.sleep?.for === "time" ? `sleeping until ${run.sleep.due}` : "awaiting continuation"
+          : formatState(run.state) ?? "starting";
     const end = completed || failed ? Date.parse(run.updatedAt) : undefined;
     lines.push(
-      `${edge("│")} ${theme.fg(color, symbol)} ${theme.fg("muted", shortId(run.id))}  ${theme.bold(run.machine)} › ${theme.fg(color, state)} · ${theme.fg("dim", elapsed(Date.parse(run.startedAt), end))}`,
+      `${edge("│")} ${theme.fg(color, symbol)} ${theme.fg("muted", shortId(run.id))}  ${theme.bold(external ? run.label ?? run.machine : run.machine)} › ${theme.fg(color, state)} · ${theme.fg("dim", elapsed(Date.parse(run.startedAt), end))}`,
     );
     if (run.human !== undefined) {
       for (const promptLine of run.human.prompt.split("\n")) {
         lines.push(`${edge("│")}   ${theme.fg("warning", promptLine)}`);
+      }
+      if (external && waiting) {
+        lines.push(`${edge("│")}   ${theme.fg("dim", "Watching only · answer through the run's owner (Dispatch for tickets)")}`);
       }
     } else if (run.limit !== undefined) {
       lines.push(`${edge("│")}   ${theme.fg("warning", run.limit.text)}`);
