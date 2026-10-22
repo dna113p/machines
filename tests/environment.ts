@@ -11,3 +11,6 @@ delete process.env.MACHINES_AGENT_FALLBACK;
 delete process.env.MACHINES_AGENT_LIMIT_WAIT_MINUTES;
 // A developer's saved provider order must not change deterministic test bindings.
 process.env.MACHINES_AGENT_PREFER = "";
+// Ordinary launcher tests must not read or write the developer's remembered limits.
+// Persistence tests select their own temporary file or Machines home explicitly.
+process.env.MACHINES_AGENT_LIMITS_FILE = "none";

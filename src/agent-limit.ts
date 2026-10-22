@@ -6,6 +6,8 @@ export interface AgentLimit {
   readonly agent?: string;
   /** The provider's name for the limit when known, for example "five_hour", "seven_day_opus", or "usage". */
   readonly kind?: string;
+  /** Which other presets this limit covers. The launcher infers this when omitted. */
+  readonly scope?: "provider" | "model" | "preset";
   /** Epoch milliseconds, only when the provider states when the limit resets. */
   readonly resetsAt?: number;
 }
