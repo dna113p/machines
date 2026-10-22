@@ -56,9 +56,12 @@ export function limitAwareRunner(
   candidates: readonly LimitCandidate[],
   memory: LimitMemory,
   policy: LimitPolicy,
+  originalBound = candidates[0],
 ): AgentRunner {
-  const bound = candidates[0];
-  if (bound === undefined) throw new Error(`Agent role "${role}" needs at least one preset`);
+  const bound = originalBound;
+  const first = candidates[0];
+  let preferenceAnnounced = false;
+  if (bound === undefined || first === undefined) throw new Error(`Agent role "${role}" needs at least one preset`);
   const now = policy.now ?? Date.now;
   const sleep = policy.sleep ?? timerSleep;
   const named = (name: string) => name === role ? name : `${name} (role ${role})`;
@@ -94,6 +97,12 @@ export function limitAwareRunner(
       await Promise.resolve();
       report?.(update);
     };
+    if (!preferenceAnnounced && first !== bound) {
+      preferenceAnnounced = true;
+      await Promise.resolve();
+      report?.({ type: "attempt", role,
+        text: `${bound.name}: ${first.harness} is preferred; running ${first.name}` });
+    }
     let interrupted = false;
     let lastFailure: unknown;
     let deadline: number | undefined;
@@ -176,7 +185,7 @@ export function limitAwareRunner(
         waiting = true;
         const resets = wakes.filter((wake) => wake.remembered.known).map((wake) => wake.remembered.until);
         const until = timestamp(resets.length === 0 ? closes : Math.min(...resets));
-        const others = candidates.slice(1).map((candidate) => candidate.name);
+        const others = candidates.filter((candidate) => candidate !== bound).map((candidate) => candidate.name);
         await tell({
           type: "limit",
           status: "waiting",

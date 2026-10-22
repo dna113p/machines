@@ -1,6 +1,6 @@
 import { readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 /** Select a separate global catalog without changing the process's real home. */
 export function machinesUserHome(environment: NodeJS.ProcessEnv = process.env): string {
@@ -8,6 +8,18 @@ export function machinesUserHome(environment: NodeJS.ProcessEnv = process.env): 
   if (override === undefined) return homedir();
   if (!isAbsolute(override)) throw new Error("MACHINES_USER_HOME must be an absolute path");
   return override;
+}
+
+/** An alternate catalog home also isolates state from an inherited login's XDG path. */
+export function machinesStateDirectory(home = machinesUserHome(), environment: NodeJS.ProcessEnv = process.env): string {
+  const xdg = environment.XDG_STATE_HOME;
+  if (xdg && isAbsolute(xdg)) {
+    const within = relative(home, xdg);
+    if (resolve(home) === resolve(homedir()) || (within !== ".." && !within.startsWith(`..${sep}`) && !isAbsolute(within))) {
+      return join(xdg, "machines");
+    }
+  }
+  return join(home, ".local", "state", "machines");
 }
 
 export interface DiscoveredMachine {

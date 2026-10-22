@@ -6,6 +6,7 @@ import { fromPromise, type AnyStateMachine, type SnapshotFrom, type StateValue }
 
 import { assertJsonValue, jsonProblem, type JsonValue } from "./json.ts";
 import { fallbackPresets, type AgentPreset } from "./agent-bindings.ts";
+import { effectiveProviderOrder, sortProviderCandidates } from "./provider-order.ts";
 import { createLimitMemory, defaultProbeMs, limitAwareRunner, type LimitPolicy } from "./agent-limits.ts";
 import { configuredAgentPresets, type LauncherLocation, type MachineSummary, type AgentPresetSummary } from "./catalog.ts";
 import { queryCatalog } from "./discovery-worker.ts";
@@ -127,7 +128,7 @@ export async function prepareMachineRun(
   preflightAgentRoles(path, usedAgentRoles, agentRoles, optional, agents, optionalAgentNames(definition));
   for (const child of childModules) preflightAgentRoles(child.path, ["default"], child.agentRoles, child.optionalAgentRoles, agents);
   const restored = await restoreChildren(definition, children, options.continueRun, agents, status);
-  const limitAware = limitAwareAgents(new Set([...allRoles].filter((role) => requiredRoles.has(role) || Object.hasOwn(agents, role))), overrides, configured, limitPolicy(options.agentLimits));
+  const limitAware = limitAwareAgents(new Set([...allRoles].filter((role) => requiredRoles.has(role) || Object.hasOwn(agents, role))), overrides, configured, limitPolicy(options.agentLimits), await effectiveProviderOrder(home));
 
   let started = false;
   const graph = machineGraph(definition, endings);
@@ -489,6 +490,7 @@ function limitAwareAgents(
   overrides: Readonly<Record<string, string>>,
   configured: Awaited<ReturnType<typeof configuredAgentPresets>>,
   policy: LimitPolicy,
+  providerOrder: readonly string[],
 ): Readonly<Record<string, AgentRunner>> {
   const swapping = fallbackEnabled();
   const memory = createLimitMemory();
@@ -509,7 +511,7 @@ function limitAwareAgents(
       }
       return { name, runner: preset.runner, ...(preset.harness === undefined ? {} : { harness: preset.harness }) };
     });
-    wrapped[role] = limitAwareRunner(role, candidates, memory, policy);
+    wrapped[role] = limitAwareRunner(role, sortProviderCandidates(candidates, providerOrder), memory, policy, candidates[0]);
   }
   return wrapped;
 }
