@@ -189,9 +189,21 @@ The preference is stored atomically in
 `~/.local/state/machines/provider-order.json`. `MACHINES_USER_HOME` selects an
 alternate home for catalogs and state; an XDG path outside that home is ignored.
 `--until` accepts an ISO date and time or the next local `HH:MM`. Without it the
-preference lasts until cleared. `machine prefer` shows the saved order, expiry
+preference has no time expiry. `machine prefer` shows the saved order, expiry
 and whether it is in effect. Expired files are retained but ignored. Unknown
 harness labels are accepted with a warning when no current preset uses them.
+
+Use `machine prefer claude --above 30` to apply the saved order only while the
+preferred provider has more than 30% remaining. Combine it with `--until 21:00`;
+either condition ending releases the preference. Preparation reads the first
+configured preset of that harness with a `quota` hook. At or below the threshold,
+it keeps the order from `agents.ts`. With no hook or an unavailable reading, the
+preference still applies. `machine prefer` says the condition cannot be checked.
+
+`machine prefer` fetches a fresh workspace reading each time, naming the preset,
+remaining percentage and condition. Only `order`, `until` and `above` are stored;
+readings are never persisted in the preference file. Expiry and low readings do
+not delete the file, so a later reading above the threshold can apply it again.
 
 `MACHINES_AGENT_PREFER=claude,codex` overrides the file for one process;
 `MACHINES_AGENT_PREFER=` disables it. `MACHINES_AGENT_FALLBACK=off` keeps the bound

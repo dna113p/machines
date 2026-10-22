@@ -784,3 +784,87 @@ test("a reported limit is remembered, so another role of the run skips that pres
   await assert.rejects(async () => broken({ ...request, limits: "report" }), (cause) => cause === failure);
   assert.deepEqual([...memory.keys()], ["claude"]);
 });
+
+for (const reserve of [undefined, 10, 100]) {
+  test(`quota at reserve ${reserve ?? 'default zero'} is reported from the bound preset without a turn`, async () => {
+    const memory = createLimitMemory();
+    let calls = 0;
+    const bound = { name: 'bound', harness: 'codex', reserve,
+      quota: async () => { calls++; return { remaining: reserve ?? 0, kind: 'seven_day', resetsAt: start + hour }; },
+      runner: () => { throw new Error('must not run'); } };
+    const preferred = { name: 'preferred', harness: 'claude',
+      quota: async () => { throw new Error('must not read preferred'); },
+      runner: () => { throw new Error('must not run preferred'); } };
+    const { updates, report } = observed();
+    const runner = limitAwareRunner('worker', [preferred, bound], memory, policy(clock()), bound);
+    for (let turn = 0; turn < 2; turn++) {
+      await assert.rejects(async () => runner({ ...request, limits: 'report' }, report), (error) => {
+        const limit = agentLimitOf(error);
+        assert.equal(limit?.agent, 'bound');
+        assert.equal(limit?.scope, 'provider');
+        assert.equal(limit?.resetsAt, start + hour);
+        return true;
+      });
+    }
+    assert.equal(calls, 1, 'remembered coverage skips the next hook');
+    assert.deepEqual(updates, []);
+  });
+}
+
+for (const known of [true, false]) {
+  test(`quota checks once per round and resumes after ${known ? 'reset' : 'probe'} without a handoff`, async () => {
+    const time = clock();
+    const memory = createLimitMemory();
+    const agent = scripted('codex');
+    let calls = 0;
+    const { updates, report } = observed();
+    const runner = limitAwareRunner('worker', [{ name: 'primary', harness: 'codex', reserve: 10,
+      quota: async () => ({ remaining: ++calls === 1 ? 8 : 11, kind: 'five_hour',
+        ...(known ? { resetsAt: start + minute } : {}) }), runner: agent.runner,
+    }], memory, policy(time));
+    assert.deepEqual(await runner(request, report), { type: 'completed' });
+    assert.equal(calls, 2);
+    assert.deepEqual(agent.requests, [request]);
+    assert.equal(memory.size, 0);
+    assert.equal(time.now(), start + (known ? 2 * minute : 15 * minute));
+    assert.deepEqual(limits(updates).map((update) => update.status), ['waiting', 'resumed']);
+    assert.match(limits(updates)[0]!.text, /8% left, reserve 10%/u);
+  });
+}
+
+test('unavailable quota warns once across roles and repeated requests sharing run warnings', async (context) => {
+  const warnings: string[] = [];
+  context.mock.method(console, 'warn', (message: string) => warnings.push(message));
+  const sharedWarnings = new Set<string>();
+  const memory = createLimitMemory();
+  let hooks = 0;
+  let turns = 0;
+  const candidate = { name: 'primary', harness: 'codex', quota: async () => { hooks++; return undefined; },
+    runner: () => { turns++; return { type: 'completed' }; } };
+  for (const role of ['worker', 'reviewer']) {
+    const runner = limitAwareRunner(role, [candidate], memory, policy(clock()), candidate, sharedWarnings);
+    await runner(request);
+    await runner(request);
+  }
+  assert.equal(hooks, 4);
+  assert.equal(turns, 4);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0]!, /primary.*quota.*no reading/u);
+});
+
+test('a reserve found after a failed turn announces its own swap and adds no extra handoff', async () => {
+  const first = scripted('first', {kind:'usage'});
+  const spare = scripted('third');
+  const {updates, report} = observed();
+  await limitAwareRunner('worker', [
+    {name:'first', harness:'first', runner:first.runner},
+    {name:'second', harness:'second', reserve:10, quota:async () => ({remaining:8, kind:'seven_day'}),
+      runner:() => {throw new Error('must not run');}},
+    {name:'third', harness:'third', runner:spare.runner},
+  ], createLimitMemory(), policy(clock()))(request, report);
+  assert.deepEqual(limits(updates).map(({agent, to}) => ({agent, to})), [
+    {agent:'first', to:'second'}, {agent:'second', to:'third'},
+  ]);
+  assert.match(limits(updates)[1]!.text, /second.*8% left, reserve 10%/u);
+  assert.equal(spare.requests[0]!.prompt.match(/a previous Agent/gu)?.length, 1);
+});

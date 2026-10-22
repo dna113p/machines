@@ -75,7 +75,12 @@ try {
     const presets = await listAgentPresets({ cwd: process.cwd() });
     if (presets.length === 0) console.log("No Agent presets found.");
     const limits = await readLimits(launcherLimitMemory());
-    const order = await effectiveProviderOrder();
+    let order = await effectiveProviderOrder();
+    const preference = process.env.MACHINES_AGENT_PREFER === undefined ? await readProviderOrder() : undefined;
+    if (preference?.above !== undefined) {
+      const reading = preferredSummary(presets, preference.order)?.quota;
+      if (reading !== undefined && reading.remaining <= preference.above) order = [];
+    }
     if (order.length > 0) console.log(`Provider order: ${order.join(", ")}`);
     const byName = new Map(presets.map((preset) => [preset.name, preset]));
     presets.forEach((preset, index) => {
@@ -99,10 +104,10 @@ try {
     const limits = await readLimits(memory);
     if (limits.length === 0) console.log("No usage limits remembered.");
     else {
-      console.log("Preset\tHarness\tKind\tScope\tReset or next probe\tRun");
+      console.log("Preset\tHarness\tKind\tScope\tReset or next probe\tRun\tSource");
       for (const entry of limits) console.log([
         entry.preset, entry.harness ?? entry.limit.harness, entry.limit.kind ?? "unknown", entry.scope,
-        `${entry.known ? "reset" : "next probe"} ${new Date(entry.until).toISOString()}`, entry.run,
+        `${entry.known ? "reset" : "next probe"} ${new Date(entry.until).toISOString()}`, entry.run, entry.limit.quota === undefined ? "turn" : `quota reading: ${entry.limit.quota.remaining}% left, reserve ${entry.limit.reserve ?? 0}%`,
       ].map(plain).join("\t"));
     }
   } else if (command === "show" && selector !== undefined) {
@@ -135,7 +140,7 @@ try {
       "Usage:",
       "  machine list",
       "  machine agents",
-      "  machine prefer [<harness>...] [--until <ISO-time|HH:MM>] | --clear",
+      "  machine prefer [<harness>...] [--until <ISO-time|HH:MM>] [--above <percent>] | --clear",
       "  machine limits [--forget <preset> | --forget-all]",
       "  machine show <name-or-file>",
       "  machine run <name-or-file> [--sleep] [--agent role=preset]... [--input-file <file|->] [--] [input]",
@@ -177,31 +182,49 @@ async function prefer(args: readonly string[]): Promise<void> {
   }
   const order: string[] = [];
   let until: string | undefined;
+  let above: number | undefined;
+  let presets: readonly AgentPresetSummary[] | undefined;
   for (let index = 0; index < args.length; index++) {
     const arg = args[index]!;
     if (arg === "--until") {
       const value = args[++index];
       if (until !== undefined || value === undefined) throw new Error("--until needs one ISO time or HH:MM");
       until = providerOrderUntil(value);
+    } else if (arg === "--above") {
+      const value = args[++index];
+      if (above !== undefined || value === undefined || value.trim() === "" || !Number.isFinite(Number(value))
+        || Number(value) < 0 || Number(value) > 100) throw new Error("--above needs one percent from 0 to 100");
+      above = Number(value);
     } else if (arg.startsWith("-") || arg.trim() === "") {
       throw new Error(`Unknown machine prefer argument: ${arg}`);
     } else order.push(arg);
   }
   if (args.length > 0) {
-    if (order.length === 0) throw new Error("machine prefer --until requires at least one harness");
-    const presets = await listAgentPresets({ cwd: process.cwd() });
+    if (order.length === 0) throw new Error("machine prefer --until or --above requires at least one harness");
+    presets = await listAgentPresets({ cwd: process.cwd() });
     for (const harness of new Set(order)) {
       if (!presets.some((preset) => preset.harness === harness)) {
         console.error(`Warning: no configured preset in this workspace has harness "${harness}".`);
       }
     }
-    await writeProviderOrder({ order, ...(until === undefined ? {} : { until }) });
+    await writeProviderOrder({ order, ...(until === undefined ? {} : { until }), ...(above === undefined ? {} : { above }) });
   }
   const preference = await readProviderOrder();
   const override = process.env.MACHINES_AGENT_PREFER;
   if (preference !== undefined) {
-    const status = providerOrderExpired(preference) ? "expired" : override === undefined ? "in effect" : "overridden by MACHINES_AGENT_PREFER";
-    console.log(`Provider order: ${preference.order.join(", ")}; until ${preference.until ?? "cleared"}; ${status}.`);
+    let condition = "";
+    let released = false;
+    if (preference.above !== undefined) {
+      presets ??= await listAgentPresets({ cwd: process.cwd() });
+      const selected = preferredSummary(presets, preference.order);
+      released = selected?.quota !== undefined && selected.quota.remaining <= preference.above;
+      condition = `; above ${preference.above}%; ` + (selected?.quota === undefined
+        ? `condition cannot be checked${selected === undefined ? ": no quota hook" : ` (${selected.name}: ${selected.quotaError})`}`
+        : `${selected.name}: ${quotaText(selected)}`);
+    }
+    const status = providerOrderExpired(preference) ? "expired" : override !== undefined
+      ? "overridden by MACHINES_AGENT_PREFER" : released ? "released by quota condition" : "in effect";
+    console.log(plain(`Provider order: ${preference.order.join(", ")}; until ${preference.until ?? "cleared"}${condition}; ${status}.`));
   }
   if (override !== undefined) {
     const effective = await effectiveProviderOrder();
@@ -686,6 +709,7 @@ function printAgentListing(preset: AgentPresetSummary, separate: boolean, prefer
   const remembered = limit === undefined ? undefined : plain(
     `usage limit: ${limit.preset} (${limit.limit.kind ?? "unknown"}, ${limit.scope}; ${limit.known ? "reset" : "next probe"} ${new Date(limit.until).toISOString()})`,
   );
+  const quota = quotaText(preset);
   const identity = [preset.harness, preset.model, preset.thinking].filter(Boolean);
   if (!process.stdout.isTTY) {
     console.log([
@@ -697,6 +721,7 @@ function printAgentListing(preset: AgentPresetSummary, separate: boolean, prefer
       preset.source,
       preset.fallback?.join(", ") ?? "",
       ...(remembered === undefined ? [] : [remembered]),
+      ...(quota === "" ? [] : [quota]),
     ].join("\t"));
     return;
   }
@@ -707,7 +732,23 @@ function printAgentListing(preset: AgentPresetSummary, separate: boolean, prefer
   if (identity.length > 0) console.log(`  ${magenta(identity.join(" · "))}`);
   if (preset.fallback !== undefined) console.log(`  fallback: ${preset.fallback.join(", ") || "none"}`);
   if (remembered !== undefined) console.log(`  ${yellow(remembered)}`);
+  if (quota !== "") console.log(`  ${quota}`);
   console.log(`  ${dim(preset.source)}`);
+}
+
+function preferredSummary(presets: readonly AgentPresetSummary[], order: readonly string[]) {
+  return presets.filter((preset) => preset.harness === order[0] && preset.hasQuota)
+    .sort((a, b) => (a.configurationIndex ?? Infinity) - (b.configurationIndex ?? Infinity))[0];
+}
+
+function quotaText(preset: AgentPresetSummary): string {
+  const reserve = preset.reserve ?? (preset.hasQuota ? 0 : undefined);
+  return plain([
+    reserve === undefined ? "" : `reserve ${reserve}%`,
+    preset.quota === undefined
+      ? preset.hasQuota ? `quota unavailable: ${preset.quotaError}` : ""
+      : `${preset.quota.kind ?? "usage"} ${preset.quota.remaining}% left${preset.quota.resetsAt === undefined ? "" : `, resets ${new Date(preset.quota.resetsAt).toISOString()}`}`,
+  ].filter(Boolean).join("; "));
 }
 
 /** Recorded text must not be able to move the cursor or restyle the terminal. */

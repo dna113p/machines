@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { agentLimitsFile } from "./discovery.ts";
-import { AgentLimitError, agentLimitOf, type AgentLimit } from "./agent-limit.ts";
+import { AgentLimitError, agentLimitOf, readAgentQuota, type AgentQuota, type AgentLimit } from "./agent-limit.ts";
 import type { AgentReporter, AgentRequest, AgentRunner, AgentUpdate, Event } from "./index.ts";
 
 export interface LimitPolicy {
@@ -21,6 +21,8 @@ export interface LimitCandidate {
   readonly runner: AgentRunner;
   readonly harness?: string;
   readonly model?: string;
+  readonly quota?: () => Promise<AgentQuota | undefined>;
+  readonly reserve?: number;
 }
 
 export interface RememberedLimit {
@@ -208,7 +210,10 @@ function validEntry(value: unknown): value is RememberedLimit {
     && (entry.lastProbeAt === undefined || Number.isFinite(entry.lastProbeAt))
     && entry.limit !== null && typeof entry.limit === "object" && typeof entry.limit.harness === "string"
     && (entry.limit.kind === undefined || typeof entry.limit.kind === "string")
-    && (entry.limit.resetsAt === undefined || Number.isFinite(entry.limit.resetsAt));
+    && (entry.limit.resetsAt === undefined || Number.isFinite(entry.limit.resetsAt))
+    && (entry.limit.quota === undefined || (entry.limit.quota !== null && typeof entry.limit.quota === "object"
+      && Number.isFinite(entry.limit.quota.remaining) && entry.limit.quota.remaining >= 0 && entry.limit.quota.remaining <= 100))
+    && (entry.limit.reserve === undefined || (Number.isFinite(entry.limit.reserve) && entry.limit.reserve >= 0 && entry.limit.reserve <= 100));
 }
 
 function hasCode(cause: unknown, code: string): boolean {
@@ -267,6 +272,7 @@ export function limitAwareRunner(
   memory: LimitMemory,
   policy: LimitPolicy,
   originalBound = candidates[0],
+  quotaWarnings = new Set<string>(),
 ): AgentRunner {
   const bound = originalBound;
   const first = candidates[0];
@@ -300,11 +306,31 @@ export function limitAwareRunner(
     }
   });
 
+  const checkQuota = async (candidate: LimitCandidate): Promise<RememberedLimit | undefined> => {
+    if (candidate.quota === undefined) return undefined;
+    const { reading, error } = await readAgentQuota(candidate.quota);
+    if (reading === undefined) {
+      if (!quotaWarnings.has(candidate.name)) {
+        quotaWarnings.add(candidate.name);
+        console.warn(`Agent preset "${candidate.name}" quota unavailable: ${error}; trying its runner.`.replace(/[\r\n]+/gu, " "));
+      }
+      return undefined;
+    }
+    const reserve = candidate.reserve ?? 0;
+    if (reading.remaining > reserve) return undefined;
+    return remember(candidate, {
+      harness: candidate.harness ?? "unknown", scope: "provider", quota: reading, reserve,
+      ...(reading.kind === undefined ? {} : { kind: reading.kind }),
+      ...(reading.resetsAt === undefined ? {} : { resetsAt: reading.resetsAt }),
+    });
+  };
+
   // The state decides what its limit means, so nothing is swapped, waited for, or reported as an update.
   const reported = async (request: AgentRequest, report?: AgentReporter): Promise<Event> => {
     const { blocked: known, observed } = await attempt(bound);
-    if (known !== undefined) {
-      throw new AgentLimitError(`${named(bound.name)} is at its usage limit (${resetText(known)})`, known.limit);
+    const reserved = known ?? await checkQuota(bound);
+    if (reserved !== undefined) {
+      throw new AgentLimitError(`${named(bound.name)} is at its usage limit (${resetText(reserved)})`, reserved.limit);
     }
     try {
       const event = await bound.runner(request, report);
@@ -348,12 +374,23 @@ export function limitAwareRunner(
       for (const [index, candidate] of candidates.entries()) {
         const { blocked, observed } = await attempt(candidate, retrying);
         for (const entry of observed) seen.set(entryKey(entry), entry);
-        if (blocked !== undefined) {
-          passedOver ??= { candidate, remembered: blocked };
+        const reserved = blocked ?? await checkQuota(candidate);
+        if (reserved !== undefined) {
+          seen.set(entryKey(reserved), reserved);
+          if (blocked !== undefined) {
+            passedOver ??= { candidate, remembered: blocked };
+          } else {
+            // A fresh reading follows the failed-turn swap path, without an interruption or handoff.
+            passedOver = undefined;
+            const current = await snapshot();
+            const next = candidates.slice(index + 1).find((later) =>
+              !covering(current, later).some((entry) => isLimited(entry, retrying)));
+            if (next !== undefined) await tell(swapped(named(candidate.name), "is at", reserved, candidate, next));
+          }
           continue;
         }
         if (passedOver !== undefined && !interrupted && !waiting) {
-          // Another role or run found the limit; name its origin and the replacement.
+          // A reading or remembered limit skipped a turn; name its origin and replacement.
           // After a wait the preset is named when the Agent resumes.
           await tell(swapped(named(passedOver.candidate.name), "is at", passedOver.remembered, passedOver.candidate, candidate));
         }
@@ -433,6 +470,8 @@ export function limitAwareRunner(
         const resets = wakes.filter((wake) => wake.remembered.known).map((wake) => wake.remembered.until);
         const until = timestamp(resets.length === 0 ? closes : Math.min(...resets));
         const others = candidates.filter((candidate) => candidate !== bound).map((candidate) => candidate.name);
+        const readings = limits.filter(({ remembered }) => remembered.limit.quota !== undefined)
+          .map(({ candidate, remembered }) => `${candidate.name}: ${resetText(remembered)}`);
         await tell({
           type: "limit",
           status: "waiting",
@@ -442,7 +481,7 @@ export function limitAwareRunner(
             others.length === 0
               ? " reached its usage limit"
               : ` and its fallback${others.length === 1 ? "" : "s"} (${others.join(", ")}) reached their usage limits`
-          }; ${resets.length === 0 ? `no reset is stated, retrying until ${until}` : `waiting for the reset at ${until}`}`,
+          }${readings.length === 0 ? "" : ` (${readings.join("; ")})`}; ${resets.length === 0 ? `no reset is stated, retrying until ${until}` : `waiting for the reset at ${until}`}`,
         });
       }
       for (let remaining = wakeAt - now(); remaining > 0; remaining = wakeAt - now()) {
@@ -583,7 +622,10 @@ function exhausted(
 }
 
 function resetText(remembered: RememberedLimit | undefined): string {
-  return remembered?.known === true ? `resets ${timestamp(remembered.until)}` : "reset unknown";
+  const reset = remembered?.known === true ? `resets ${timestamp(remembered.until)}` : "reset unknown";
+  const limit = remembered?.limit;
+  return limit?.quota === undefined ? reset
+    : `${limit.harness} ${limit.kind ?? "usage"} ${limit.quota.remaining}% left, reserve ${limit.reserve ?? 0}%; ${reset}`;
 }
 
 function timestamp(time: number): string {

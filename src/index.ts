@@ -140,7 +140,7 @@ export type AgentReporter = (update: AgentUpdate) => void;
 
 export type { JsonValue } from "./json.ts";
 
-export { AgentLimitError, agentLimitOf, type AgentLimit } from "./agent-limit.ts";
+export { AgentLimitError, agentLimitOf, type AgentLimit, type AgentQuota } from "./agent-limit.ts";
 
 export {
   machineGraph,

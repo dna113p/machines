@@ -12,6 +12,7 @@ import { layaAgent, layaProvider } from "./laya.ts";
 import { vonAgent, vonProvider } from "./von.ts";
 import { openRouterDecisionAgent, openRouterDecisionProvider } from "./openrouter.ts";
 import { discoverMachines, machinesUserHome } from "./discovery.ts";
+import { readAgentQuota, type AgentQuota } from "./agent-limit.ts";
 import type { AgentRunner } from "./index.ts";
 import { readEndings, type MachineEnding } from "./endings.ts";
 import { loadMachineModule, readAgentRoles, readOptionalAgentRoles, requireMachineDescription } from "./machine-module.ts";
@@ -27,6 +28,12 @@ export interface MachineSummary {
 }
 
 export interface AgentPresetSummary {
+  /** Original configuration order, before sorting the display by name. */
+  readonly configurationIndex?: number;
+  readonly reserve?: number;
+  readonly hasQuota?: boolean;
+  readonly quota?: AgentQuota;
+  readonly quotaError?: string;
   readonly name: string;
   readonly description: string;
   readonly harness?: string;
@@ -94,11 +101,18 @@ export async function inspectAgentPresets(
   const home = location.home ?? machinesUserHome();
   const configured = await configuredAgentPresets(cwd, home);
 
-  return Object.entries(configured.presets)
-    .map(([name, preset]) => {
+  return (await Promise.all(Object.entries(configured.presets)
+    .map(async ([name, preset], configurationIndex) => {
+      const quota = preset.quota === undefined ? undefined : await readAgentQuota(preset.quota);
       const fallback = fallbackPresets(name, preset, configured.fallback);
       return {
         name,
+        ...(preset.reserve === undefined ? {} : { reserve: preset.reserve }),
+        ...(quota === undefined ? {} : {
+          hasQuota: true,
+          configurationIndex,
+          ...(quota.reading === undefined ? { quotaError: quota.error } : { quota: quota.reading }),
+        }),
         description: preset.description,
         ...(preset.harness === undefined ? {} : { harness: preset.harness }),
         ...(preset.model === undefined ? {} : { model: preset.model }),
@@ -106,7 +120,7 @@ export async function inspectAgentPresets(
         ...(fallback === undefined ? {} : { fallback }),
         source: configured.sources[name] ?? "unknown",
       };
-    })
+    })))
     .sort((left, right) => left.name.localeCompare(right.name));
 }
 
@@ -134,7 +148,7 @@ export async function configuredAgentPresets(
   const openRouterRunner = openRouterDecisionAgent();
   const layaRunner = layaAgent();
   const vonRunner = vonAgent();
-  return {
+  const result: ResolvedAgentPresets = {
     agents: {
       default: defaultRunner, agy: agyRunner, claude: claudeRunner, codex: codexRunner, "chatgpt-web": chatGptWebRunner, deepseek: deepseekRunner, jev: jevRunner,
       "openrouter-decision": openRouterRunner, laya: layaRunner, von: vonRunner, ...configured.agents,
@@ -198,6 +212,11 @@ export async function configuredAgentPresets(
     },
     ...(configured.fallback === undefined ? {} : { fallback: configured.fallback }),
   };
+  // Keep configured insertion order even when a user overrides a built-in name.
+  return { ...result, presets: {
+    ...configured.presets,
+    ...Object.fromEntries(Object.entries(result.presets).filter(([name]) => !Object.hasOwn(configured.presets, name))),
+  } };
 }
 
 function errorMessage(cause: unknown): string {

@@ -2,11 +2,14 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
+import { readAgentQuota, type AgentQuota } from "./agent-limit.ts";
+import type { AgentPreset } from "./agent-bindings.ts";
 import { machinesStateDirectory, machinesUserHome } from "./discovery.ts";
 
 export interface ProviderOrder {
   readonly order: readonly string[];
   readonly until?: string;
+  readonly above?: number;
 }
 
 export function providerOrderPath(home = machinesUserHome()): string {
@@ -30,13 +33,16 @@ export function providerOrderUntil(value: string, now = new Date()): string {
 
 function validate(value: unknown): ProviderOrder {
   if (value === null || typeof value !== "object") throw new Error("Invalid provider order");
-  const { order, until } = value as Partial<ProviderOrder>;
+  const { order, until, above } = value as Partial<ProviderOrder>;
   if (!Array.isArray(order) || order.length === 0
     || order.some((name: unknown) => typeof name !== "string" || name.trim() === "")
     || (until !== undefined && (typeof until !== "string" || !Number.isFinite(Date.parse(until))))) {
     throw new Error("Invalid provider order: expected a nonempty order and optional ISO until time");
   }
-  return { order: [...new Set(order)], ...(until === undefined ? {} : { until }) };
+  if (above !== undefined && (typeof above !== "number" || !Number.isFinite(above) || above < 0 || above > 100)) {
+    throw new Error("Invalid provider order: above must be a percent from 0 to 100");
+  }
+  return { order: [...new Set(order)], ...(until === undefined ? {} : { until }), ...(above === undefined ? {} : { above }) };
 }
 
 export async function readProviderOrder(home = machinesUserHome()): Promise<ProviderOrder | undefined> {
@@ -71,11 +77,19 @@ export function providerOrderExpired(preference: ProviderOrder, now = Date.now()
 }
 
 /** Resolve once at preparation; an explicitly empty override disables the file. */
-export async function effectiveProviderOrder(home = machinesUserHome()): Promise<readonly string[]> {
+export async function effectiveProviderOrder(
+  home = machinesUserHome(),
+  presets?: Readonly<Record<string, AgentPreset>>,
+): Promise<readonly string[]> {
   const override = process.env.MACHINES_AGENT_PREFER;
   if (override !== undefined) return [...new Set(override.split(",").map((name) => name.trim()).filter(Boolean))];
   const preference = await readProviderOrder(home);
-  return preference === undefined || providerOrderExpired(preference) ? [] : preference.order;
+  if (preference === undefined || providerOrderExpired(preference)) return [];
+  if (preference.above !== undefined && presets !== undefined) {
+    const { reading } = await preferredQuota(preference, presets);
+    if (reading !== undefined && reading.remaining <= preference.above) return [];
+  }
+  return preference.order;
 }
 
 /** Stable sorting preserves both same-provider and unlisted candidate order. */
@@ -87,4 +101,15 @@ export function sortProviderCandidates<T extends { readonly harness?: string }>(
     return index < 0 ? order.length : index;
   };
   return [...candidates].sort((left, right) => rank(left) - rank(right));
+}
+
+/** The first configured preset of the preferred provider that supplies a hook. */
+export async function preferredQuota(
+  preference: ProviderOrder,
+  presets: Readonly<Record<string, AgentPreset>>,
+): Promise<{ readonly preset?: string; readonly reading?: AgentQuota; readonly error?: string }> {
+  const selected = Object.entries(presets).find(([, preset]) => preset.harness === preference.order[0] && preset.quota !== undefined);
+  if (selected === undefined) return { error: "no preset of this harness has a quota hook" };
+  const [preset, configured] = selected;
+  return { preset, ...await readAgentQuota(configured.quota!) };
 }

@@ -140,3 +140,40 @@ test("prefer warns for unknown labels, rejects invalid arguments, and preserves 
     assert.equal(await readFile(fixture.file, "utf8"), saved);
   }
 });
+
+for (const remaining of [25, 30, 35]) {
+  test(`conditional order uses the first configured hook at ${remaining}% and combines with expiry`, async (context) => {
+    const fixture = await priorityFixture(context);
+    let reads = 0;
+    const preset = { description: 'test', harness: 'claude', runner: () => ({ type: 'done' }) };
+    const presets = {
+      noHook: preset,
+      zFirst: { ...preset, quota: async () => { reads++; return { remaining }; } },
+      aLater: { ...preset, quota: async () => { throw new Error('must not read second hook'); } },
+    };
+    await writeProviderOrder({ order: ['claude'], above: 30, until: '2099-01-01T00:00:00Z' }, fixture.home);
+    assert.deepEqual(await effectiveProviderOrder(fixture.home, presets), remaining > 30 ? ['claude'] : []);
+    assert.equal(reads, 1);
+    const saved = await readProviderOrder(fixture.home);
+    assert.deepEqual(saved, { order: ['claude'], above: 30, until: '2099-01-01T00:00:00Z' });
+    await writeProviderOrder({ ...saved!, until: '2000-01-01T00:00:00Z' }, fixture.home);
+    assert.deepEqual(await effectiveProviderOrder(fixture.home, presets), []);
+    assert.equal(reads, 1, 'expired preferences do not call hooks');
+    process.env.MACHINES_AGENT_PREFER = 'codex';
+    assert.deepEqual(await effectiveProviderOrder(fixture.home, presets), ['codex']);
+    assert.equal(reads, 1, 'environment overrides do not call hooks');
+  });
+}
+
+test('conditional order applies with absent, undefined or failed quota; rejects invalid above values', async (context) => {
+  const fixture = await priorityFixture(context);
+  await writeProviderOrder({ order: ['claude'], above: 30 }, fixture.home);
+  const preset = { description: 'test', harness: 'claude', runner: () => ({ type: 'done' }) };
+  for (const quota of [undefined, async () => undefined, async () => { throw new Error('offline'); }]) {
+    assert.deepEqual(await effectiveProviderOrder(fixture.home, { test: { ...preset, quota } }), ['claude']);
+  }
+  for (const above of [-1, 101, NaN, Infinity]) {
+    await assert.rejects(writeProviderOrder({ order: ['claude'], above }, fixture.home), /above/u);
+  }
+  assert.deepEqual(await readProviderOrder(fixture.home), { order: ['claude'], above: 30 });
+});

@@ -50,7 +50,9 @@ export function queryCatalog(kind: CatalogKind, location: LauncherLocation): Pro
       if ("error" in reply) reject(new Error(reply.error));
       else resolveReply(reply.entries);
     };
-    const timer = setTimeout(() => finish({ error: "Machine discovery timed out after 10 seconds" }), 10_000);
+    // Hooks run concurrently with their own 10-second caps; allow imports and startup as well.
+    const timeout = kind === "agents" ? 20_000 : 10_000;
+    const timer = setTimeout(() => finish({ error: `Machine discovery timed out after ${timeout / 1000} seconds` }), timeout);
     worker.once("message", (reply: CatalogReply) => finish(reply));
     worker.once("error", (error) => finish({ error: error.message }));
     worker.once("exit", (code) => finish({ error: `Machine discovery exited before returning results (code ${code})` }));
