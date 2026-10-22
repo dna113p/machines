@@ -6,7 +6,8 @@ import { fromPromise, type AnyStateMachine, type SnapshotFrom, type StateValue }
 
 import { assertJsonValue, jsonProblem, type JsonValue } from "./json.ts";
 import { fallbackPresets, type AgentPreset } from "./agent-bindings.ts";
-import { effectiveProviderOrder, sortProviderCandidates } from "./provider-order.ts";
+import { sortProviderCandidates } from "./provider-order.ts";
+import { profilePermits, resolveAgentProfile, type AgentProfile, type ActiveAgentProfile } from "./agent-profiles.ts";
 import { launcherLimitMemory, defaultProbeMs, limitAwareRunner, type LimitPolicy } from "./agent-limits.ts";
 import { configuredAgentPresets, type LauncherLocation, type MachineSummary, type AgentPresetSummary } from "./catalog.ts";
 import { queryCatalog } from "./discovery-worker.ts";
@@ -52,7 +53,12 @@ export interface PrepareMachineRunOptions extends LauncherLocation {
   };
 }
 
+export type { AgentPreset } from "./agent-bindings.ts";
+export { withAgentTuning, configureAgentTuning, type AgentTuning, type AgentTuningAdapter, type TunedAgent } from "./agent-tuning.ts";
+export { readAgentProfiles, readActiveAgentProfile, activateAgentProfile, clearAgentProfile, agentProfileExpired, type AgentProfile, type ActiveAgentProfile, type ProfileOverride } from "./agent-profiles.ts";
+
 export interface PreparedMachineRun {
+  readonly profile?: ActiveAgentProfile;
   readonly name: string;
   readonly description: string;
   readonly path: string;
@@ -113,7 +119,11 @@ export async function prepareMachineRun(
   assertEndingStates(definition, endings, path);
   if (options.continueRun) assertSavedState(definition.root, options.continueRun.state.value);
   const sourceHash = machineSourceHash(path);
-  const configured = await configuredAgentPresets(cwd, home);
+  const base = await configuredAgentPresets(cwd, home);
+  const profile = await resolveAgentProfile(home, base.presets);
+  const configured = { ...base, presets: profile.presets,
+    agents: Object.fromEntries(Object.entries(profile.presets).map(([name, preset]) => [name, preset.runner])),
+  };
   const usedAgentRoles = requiredAgentNames(definition);
   const childModules = usedModules(children);
   const requiredRoles = new Set([
@@ -128,15 +138,16 @@ export async function prepareMachineRun(
   preflightAgentRoles(path, usedAgentRoles, agentRoles, optional, agents, optionalAgentNames(definition));
   for (const child of childModules) preflightAgentRoles(child.path, ["default"], child.agentRoles, child.optionalAgentRoles, agents);
   const restored = await restoreChildren(definition, children, options.continueRun, agents, status);
-  const providerOrder = fallbackEnabled() ? await effectiveProviderOrder(home, configured.presets) : [];
+  const providerOrder = fallbackEnabled() ? profile.order : [];
   const limitAware = limitAwareAgents(
     new Set([...allRoles].filter((role) => requiredRoles.has(role) || Object.hasOwn(agents, role))),
-    overrides, configured, limitPolicy(options.agentLimits), providerOrder,
+    overrides, configured, limitPolicy(options.agentLimits), providerOrder, profile.active?.profile,
   );
 
   let started = false;
   const graph = machineGraph(definition, endings);
   return {
+    ...(profile.active === undefined ? {} : { profile: profile.active }),
     name: machineName(path),
     description,
     path,
@@ -495,6 +506,7 @@ function limitAwareAgents(
   configured: Awaited<ReturnType<typeof configuredAgentPresets>>,
   policy: LimitPolicy,
   providerOrder: readonly string[],
+  profile?: AgentProfile,
 ): Readonly<Record<string, AgentRunner>> {
   const swapping = fallbackEnabled();
   const memory = launcherLimitMemory();
@@ -521,7 +533,10 @@ function limitAwareAgents(
         ...(preset.model === undefined ? {} : { model: preset.model }),
       };
     });
-    wrapped[role] = limitAwareRunner(role, sortProviderCandidates(candidates, providerOrder), memory, policy, candidates[0], quotaWarnings);
+    const permitted = candidates.filter((candidate) => profilePermits(profile, candidate));
+    if (permitted.length === 0) throw new Error(`Agent role "${role}" has no allowed preset in its configured chain under the active profile${swapping ? "" : " (MACHINES_AGENT_FALLBACK=off)"}`);
+    // onLimit still uses the bound preset when allowed; otherwise the first allowed preset in its chain.
+    wrapped[role] = limitAwareRunner(role, sortProviderCandidates(permitted, providerOrder), memory, policy, permitted[0], quotaWarnings);
   }
   return wrapped;
 }

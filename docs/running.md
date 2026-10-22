@@ -212,6 +212,226 @@ preset alone, as do states that handle their own limits with `onLimit`.
 the first provider as preferred, and shows each complete sorted chain in the
 fallback column. A run announces a changed first candidate once per role.
 
+### Temporary model and provider profiles
+
+Define named profiles in `.machines/profiles.json`. The JSON object maps names
+to definitions. Machines reads `~/.machines/profiles.json` first and the nearest
+project file second, replacing a whole profile with the same name. The selected
+Machines home follows `MACHINES_USER_HOME`, just like `agents.ts`. Definition files
+are data and execute no code. Nothing is activated merely by defining a profile.
+
+For example, this complete `burn-codex` definition uses existing Codex models and
+requests Fast mode for all presets explicitly identified by `harness: "codex"`:
+
+```json
+{
+  "burn-codex": {
+    "order": ["codex"],
+    "allowedProviders": ["codex"],
+    "overrides": [
+      { "provider": "codex", "options": { "serviceTier": "fast" } }
+    ]
+  },
+  "mixed-priority": {
+    "order": ["codex", "dsh", "my-api-account"]
+  }
+}
+```
+
+```bash
+machine profile list
+machine profile show burn-codex
+machine profile use burn-codex --until 21:00
+machine profile show
+machine agents
+machine profile clear
+# Reuse the same definition later:
+machine profile use burn-codex --until 23:00
+```
+
+These commands are examples; creating a definition does not run them for you.
+`use` requires a future deadline: an ISO date/time or the next local `HH:MM`,
+using the same parsing as `machine prefer`. It validates scoped adapter options
+before saving the activation. It does not start an Agent or verify every Machine's
+role bindings; preparation checks those chains. `show NAME` validates adapter
+support in this workspace. `list` lists reusable names without dumping options.
+
+The activation contains the profile name, normalized deadline and a copy of its
+definition. It is atomically stored with mode `0600` in
+`$XDG_STATE_HOME/machines/agent-profile.json`, otherwise
+`~/.local/state/machines/agent-profile.json`, following the same alternate-home
+isolation as provider preferences. Editing a definition takes effect when you
+activate it again. `clear` removes only this activation; definitions and legacy
+preferences remain. Expired activations remain inspectable but have no effect.
+Malformed persisted activations fail preparation rather than silently releasing
+the filter. Clearing a malformed activation is supported.
+
+`order` stably sorts each role's existing bound-preset/fallback chain. Unlisted
+providers retain their relative order. `allowedProviders` independently filters
+that chain by exact `harness` identity; absent permits every candidate, `[]`
+permits none, and a candidate without a harness cannot pass a present filter.
+Neither setting adds a preset or a provider to a chain. Thus `burn-codex` requires
+each role's chain to already contain a Codex preset. If no permitted candidate
+remains, preparation names the role and fails before any Agent executes. A named
+profile is user-wide while active, so other workspaces using that home also obey
+its filter and must support its scoped overrides.
+
+`mixed-priority` includes DeepSeek or an API-backed account only if that exact
+identity is already configured in the role's permitted chain. The shipped
+DeepSeek preset's identity is `dsh`; a custom `deepseekAgent` preset must
+set its own `harness` explicitly for selection. Profiles do not enable providers,
+create accounts, add credentials, opt into extra usage, or authorize spending.
+Use separately configured presets with distinct harness identities for account
+choices. All existing billing rules and provider/account entitlements still apply,
+including any cost the configured account assigns to Fast or Ultrafast mode.
+
+Precedence and limit behavior:
+
+- `MACHINES_AGENT_PREFER`, including an explicitly empty value, overrides profile
+  **order** for that process. The filter and tuning remain active.
+- Otherwise an active profile's `order` (including `[]`) replaces `machine prefer`.
+  Without a profile order, the normal saved preference and its `--above` condition
+  apply. `--above` only releases that legacy order, never the profile filter or tuning.
+- `MACHINES_AGENT_FALLBACK=off` keeps only the bound preset and suppresses ordering
+  and quota hooks as before. If that preset is excluded, preparation fails; it
+  cannot escape the filter through a fallback.
+- `onLimit` still reports a limit without swapping or waiting. It uses the bound
+  preset if allowed; otherwise it uses the first allowed preset in the original
+  configured chain. Preference order does not change that report-only selection.
+- Expiry, deactivation, new definitions and environment-order changes affect newly
+  prepared runs. Prepared/running Machines and their children keep the snapshot.
+  Continuing a saved checkpoint prepares a new run and resolves current settings.
+
+`machine profile show` displays the saved snapshot, expiry status, effective order
+and order source. `machine agents` displays the active profile, effective model
+identity, excluded presets and filtered/sorted chains. The public launcher exposes
+`PreparedMachineRun.profile` and `AgentPresetSummary.profile`/`permitted` for other
+interfaces. The profile functions and types are exported from
+`@dna113p/machines/launcher`; adapter tuning is also exported from the root package.
+
+#### Model tuning and adapter capabilities
+
+Each override must name a `provider`, a `preset`, or both (both must match).
+Use one override per matched preset; overlapping overrides fail rather than
+silently merging. An unmatched scope also fails, catching misspelled identities.
+For example, to tune one existing preset:
+
+```json
+{
+  "one-model": {
+    "overrides": [{
+      "preset": "codex-review",
+      "model": "your-configured-model",
+      "forModel": "your-configured-model",
+      "options": { "effort": "high", "serviceTier": "ultrafast" }
+    }]
+  }
+}
+```
+
+`model` changes the actual adapter model. `forModel` optionally requires the
+adapter's resolved model to match exactly; it prevents model-specific options
+from being used with another model, even when a preset's display label is stale.
+This constraint fails preparation on a mismatch. Each adapter also validates its
+own supported keys, values and declared model restrictions.
+
+Existing `codexAgent(...)` runners automatically support `model`, `options.effort`
+(`none`, `minimal`, `low`, `medium`, `high`, `xhigh`) and `options.serviceTier`
+(`fast`, `ultrafast`). These translate to `--model`,
+`--config model_reasoning_effort=...` and `--config service_tier=...`.
+Profile tuning takes precedence over the runner's explicit tuning options and
+its environment-derived tuning, without changing `process.env`. Untuned values
+retain preset/default precedence. Tuned runners capture their environment at
+preparation. Commands, existing arguments, sandbox, output, ephemeral behavior,
+credentials and configured environment remain owned by the preset.
+
+`claudeAgent(...)` supports `model` and `options.effort` (`low`, `medium`, `high`,
+`max`), translating to `--model` and `--effort` while preserving permission/tool
+restrictions and the extra-usage guard. These shipped adapters validate the
+supported option vocabulary, **not** a universal model catalog. The installed CLI
+and account determine which model names and tiers they can execute; Machines
+cannot establish availability offline. Pin `forModel` or provide an adapter with
+stricter model rules when needed. Other shipped runners, including DeepSeek,
+currently support ordering/filtering but require explicit custom opt-in for tuning.
+
+Unknown keys, invalid values, mismatched `forModel`, unsupported adapter-declared
+model combinations and runners without a tuning capability fail during preparation.
+The shipped adapters refuse profile controls for permissions, tools, env, secrets,
+commands, arguments, authentication, extra usage and billing opt-ins. Keep profiles
+free of secrets: inspection displays valid tuning, and custom adapters are trusted
+preset code responsible for maintaining the same boundary.
+
+Wrapping a runner in an ordinary function drops the tuning capability. A harness
+or model label does not configure that wrapper. Use `withAgentTuning` to explicitly
+validate and rebuild a wrapper around a tuned inner runner, or leave it untunable.
+`configureAgentTuning(inner, tuning)` preserves the inner adapter's validation.
+
+#### Extending a provider without changing core
+
+The small public `AgentTuningAdapter` contract has one synchronous method:
+`configure(tuning: AgentTuning): { runner, model?, thinking? }`. Its input is a
+cloned, deeply frozen JSON object with optional `model` and `options`. The adapter
+must reject all unsupported keys/values and model combinations, construct a fresh
+runner without effects, preserve configured execution controls, and report its
+actual identity. It must not mutate the original runner, use global environment
+changes, grant tools, switch accounts, or authorize billing. The returned identity
+also supplies model-scoped limit memory. As with existing custom runners, Machines
+trusts this local code; it cannot prove a custom implementation obeys its contract.
+
+This complete deterministic example can be put in `.machines/agents.ts`. It uses a
+unique JSON option and a model restriction without any core provider registry or
+external call. A real adapter would construct its provider runner in `make`.
+
+```ts
+import type { AgentRunner, AgentTuningAdapter, JsonValue } from "@dna113p/machines";
+import { withAgentTuning } from "@dna113p/machines";
+
+function make(model = "plain", options: Readonly<Record<string, JsonValue>> = {}): AgentRunner {
+  const runner: AgentRunner = (_request, report) => {
+    report?.({ type: "identity", harness: "local-grid", model });
+    return { type: "completed", model, lattice: options.lattice ?? null };
+  };
+  const adapter: AgentTuningAdapter = {
+    configure(tuning) {
+      const selected = tuning.model ?? model;
+      if (!["plain", "grid"].includes(selected)) throw new Error("Unsupported grid model");
+      const values = tuning.options ?? {};
+      if (Object.keys(values).some(key => key !== "lattice")) {
+        throw new Error("Supported grid options: lattice");
+      }
+      if (values.lattice !== undefined) {
+        if (selected !== "grid") throw new Error("lattice requires the grid model");
+        if (!Array.isArray(values.lattice) || !values.lattice.every(n => typeof n === "number")) {
+          throw new Error("lattice must be an array of numbers");
+        }
+      }
+      return { runner: make(selected, values), model: selected };
+    },
+  };
+  return withAgentTuning(runner, adapter);
+}
+
+export default () => ({
+  grid: { description: "Deterministic grid adapter", harness: "local-grid", runner: make() },
+});
+```
+
+Pair it with this reusable profile:
+
+```json
+{
+  "grid-demo": {
+    "allowedProviders": ["local-grid"],
+    "overrides": [{ "preset": "grid", "model": "grid", "options": { "lattice": [2, 3] } }]
+  }
+}
+```
+
+After activating `grid-demo`, bind a Machine role to `grid`, for example
+`machine run my-workflow --agent worker=grid`. The role's allowed outcomes must
+include `completed`. Changing its model to `plain` while retaining `lattice` fails
+preparation before the runner can execute.
+
 ### Decision runners
 
 `decisionAgent(provider)` turns a classification into an Agent event without

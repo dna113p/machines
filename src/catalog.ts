@@ -1,3 +1,5 @@
+import { resolveAgentProfile, profilePermits, type ActiveAgentProfile } from "./agent-profiles.ts";
+import { withAgentTuning, configureAgentTuning } from "./agent-tuning.ts";
 import { fallbackPresets, loadAgentBindings, type AgentPreset } from "./agent-bindings.ts";
 import { acpAgent } from "./acp.ts";
 import { AgentLimitError } from "./agent-limit.ts";
@@ -28,6 +30,8 @@ export interface MachineSummary {
 }
 
 export interface AgentPresetSummary {
+  readonly profile?: ActiveAgentProfile;
+  readonly permitted?: boolean;
   /** Original configuration order, before sorting the display by name. */
   readonly configurationIndex?: number;
   readonly reserve?: number;
@@ -100,13 +104,15 @@ export async function inspectAgentPresets(
   const cwd = location.cwd ?? process.cwd();
   const home = location.home ?? machinesUserHome();
   const configured = await configuredAgentPresets(cwd, home);
+  const profile = await resolveAgentProfile(home, configured.presets, false);
 
-  return (await Promise.all(Object.entries(configured.presets)
+  return (await Promise.all(Object.entries(profile.presets)
     .map(async ([name, preset], configurationIndex) => {
       const quota = preset.quota === undefined ? undefined : await readAgentQuota(preset.quota);
       const fallback = fallbackPresets(name, preset, configured.fallback);
       return {
         name,
+        ...(profile.active === undefined ? {} : { profile: profile.active, permitted: profilePermits(profile.active.profile, preset) }),
         ...(preset.reserve === undefined ? {} : { reserve: preset.reserve }),
         ...(quota === undefined ? {} : {
           hasQuota: true,
@@ -129,7 +135,7 @@ export async function configuredAgentPresets(
   home: string,
 ): Promise<ResolvedAgentPresets> {
   const configured = await loadAgentBindings(cwd, home, {
-    acpAgent, AgentLimitError, agyAgent, chatGptWebAgent, claudeAgent, codexAgent, deepseekAgent, decisionAgent, jevAgent, jevProvider,
+    withAgentTuning, configureAgentTuning, acpAgent, AgentLimitError, agyAgent, chatGptWebAgent, claudeAgent, codexAgent, deepseekAgent, decisionAgent, jevAgent, jevProvider,
     openRouterDecisionAgent, openRouterDecisionProvider, layaAgent, layaProvider, vonAgent, vonProvider,
   });
   const defaultRunner = acpAgent("npx", ["-y", "pi-acp"], {

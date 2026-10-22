@@ -942,3 +942,5 @@ function actorError(
 function formatState(state: StateValue): string {
   return typeof state === "string" ? state : JSON.stringify(state);
 }
+
+export { withAgentTuning, configureAgentTuning, type AgentTuning, type AgentTuningAdapter, type TunedAgent } from "./agent-tuning.ts";

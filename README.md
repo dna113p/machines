@@ -147,6 +147,14 @@ arguments to see the order and expiry, or with `--clear` to remove it.
 Preset `quota` hooks can report provider headroom; `reserve` skips a preset before
 its allowance runs out. `--above 30` releases a provider preference at 30% or less.
 `machine agents` shows live readings and reserves.
+
+Named temporary profiles add strict provider filters and scoped model tuning:
+`machine profile use burn-codex --until 21:00`. Define the reusable profile first;
+the [burn-codex example](docs/running.md#temporary-model-and-provider-profiles)
+keeps configured chains Codex-only and requests Fast mode without changing live
+Codex settings. `machine profile show` inspects the activation and
+`machine profile clear` deactivates it.
+
 See [provider preferences](docs/running.md#agent-presets) for storage and
 `MACHINES_AGENT_PREFER` overrides.
 
