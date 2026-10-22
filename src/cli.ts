@@ -19,6 +19,8 @@ import {
   clearProviderOrder, effectiveProviderOrder, providerOrderExpired, providerOrderUntil,
   readProviderOrder, sortProviderCandidates, writeProviderOrder,
 } from "./provider-order.ts";
+import { activateAgentProfile, agentProfileExpired, applyAgentProfile, clearAgentProfile, readActiveAgentProfile, readAgentProfiles, profilePermits } from "./agent-profiles.ts";
+import { configuredAgentPresets } from "./catalog.ts";
 import { runEnding } from "./endings.ts";
 import {
   type AgentPresetSummary,
@@ -75,21 +77,28 @@ try {
     const presets = await listAgentPresets({ cwd: process.cwd() });
     if (presets.length === 0) console.log("No Agent presets found.");
     const limits = await readLimits(launcherLimitMemory());
-    let order = await effectiveProviderOrder();
-    const preference = process.env.MACHINES_AGENT_PREFER === undefined ? await readProviderOrder() : undefined;
+    const active = presets.find((preset) => preset.profile !== undefined)?.profile;
+    let order = process.env.MACHINES_AGENT_FALLBACK === "off" ? []
+      : process.env.MACHINES_AGENT_PREFER === undefined && active?.profile.order !== undefined
+        ? active.profile.order : await effectiveProviderOrder();
+    const preference = process.env.MACHINES_AGENT_PREFER === undefined && active?.profile.order === undefined ? await readProviderOrder() : undefined;
+    if (active !== undefined) console.log(plain(`Profile: ${JSON.stringify(active)}; in effect.`));
     if (preference?.above !== undefined) {
       const reading = preferredSummary(presets, preference.order)?.quota;
       if (reading !== undefined && reading.remaining <= preference.above) order = [];
     }
+    if (process.env.MACHINES_AGENT_FALLBACK === "off") order = [];
     if (order.length > 0) console.log(`Provider order: ${order.join(", ")}`);
     const byName = new Map(presets.map((preset) => [preset.name, preset]));
     presets.forEach((preset, index) => {
       const names = process.env.MACHINES_AGENT_FALLBACK === "off" ? [] : preset.fallback ?? [];
-      const chain = sortProviderCandidates([preset, ...names.map((name) => byName.get(name) ?? { name, harness: undefined })], order);
-      printAgentListing(order.length === 0 ? preset : {
+      const chain = sortProviderCandidates([preset, ...names.map((name) => byName.get(name) ?? { name, harness: undefined })].filter((candidate) => profilePermits(active?.profile, candidate)), order);
+      printAgentListing(order.length === 0 && active === undefined ? preset : {
         ...preset, fallback: chain.map((candidate) => candidate.name),
       }, index > 0, order.length > 0 && preset.harness === order[0], limits.find((entry) => limitCovers(entry, preset)));
     });
+  } else if (command === "profile") {
+    await profileCommand(runsOptions);
   } else if (command === "prefer") {
     await prefer(runsOptions);
   } else if (command === "limits") {
@@ -140,6 +149,7 @@ try {
       "Usage:",
       "  machine list",
       "  machine agents",
+      "  machine profile list | show [<name>] | use <name> --until <ISO-time|HH:MM> | clear",
       "  machine prefer [<harness>...] [--until <ISO-time|HH:MM>] [--above <percent>] | --clear",
       "  machine limits [--forget <preset> | --forget-all]",
       "  machine show <name-or-file>",
@@ -171,6 +181,57 @@ try {
     console.error(cause instanceof Error ? cause.message : String(cause));
     process.exitCode = 1;
   }
+}
+
+async function profileCommand(args: readonly string[]): Promise<void> {
+  const [action, profileName, flag, deadline] = args;
+  if (action === "clear" && args.length === 1) {
+    await clearAgentProfile();
+    console.log("Profile deactivated. Reusable definitions and provider preference are unchanged.");
+    return;
+  }
+  if (action === "list" && args.length === 1) {
+    const profiles = await readAgentProfiles();
+    for (const key of Object.keys(profiles)) console.log(plain(key));
+    if (Object.keys(profiles).length === 0) console.log("No named profiles. Define .machines/profiles.json.");
+    return;
+  }
+  if (action === "show" && args.length <= 2) {
+    if (profileName !== undefined) {
+      const profiles = await readAgentProfiles();
+      if (!Object.hasOwn(profiles, profileName)) throw new Error("Named profile not found; run machine profile list");
+      const configured = await configuredAgentPresets(process.cwd(), machinesUserHome());
+      applyAgentProfile(profiles[profileName]!, configured.presets);
+      console.log(plain(JSON.stringify({ name: profileName, profile: profiles[profileName] }, null, 2)));
+    } else {
+      const active = await readActiveAgentProfile();
+      if (active === undefined) console.log("No active profile.");
+      else {
+        const expired = agentProfileExpired(active);
+        const configured = await configuredAgentPresets(process.cwd(), machinesUserHome());
+        if (!expired) applyAgentProfile(active.profile, configured.presets);
+        const order = process.env.MACHINES_AGENT_FALLBACK === "off" ? []
+          : !expired && process.env.MACHINES_AGENT_PREFER === undefined && active.profile.order !== undefined
+            ? active.profile.order : await effectiveProviderOrder(machinesUserHome(), configured.presets);
+        console.log(plain(JSON.stringify({ ...active, status: expired ? "expired" : "in effect", effectiveOrder: order,
+          orderSource: process.env.MACHINES_AGENT_FALLBACK === "off" ? "fallback disabled"
+            : process.env.MACHINES_AGENT_PREFER !== undefined ? "MACHINES_AGENT_PREFER"
+              : !expired && active.profile.order !== undefined ? "profile" : "machine prefer",
+        }, null, 2)));
+      }
+    }
+    return;
+  }
+  if (action === "use" && profileName !== undefined && flag === "--until" && deadline !== undefined && args.length === 4) {
+    const profiles = await readAgentProfiles();
+    if (!Object.hasOwn(profiles, profileName)) throw new Error("Named profile not found; run machine profile list");
+    const configured = await configuredAgentPresets(process.cwd(), machinesUserHome());
+    applyAgentProfile(profiles[profileName]!, configured.presets);
+    await activateAgentProfile(profileName, profiles[profileName]!, deadline);
+    await profileCommand(["show"]);
+    return;
+  }
+  throw new Error("Usage: machine profile list | show [<name>] | use <name> --until <ISO-time|HH:MM> | clear");
 }
 
 async function prefer(args: readonly string[]): Promise<void> {
@@ -210,6 +271,8 @@ async function prefer(args: readonly string[]): Promise<void> {
     await writeProviderOrder({ order, ...(until === undefined ? {} : { until }), ...(above === undefined ? {} : { above }) });
   }
   const preference = await readProviderOrder();
+  const active = await readActiveAgentProfile();
+  if (active !== undefined && !agentProfileExpired(active)) console.log(plain(`Active profile: ${active.name}; its filter and tuning remain in effect; ${active.profile.order === undefined ? "ordering uses machine prefer or MACHINES_AGENT_PREFER" : "profile order takes precedence unless MACHINES_AGENT_PREFER is set"}.`));
   const override = process.env.MACHINES_AGENT_PREFER;
   if (preference !== undefined) {
     let condition = "";
@@ -223,7 +286,8 @@ async function prefer(args: readonly string[]): Promise<void> {
         : `${selected.name}: ${quotaText(selected)}`);
     }
     const status = providerOrderExpired(preference) ? "expired" : override !== undefined
-      ? "overridden by MACHINES_AGENT_PREFER" : released ? "released by quota condition" : "in effect";
+      ? "overridden by MACHINES_AGENT_PREFER" : active !== undefined && !agentProfileExpired(active) && active.profile.order !== undefined
+        ? "overridden by active profile" : released ? "released by quota condition" : "in effect";
     console.log(plain(`Provider order: ${preference.order.join(", ")}; until ${preference.until ?? "cleared"}${condition}; ${status}.`));
   }
   if (override !== undefined) {
@@ -714,7 +778,7 @@ function printAgentListing(preset: AgentPresetSummary, separate: boolean, prefer
   if (!process.stdout.isTTY) {
     console.log([
       preset.name,
-      preset.description + (preferred ? " (preferred)" : ""),
+      preset.description + (preferred ? " (preferred)" : "") + (preset.permitted === false ? " (excluded by profile)" : ""),
       preset.harness ?? "",
       preset.model ?? "",
       preset.thinking ?? "",
@@ -728,7 +792,7 @@ function printAgentListing(preset: AgentPresetSummary, separate: boolean, prefer
 
   if (separate) console.log();
   console.log(bold(cyan(preset.name)) + (preferred ? " (preferred)" : ""));
-  console.log(`  ${preset.description}`);
+  console.log(`  ${preset.description}${preset.permitted === false ? " (excluded by profile)" : ""}`);
   if (identity.length > 0) console.log(`  ${magenta(identity.join(" · "))}`);
   if (preset.fallback !== undefined) console.log(`  fallback: ${preset.fallback.join(", ") || "none"}`);
   if (remembered !== undefined) console.log(`  ${yellow(remembered)}`);

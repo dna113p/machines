@@ -7,6 +7,7 @@ import * as v from "valibot";
 
 import { AgentLimitError } from "./agent-limit.ts";
 import { agentPrompt, readAgentEvent } from "./agent-protocol.ts";
+import { withAgentTuning, tuningChoices } from "./agent-tuning.ts";
 import type { AgentRunner } from "./index.ts";
 
 export interface CodexAgentOptions {
@@ -31,12 +32,16 @@ export function codexAgent(
   args: readonly string[] = [],
   options: CodexAgentOptions = {},
 ): AgentRunner {
-  return async (request, report) => {
+  return createCodexAgent(command, [...args], { ...options, ...(options.env === undefined ? {} : { env: { ...options.env } }) });
+}
+
+function createCodexAgent(command: string, args: readonly string[], options: CodexAgentOptions, environment?: NodeJS.ProcessEnv): AgentRunner {
+  const runner: AgentRunner = async (request, report) => {
     if (request.cwd === undefined) throw new Error("Codex Agent requires a working directory");
     if (request.outcomes.length === 0) throw new Error("Codex Agent requires at least one allowed outcome");
 
     const harness = options.harness ?? command;
-    const env = { ...process.env, ...options.env };
+    const env = environment ?? { ...process.env, ...options.env };
     const model = options.model ?? env.CODEX_MODEL ?? env.MACHINES_AGENT_MODEL;
     const effort = options.effort ?? env.CODEX_EFFORT ?? env.MACHINES_AGENT_EFFORT;
     const serviceTier = options.serviceTier ?? env.CODEX_SERVICE_TIER;
@@ -154,6 +159,25 @@ export function codexAgent(
       await rm(temporary, { recursive: true, force: true });
     }
   };
+  return withAgentTuning(runner, { configure(tuning) {
+    const values = tuningChoices(tuning.options, {
+      effort: ["none", "minimal", "low", "medium", "high", "xhigh"],
+      serviceTier: ["fast", "ultrafast"],
+    }, "Codex");
+    const env = environment ?? { ...process.env, ...options.env };
+    const model = tuning.model ?? options.model ?? env.CODEX_MODEL ?? env.MACHINES_AGENT_MODEL;
+    const effort = values.effort ?? options.effort ?? env.CODEX_EFFORT ?? env.MACHINES_AGENT_EFFORT;
+    const serviceTier = values.serviceTier ?? options.serviceTier ?? env.CODEX_SERVICE_TIER;
+    return {
+      runner: createCodexAgent(command, [...args], { ...options,
+        ...(model === undefined ? {} : { model }),
+        ...(effort === undefined ? {} : { effort }),
+        ...(serviceTier === undefined ? {} : { serviceTier }),
+      }, { ...env }),
+      ...(model === undefined ? {} : { model }),
+      ...(effort === undefined ? {} : { thinking: effort }),
+    };
+  } });
 }
 
 // Codex 0.162.1 writes the first of these with a typographic apostrophe (U+2019).

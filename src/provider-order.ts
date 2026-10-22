@@ -1,9 +1,9 @@
-import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { readFile, rm } from "node:fs/promises";
+import { join } from "node:path";
 
 import { readAgentQuota, type AgentQuota } from "./agent-limit.ts";
 import type { AgentPreset } from "./agent-bindings.ts";
+import { writeStateJson } from "./state-json.ts";
 import { machinesStateDirectory, machinesUserHome } from "./discovery.ts";
 
 export interface ProviderOrder {
@@ -58,14 +58,7 @@ export async function readProviderOrder(home = machinesUserHome()): Promise<Prov
 export async function writeProviderOrder(preference: ProviderOrder, home = machinesUserHome()): Promise<void> {
   const value = validate(preference);
   const path = providerOrderPath(home);
-  await mkdir(dirname(path), { recursive: true });
-  const temporary = `${path}.${randomUUID()}.tmp`;
-  try {
-    await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { flag: "wx", mode: 0o600 });
-    await rename(temporary, path);
-  } finally {
-    await rm(temporary, { force: true });
-  }
+  await writeStateJson(path, value);
 }
 
 export async function clearProviderOrder(home = machinesUserHome()): Promise<void> {

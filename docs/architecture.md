@@ -57,6 +57,9 @@ MCP server ────┘       ↑
 | `src/agent-limit.ts` | Typed provider usage-limit error and its recognition across module copies |
 | `src/agent-limits.ts` | Limit-aware runner: fallback order, handoff note, reset waiting, per-run memory of limited presets, report-only requests |
 | `src/discovery.ts` | Project/global definition locations and precedence |
+| `src/agent-profiles.ts` | Named JSON profiles, atomic activation snapshots, strict provider filtering and scoped tuning |
+| `src/agent-tuning.ts` | Public runner capability contract; adapters validate and construct tuned runners |
+| `src/provider-order.ts`, `src/state-json.ts` | Legacy preference precedence and shared atomic user-state replacement |
 | `src/launcher.ts` | Definition metadata, Agent bindings, preflight, single-use launch preparation |
 | `src/discovery-worker.ts` | Fresh metadata imports in disposable workers |
 | `src/host.ts` | One child run, IPC, Human request identity, owned process termination, run-status publication for the run |
@@ -88,7 +91,13 @@ the bound preset's allowed fallbacks or waits for the reset; the runtime still
 receives one runner per role. An Agent state that names an `onLimit` event keeps
 that policy in the Machine: the runtime asks the runner to report the limit and
 delivers it as the event, and the wrapper neither swaps nor waits for that
-request. The resulting prepared run can be started once. Long-lived hosted
+request. Preparation also snapshots an unexpired named profile. Its strict provider filter
+intersects each role's configured chain before any runner can execute, including
+report-only requests. Model tuning uses an explicit capability on the runner;
+adapters own validation and construct fresh runners. The launcher has no provider
+option switch. Expiry or deactivation affects newly prepared runs, not an existing
+prepared run or its child Machines. Checkpoint continuation prepares a new run and
+therefore resolves current settings. The resulting prepared run can be started once. Long-lived hosted
 runs get a fresh child process; direct runtime users own their own definitions.
 
 ## Session and process lifecycle

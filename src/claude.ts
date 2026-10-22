@@ -4,6 +4,7 @@ import * as v from "valibot";
 
 import { AgentLimitError, type AgentLimit } from "./agent-limit.ts";
 import { agentPrompt, readAgentEvent } from "./agent-protocol.ts";
+import { withAgentTuning, tuningChoices } from "./agent-tuning.ts";
 import type { AgentRunner } from "./index.ts";
 
 export interface ClaudeAgentOptions {
@@ -45,12 +46,21 @@ export function claudeAgent(
   args: readonly string[] = [],
   options: ClaudeAgentOptions = {},
 ): AgentRunner {
-  return async (request, report) => {
+  return createClaudeAgent(command, [...args], { ...options,
+    ...(options.env === undefined ? {} : { env: { ...options.env } }),
+    ...(options.tools === undefined ? {} : { tools: [...options.tools] }),
+    ...(options.allowedTools === undefined ? {} : { allowedTools: [...options.allowedTools] }),
+    ...(options.disallowedTools === undefined ? {} : { disallowedTools: [...options.disallowedTools] }),
+  });
+}
+
+function createClaudeAgent(command: string, args: readonly string[], options: ClaudeAgentOptions, environment?: NodeJS.ProcessEnv): AgentRunner {
+  const runner: AgentRunner = async (request, report) => {
     if (request.cwd === undefined) throw new Error("Claude Agent requires a working directory");
     if (request.outcomes.length === 0) throw new Error("Claude Agent requires at least one allowed outcome");
 
     const harness = options.harness ?? command;
-    const env = { ...process.env, ...options.env };
+    const env = environment ?? { ...process.env, ...options.env };
     // Claude Code exports its own CLAUDE_* variables (including CLAUDE_EFFORT) to
     // child processes, so runner settings use names it does not own.
     const model = options.model ?? env.MACHINES_CLAUDE_MODEL ?? env.MACHINES_AGENT_MODEL;
@@ -211,6 +221,20 @@ export function claudeAgent(
         : new Error(text, { cause });
     }
   };
+  return withAgentTuning(runner, { configure(tuning) {
+    const values = tuningChoices(tuning.options, { effort: ["low", "medium", "high", "max"] }, "Claude");
+    const env = environment ?? { ...process.env, ...options.env };
+    const model = tuning.model ?? options.model ?? env.MACHINES_CLAUDE_MODEL ?? env.MACHINES_AGENT_MODEL;
+    const effort = values.effort ?? options.effort ?? env.MACHINES_CLAUDE_EFFORT ?? env.MACHINES_AGENT_EFFORT;
+    return {
+      runner: createClaudeAgent(command, [...args], { ...options,
+        ...(model === undefined ? {} : { model }),
+        ...(effort === undefined ? {} : { effort }),
+      }, { ...env }),
+      ...(model === undefined ? {} : { model }),
+      ...(effort === undefined ? {} : { thinking: effort }),
+    };
+  } });
 }
 
 interface ApiError {
