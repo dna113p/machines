@@ -131,7 +131,7 @@ Then, from the checkout:
 ```bash
 ./machine list
 ./machine agents
-./machine prefer claude codex --until 21:00
+./machine prefer claude codex --until 21:00 --above 30
 ./machine show hello
 ./machine run hello "Hello from Machines."
 ```
@@ -144,6 +144,9 @@ primitives.
 `machine prefer` sets a provider order for the next prepared runs. It sorts each
 preset's allowed chain by `harness`; it does not add fallbacks. Run it without
 arguments to see the order and expiry, or with `--clear` to remove it.
+Preset `quota` hooks can report provider headroom; `reserve` skips a preset before
+its allowance runs out. `--above 30` releases a provider preference at 30% or less.
+`machine agents` shows live readings and reserves.
 See [provider preferences](docs/running.md#agent-presets) for storage and
 `MACHINES_AGENT_PREFER` overrides.
 

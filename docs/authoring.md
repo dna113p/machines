@@ -649,6 +649,37 @@ actual identity during execution. Optional `fallback` names the presets that tak
 over at a [usage limit](#usage-limits). Harness configuration belongs in the runner
 command, arguments, or `env` option; labels do not change model settings.
 
+Optional `quota: () => Promise<AgentQuota | undefined>` reads the provider's current
+headroom; `AgentQuota` is exported from `@dna113p/machines` and contains
+`remaining` (percent left in the tightest window), optional `resetsAt` (that
+window's reset in epoch milliseconds), and optional `kind` (its name).
+`reserve` is a finite percentage from 0 to 100 and requires a `quota` function.
+For example, adapt this hook to a command of your choosing that prints this JSON:
+
+```ts
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import type { AgentQuota } from "@dna113p/machines";
+const exec = promisify(execFile);
+
+export default ({ codexAgent }: { codexAgent: typeof import("@dna113p/machines/codex").codexAgent }) => ({
+  implementer: {
+    description: "Implements changes while keeping a provider reserve",
+    harness: "codex",
+    runner: codexAgent("codex", [], { output: "capture" }),
+    reserve: 10,
+    quota: async (): Promise<AgentQuota> => {
+      const { stdout } = await exec("my-quota-command", ["--json"]);
+      return JSON.parse(stdout); // e.g. { remaining: 8, kind: "seven_day", resetsAt: 1792600000000 }
+    },
+  },
+});
+```
+
+Machines supplies no quota readers or credentials, and built-in presets have no
+hooks. `machine agents` (and other preset catalog callers) reads configured hooks
+concurrently, each with a 10-second cap, and shows the reserve, reading or failure.
+
 Use `machine agents` to inspect configured names. `machine prefer claude codex`
 puts presets labelled `harness: "claude"` first in every allowed chain from the
 next prepared run, followed by Codex. It does not change a preset's model settings.
@@ -670,6 +701,17 @@ reports missing bindings or invalid definitions.
 real harness is installed, authenticated, or able to run the requested model.
 
 ### Usage limits
+
+Before trying a preset not covered by remembered limits, the launcher reads its
+`quota`. At or below `reserve` (default 0), it remembers a provider-scoped limit
+with the reading's window and reset, then swaps or waits just as at a failed turn.
+No interrupted-turn note is added when no turn ran. Updates name the reading and
+reserve; `machine limits` marks these entries as found by a quota reading.
+A request handled by `onLimit` reads only its bound preset and delivers the limit
+as the declared event. Hooks run at most once per candidate per attempt round.
+A missing, failed, invalid or timed-out reading warns once per preset per run and
+allows its runner to proceed. Reads have a 10-second cap. With
+`MACHINES_AGENT_FALLBACK=off`, preparation and turns call no quota hooks.
 
 A provider usage limit does not have to fail a run. There are three levels, and
 each one is optional:

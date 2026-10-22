@@ -128,7 +128,11 @@ export async function prepareMachineRun(
   preflightAgentRoles(path, usedAgentRoles, agentRoles, optional, agents, optionalAgentNames(definition));
   for (const child of childModules) preflightAgentRoles(child.path, ["default"], child.agentRoles, child.optionalAgentRoles, agents);
   const restored = await restoreChildren(definition, children, options.continueRun, agents, status);
-  const limitAware = limitAwareAgents(new Set([...allRoles].filter((role) => requiredRoles.has(role) || Object.hasOwn(agents, role))), overrides, configured, limitPolicy(options.agentLimits), await effectiveProviderOrder(home));
+  const providerOrder = fallbackEnabled() ? await effectiveProviderOrder(home, configured.presets) : [];
+  const limitAware = limitAwareAgents(
+    new Set([...allRoles].filter((role) => requiredRoles.has(role) || Object.hasOwn(agents, role))),
+    overrides, configured, limitPolicy(options.agentLimits), providerOrder,
+  );
 
   let started = false;
   const graph = machineGraph(definition, endings);
@@ -495,6 +499,7 @@ function limitAwareAgents(
   const swapping = fallbackEnabled();
   const memory = launcherLimitMemory();
   const wrapped: Record<string, AgentRunner> = {};
+  const quotaWarnings = new Set<string>();
   for (const role of roles) {
     const bound = Object.hasOwn(overrides, role) ? overrides[role] ?? role : role;
     // With swapping off a role still waits for its own preset's reset, and names no other preset.
@@ -511,11 +516,12 @@ function limitAwareAgents(
       }
       return {
         name, runner: preset.runner,
+        ...(swapping && preset.quota !== undefined ? { quota: preset.quota, reserve: preset.reserve } : {}),
         ...(preset.harness === undefined ? {} : { harness: preset.harness }),
         ...(preset.model === undefined ? {} : { model: preset.model }),
       };
     });
-    wrapped[role] = limitAwareRunner(role, sortProviderCandidates(candidates, providerOrder), memory, policy, candidates[0]);
+    wrapped[role] = limitAwareRunner(role, sortProviderCandidates(candidates, providerOrder), memory, policy, candidates[0], quotaWarnings);
   }
   return wrapped;
 }

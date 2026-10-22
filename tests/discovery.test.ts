@@ -134,3 +134,49 @@ test("machine list prints each ending with its kind under its Machine, and a Mac
   assert.match(lines[row("plain")]!, /^plain\tPlain workflow\t.*\.machines\/plain\.ts\tready$/u);
   assert.ok(row("plain") === lines.length - 1 || /^\S/u.test(lines[row("plain") + 1]!), lines.join("\n"));
 });
+
+test('quota discovery runs hooks concurrently, preserves configuration order and refreshes readings', async (context) => {
+  const location = await project(context);
+  const path = join(location.cwd, '.machines', 'agents.ts');
+  const source = (remaining: number) => `
+    let release;
+    const both = new Promise(resolve => { release = resolve; });
+    export default () => ({
+      zFirst: { description: 'first', harness: 'claude', reserve: 10,
+        runner: () => ({type:'done'}), quota: async () => { await both; return {remaining: ${remaining}, kind: 'seven_day'}; } },
+      claude: { description: 'second overrides builtin', harness: 'claude', reserve: 0,
+        runner: () => ({type:'done'}), quota: async () => { release(); return {remaining: 90}; } },
+    });`;
+  await writeFile(path, source(8));
+  const entries = await listAgentPresets(location);
+  const first = entries.find((entry) => entry.name === 'zFirst')!;
+  assert.equal(first.hasQuota, true);
+  assert.equal(first.reserve, 10);
+  assert.deepEqual(first.quota, { remaining: 8, kind: 'seven_day' });
+  assert.ok(first.configurationIndex! < entries.find((entry) => entry.name === 'claude')!.configurationIndex!);
+  await writeFile(path, source(35));
+  assert.equal((await listAgentPresets(location)).find((entry) => entry.name === 'zFirst')?.quota?.remaining, 35);
+});
+
+test('quota discovery caps each hanging hook without losing successful or failed readings', async (context) => {
+  const location = await project(context);
+  await writeFile(join(location.cwd, '.machines', 'agents.ts'), `
+    const preset = { description: 'quota test', runner: () => ({type:'done'}) };
+    export default () => ({
+      slow: { ...preset, quota: () => new Promise(() => {}) },
+      alsoSlow: { ...preset, quota: () => new Promise(() => {}) },
+      fast: { ...preset, quota: async () => ({remaining: 42}) },
+      broken: { ...preset, quota: async () => { throw new Error('offline'); } },
+      empty: { ...preset, quota: async () => undefined },
+    });
+  `);
+  const started = Date.now();
+  const entries = await listAgentPresets(location);
+  assert.ok(Date.now() - started < 20_000, 'each hook has its own concurrent deadline');
+  for (const name of ['slow', 'alsoSlow']) {
+    assert.match(entries.find((entry) => entry.name === name)?.quotaError ?? '', /10 seconds/u);
+  }
+  assert.equal(entries.find((entry) => entry.name === 'fast')?.quota?.remaining, 42);
+  assert.match(entries.find((entry) => entry.name === 'broken')?.quotaError ?? '', /offline/u);
+  assert.match(entries.find((entry) => entry.name === 'empty')?.quotaError ?? '', /no reading/u);
+});

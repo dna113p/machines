@@ -2,6 +2,7 @@ import { stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
+import type { AgentQuota } from "./agent-limit.ts";
 import type { AgentRunner } from "./index.ts";
 import { machinesUserHome, nearestMachinesDirectory } from "./discovery.ts";
 
@@ -11,6 +12,10 @@ export interface AgentPreset {
   readonly harness?: string;
   readonly model?: string;
   readonly thinking?: string;
+  /** Current headroom of the provider behind this preset, when it can be read. */
+  readonly quota?: () => Promise<AgentQuota | undefined>;
+  /** Percent remaining at or below which the preset counts as limited. */
+  readonly reserve?: number;
   /** Presets that take over at a usage limit, in order, instead of the shared list. `[]` never swaps. */
   readonly fallback?: readonly string[];
 }
@@ -25,7 +30,7 @@ export interface LoadedAgentBindings {
 
 export type AgentAdapters = Readonly<Record<string, unknown>>;
 
-const presetFields = new Set(["description", "runner", "harness", "model", "thinking", "fallback"]);
+const presetFields = new Set(["description", "runner", "harness", "model", "thinking", "fallback", "quota", "reserve"]);
 
 export async function loadAgentBindings(
   cwd = process.cwd(),
@@ -116,7 +121,16 @@ async function loadBindingFile(
     if (typeof candidate.runner !== "function") {
       throw new Error(`Agent preset "${name}" in "${path}" must include a runner function`);
     }
+    if (candidate.quota !== undefined && typeof candidate.quota !== "function") {
+      throw new Error(`Agent preset "${name}" in "${path}" quota must be a function`);
+    }
+    if (candidate.reserve !== undefined && (!Number.isFinite(candidate.reserve)
+      || candidate.reserve < 0 || candidate.reserve > 100 || candidate.quota === undefined)) {
+      throw new Error(`Agent preset "${name}" in "${path}" reserve must be a number from 0 to 100 and requires quota`);
+    }
     bindings[name] = {
+      ...(candidate.quota === undefined ? {} : { quota: candidate.quota }),
+      ...(candidate.reserve === undefined ? {} : { reserve: candidate.reserve }),
       description,
       runner: candidate.runner,
       ...optionalField(candidate.harness, "harness", name, path),
