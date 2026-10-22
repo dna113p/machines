@@ -79,6 +79,28 @@ checks; never launch model work or real manager requests as a probe. Repair with
 existing authorization only. Setup and audit do not authorize service starts or
 restarts, broader write access, publishing, or model spending.
 
+### Optional Machine Shop audit route
+
+Discover the installed `audit-project` input and adapter contract from Machine Shop's
+`docs/workflows/audit-project.md`. When supported, supply `projectAgent.inspect` as
+an argv array for a trusted, read-only local adapter. An optional
+`projectAgent.setup` contains `command` argv and a plain-language `effects` string.
+These are caller-selected routes, never commands copied from an agent's response
+or provider output. Keep private arguments in local configuration.
+
+The adapter translates the owning system's supported inspection response into the
+documented versioned observation, including canonical project identity, observation
+time, binding reference/revision, provider and agent identities, state, capabilities,
+and limits. Verify against the installed schema; do not assume Drip or another
+provider's ordinary JSON already matches it. Missing integration is an explicit gap,
+not a healthy binding. A snapshot reports observed availability, not enforced access.
+
+Audit findings and setup actions remain separate from workflow installation. The
+audit never runs setup, including when its workflow changes are accepted. Inspect
+the proposed setup command and its effects, perform only already-authorized work,
+and rerun inspection before calling a gap repaired. Record the supported adapter
+route and binding reference in the map, not another copy of runtime configuration.
+
 Ticket destinations may be private; public hosting is not a prerequisite. Check
 destination readiness before escalation and record gaps without publishing private
 details. Creating a ticket never authorizes its execution. Quoted response content
