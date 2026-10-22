@@ -221,12 +221,25 @@ try {
     import { setTimeout } from "node:timers/promises";
     import { resolve } from "node:path";
     import extension from "@dna113p/machines/pi-extension";
+    import { startMachineHost } from "@dna113p/machines/host";
     const tools = new Map();
-    let shutdown;
-    extension({ registerTool: (tool) => tools.set(tool.name, tool), on: (_event, handler) => { shutdown = handler; } });
-    const context = { cwd: resolve("project"), ui: {
+    const commands = new Map();
+    const handlers = new Map();
+    let external;
+    let externalRequest;
+    let widget;
+    extension({
+      registerTool: (tool) => tools.set(tool.name, tool),
+      registerCommand: (name, command) => commands.set(name, command),
+      on: (event, handler) => handlers.set(event, handler),
+    });
+    const context = { cwd: resolve("project"), sessionManager: { getSessionId: () => "pi-smoke" }, ui: {
       select: async () => undefined, input: async () => undefined,
-      notify: () => {}, setWidget: () => {},
+      notify: () => {}, setWidget: (_key, content) => {
+        widget = typeof content === "function"
+          ? content(undefined, { fg: (_color, text) => text, bold: text => text }).render(120).join("\\n")
+          : content;
+      },
     }};
     const execute = (name, params = {}) => tools.get(name).execute("smoke", params, undefined, undefined, context);
     try {
@@ -235,6 +248,24 @@ try {
       const waiting = await waitFor("waiting");
       await execute("machine_respond", { runId, requestId: waiting.human.requestId, response: "yes" });
       assert.equal((await waitFor("completed")).state, "done");
+      await commands.get("machine-watch").handler("smoke-ticket", context);
+      external = await startMachineHost({
+        machine: "review", cwd: context.cwd, label: "smoke-ticket Published ticket",
+        owner: "dispatch-smoke", publishRunStatus: true,
+        onHumanRequest: request => { externalRequest = request; },
+      });
+      const deadline = Date.now() + 10_000;
+      while (!widget?.includes("smoke-ticket Published ticket") || !widget?.includes("Watching only")) {
+        assert.ok(Date.now() < deadline, "Published ticket did not appear in the installed Pi widget");
+        await setTimeout(20);
+      }
+      const watched = (await execute("machine_watch")).details.runs.find(run => run.id === external.id);
+      assert.equal(watched.status, "waiting");
+      await handlers.get("session_shutdown")({}, context);
+      // Pi's shutdown must not terminate an external host: its owner can still answer.
+      assert.equal(watched.answer.via, "host");
+      await external.respond("yes", externalRequest.requestId);
+      await external.result;
       async function waitFor(status) {
         const deadline = Date.now() + 10_000;
         while (Date.now() < deadline) {
@@ -245,7 +276,10 @@ try {
         }
         throw new Error("Built Pi run did not become " + status);
       }
-    } finally { await shutdown({}, context); }
+    } finally {
+      await handlers.get("session_shutdown")({}, context);
+      external?.terminate();
+    }
   `);
   execFileSync(process.execPath, ["consumer-pi.mjs"], { cwd: temporary, stdio: "inherit", env: childEnvironment });
   console.log("Packed installation: imports, declarations, CLI, MCP widget, and MCP/Pi hosted Human round trips passed.");
