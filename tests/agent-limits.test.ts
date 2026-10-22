@@ -16,7 +16,7 @@ const start = Date.UTC(2026, 9, 10, 20);
 const minute = 60_000;
 const hour = 60 * minute;
 const request: AgentRequest = { prompt: "Implement the task", outcomes: ["completed", "blocked"], cwd: "/work" };
-const handoff = /^Implement the task\n\nNote: a previous Agent working on this assignment was interrupted by a usage limit/u;
+const handoff = /^Implement the task\n\nNote: a previous Agent \([^)]+\) working on this assignment was interrupted by a usage limit/u;
 
 function clock() {
   let time = start;
@@ -56,6 +56,248 @@ function observed() {
 }
 
 const limits = (updates: readonly AgentUpdate[]) => updates.filter((update) => update.type === "limit");
+
+const continuation = "Inspect the current state and continue the same assignment rather than starting over.";
+const legacyHandoff = "Note: a previous Agent working on this assignment was interrupted by a usage limit and may have "
+  + "left partial work in the workspace. " + continuation;
+
+/** Accept common quotation styles without prescribing the handoff's prose or layout. */
+function quotedReport(prompt: string, startsWith: string): string {
+  const quotations = [
+    ...prompt.matchAll(/^> ?.*(?:\n> ?.*)*/gmu),
+    ...prompt.matchAll(/```[^\n]*\n([\s\S]*?)\n```/gu),
+    ...prompt.matchAll(/"([\s\S]*?)"/gu),
+    ...prompt.matchAll(/“([\s\S]*?)”/gu),
+  ].map((match) => match[1] ?? match[0].replace(/^> ?/gmu, ""));
+  const quoted = quotations.find((text) => text.startsWith(startsWith));
+  assert.ok(quoted !== undefined, "the last report must appear as a quotation");
+  return quoted;
+}
+
+for (const withReporter of [true, false]) {
+  test(`a fallback receives the interrupted trace ${withReporter ? "with" : "without"} an outer reporter`, async () => {
+    const time = clock();
+    const titles = ["Read assignment", "Inspect diff", "Edit implementation", "Run focused tests"];
+    const trace: AgentUpdate[] = [
+      { type: "identity", harness: "observed-harness", model: "observed-model" },
+      ...titles.map((title, index): AgentUpdate => ({ type: "tool", id: `call-${index}`, title })),
+      { type: "output", text: "The implementation is ready for review." },
+    ];
+    const interrupted: AgentRunner = async (_received, report) => {
+      for (const update of trace) report?.(update);
+      throw new AgentLimitError("quota exhausted", { harness: "provider-harness", kind: "five_hour" });
+    };
+    const spare = scripted("replacement");
+    const { updates, report } = observed();
+    const runner = limitAwareRunner("worker", [
+      { name: "primary-preset", harness: "configured-harness", runner: interrupted },
+      { name: "fallback-preset", runner: spare.runner },
+    ], createLimitMemory(), policy(time));
+
+    assert.deepEqual(await runner(request, withReporter ? report : undefined), { type: "completed" });
+    const prompt = spare.requests[0]!.prompt;
+    assert.ok(prompt.startsWith(`${request.prompt}\n\n`));
+    assert.ok(prompt.endsWith(continuation));
+    const note = prompt.slice(request.prompt.length, prompt.lastIndexOf(continuation));
+    for (const detail of ["observed-harness", "observed-model", "five_hour", "4 tool calls", ...titles]) {
+      assert.ok(note.includes(detail), `handoff must contain ${detail} before the continuation instruction`);
+    }
+    assert.equal(quotedReport(note, "The implementation"), "The implementation is ready for review.");
+    assert.deepEqual({ ...spare.requests[0], prompt: request.prompt }, request);
+    if (withReporter) {
+      assert.deepEqual(updates.filter((update) => update.type !== "limit"), [
+        ...trace, { type: "identity", harness: "replacement" },
+      ], "the wrapper forwards the original updates unchanged");
+      assert.deepEqual(limits(updates).map(({ status, agent, to, until }) => ({ status, agent, to, until })), [
+        { status: "swapped", agent: "primary-preset", to: "fallback-preset", until: undefined },
+      ]);
+      assert.match(limits(updates)[0]!.text, /handing over 4 tool calls$/u);
+    }
+    assert.deepEqual(time.sleeps, []);
+  });
+}
+
+test("an interruption before any update retains the exact original handoff sentence", async () => {
+  const interrupted: AgentRunner = async () => {
+    throw new AgentLimitError("quota exhausted", { harness: "claude", kind: "five_hour" });
+  };
+  const spare = scripted("codex");
+  const { updates, report } = observed();
+  await limitAwareRunner("worker", [
+    { name: "primary", runner: interrupted }, { name: "fallback", runner: spare.runner },
+  ], createLimitMemory(), policy(clock()))(request, report);
+
+  assert.equal(spare.requests[0]!.prompt, `${request.prompt}\n\n${legacyHandoff}`);
+  assert.doesNotMatch(limits(updates)[0]!.text, /handing over/u);
+});
+
+for (const multiline of [true, false]) {
+  test(`a 10000-character report is bounded with a marker ${multiline ? "at a line break" : "without a line break"}`, async () => {
+    // The next line cannot fit in the budget. A boundary cut must retain only the first line.
+    const firstLine = "First complete report line: " + "a".repeat(1700);
+    const output = multiline
+      ? firstLine + "\n" + "z".repeat(10_000 - firstLine.length - 1)
+      : "r".repeat(10_000);
+    assert.equal(output.length, 10_000);
+    const interrupted: AgentRunner = async (_received, report) => {
+      report?.({ type: "output", text: output });
+      throw new AgentLimitError("quota exhausted", { harness: "claude" });
+    };
+    const spare = scripted("codex");
+    await limitAwareRunner("worker", [
+      { name: "primary", runner: interrupted }, { name: "fallback", runner: spare.runner },
+    ], createLimitMemory(), policy(clock()))(request);
+
+    const quoted = quotedReport(spare.requests[0]!.prompt, multiline ? firstLine : "r".repeat(100));
+    assert.ok(quoted.length <= 2000, `report including its marker has ${quoted.length} characters`);
+    assert.match(quoted, /truncat|…|\.{3}/iu, "omitted output must have a visible marker");
+    if (multiline) {
+      assert.doesNotMatch(quoted, /z/u, "cut at the available line break, not partway into the next line");
+    } else {
+      assert.ok(output.startsWith(quoted.match(/^r+/u)![0]), "keep a prefix when a hard cut is necessary");
+    }
+    assert.ok(spare.requests[0]!.prompt.endsWith(continuation));
+  });
+}
+
+test("handoff notes accumulate oldest first and the fourth interruption evicts only the oldest", async () => {
+  const received: AgentRequest[] = [];
+  const reports = ["Report from attempt alpha.", "Report from attempt bravo.", "Report from attempt charlie.", "Report from attempt delta."];
+  const candidates = reports.map((text, index) => ({
+    name: `preset-${index}`,
+    runner: (async (next, report) => {
+      received.push(next);
+      report?.({ type: "identity", harness: `harness-${index}`, model: `model-${index}` });
+      report?.({ type: "tool", id: "reused-across-attempts", title: `Tool for attempt ${index}` });
+      report?.({ type: "output", text });
+      throw new AgentLimitError("quota exhausted", { harness: `harness-${index}`, kind: "five_hour" });
+    }) satisfies AgentRunner,
+  }));
+  const spare = scripted("replacement");
+  const { updates, report } = observed();
+  await limitAwareRunner("worker", [
+    ...candidates, { name: "fallback", runner: spare.runner },
+  ], createLimitMemory(), policy(clock()))(request, report);
+
+  assert.equal(received[0], request);
+  const retryPrompts = [...received.slice(1), spare.requests[0]!].map(({ prompt }) => prompt);
+  for (const [index, prompt] of retryPrompts.entries()) {
+    assert.equal(prompt.split(request.prompt).length - 1, 1, "rebuild from the original request");
+    const retained = reports.slice(Math.max(0, index - 2), index + 1);
+    let previous = -1;
+    for (const text of retained) {
+      const position = prompt.indexOf(text);
+      assert.ok(position > previous, `${text} must follow the previous interrupted report`);
+      assert.equal(prompt.split(text).length - 1, 1, "retain one note for each interruption");
+      previous = position;
+    }
+    for (const text of reports.filter((text) => !retained.includes(text))) {
+      assert.ok(!prompt.includes(text), `${text} must not appear outside the latest three interruptions`);
+    }
+    assert.ok(prompt.endsWith(continuation));
+  }
+  assert.ok(limits(updates).every(({ text }) => text.endsWith("handing over 1 tool calls")),
+    "each handoff counts only the interrupted attempt's tools");
+});
+
+test("a same-preset retry after waiting receives the trace and reports the interrupted tool count", async () => {
+  const time = clock();
+  const requests: AgentRequest[] = [];
+  const bound: AgentRunner = async (next, report) => {
+    requests.push(next);
+    report?.({ type: "identity", harness: "claude", model: "interrupted-model" });
+    if (requests.length === 1) {
+      report?.({ type: "tool", id: "old-tool", title: "Inspect workspace" });
+      report?.({ type: "output", text: "The current patch needs validation." });
+      throw new AgentLimitError("quota exhausted", { harness: "claude", kind: "five_hour", resetsAt: start + minute });
+    }
+    for (let index = 0; index < 3; index += 1) {
+      report?.({ type: "tool", id: `new-tool-${index}`, title: "Validate patch" });
+    }
+    return { type: "completed" };
+  };
+  const { updates, report } = observed();
+  await limitAwareRunner("worker", [{ name: "primary", runner: bound }], createLimitMemory(), policy(time))(request, report);
+
+  const prompt = requests[1]!.prompt;
+  for (const detail of ["claude", "interrupted-model", "five_hour", "1 tool calls", "Inspect workspace"]) {
+    assert.ok(prompt.includes(detail), `resumed prompt must contain ${detail}`);
+  }
+  assert.equal(quotedReport(prompt, "The current patch"), "The current patch needs validation.");
+  assert.deepEqual(limits(updates).map(({ status, agent, to, until }) => ({ status, agent, to, until })), [
+    { status: "waiting", agent: "primary", to: undefined, until: "2026-10-10T20:01:00Z" },
+    { status: "resumed", agent: "primary", to: undefined, until: undefined },
+  ]);
+  assert.match(limits(updates)[1]!.text, /handing over 1 tool calls$/u);
+  assert.deepEqual(updates.map((update) => update.type === "limit" ? update.status : update.type), [
+    "identity", "tool", "output", "waiting", "identity", "resumed", "tool", "tool", "tool",
+  ]);
+  assert.equal(time.now(), start + 2 * minute);
+});
+
+test("handoff counts distinct tool IDs, keeps the last five titles, and quotes only the latest output", async () => {
+  const titles = ["Oldest omitted title", "Second omitted title", "Read sources", "Edit sources", "Check types", "Run tests", "Inspect result"];
+  const interrupted: AgentRunner = async (_received, report) => {
+    report?.({ type: "output", text: "Superseded report that must not be quoted." });
+    for (const [index, title] of titles.entries()) {
+      report?.({ type: "tool", id: `tool-${index}`, title, status: "in_progress" });
+      report?.({ type: "tool", id: `tool-${index}`, title, status: "completed" });
+    }
+    report?.({ type: "output", text: "Latest report to carry forward." });
+    throw new AgentLimitError("quota exhausted", { harness: "claude" });
+  };
+  const spare = scripted("codex");
+  const { updates, report } = observed();
+  await limitAwareRunner("worker", [
+    { name: "primary", runner: interrupted }, { name: "fallback", runner: spare.runner },
+  ], createLimitMemory(), policy(clock()))(request, report);
+
+  const prompt = spare.requests[0]!.prompt;
+  assert.match(prompt, /7 tool calls/u);
+  assert.doesNotMatch(prompt, /14 tool calls|Superseded report/u);
+  for (const title of titles.slice(0, 2)) assert.ok(!prompt.includes(title));
+  let previous = -1;
+  for (const title of titles.slice(-5)) {
+    const position = prompt.indexOf(title);
+    assert.ok(position > previous, `${title} must follow the previous tool title`);
+    assert.equal(prompt.split(title).length - 1, 1);
+    previous = position;
+  }
+  assert.equal(quotedReport(prompt, "Latest report"), "Latest report to carry forward.");
+  assert.match(limits(updates)[0]!.text, /handing over 7 tool calls$/u);
+});
+
+test("successful traces and handoff history do not leak into later invocations", async () => {
+  let calls = 0;
+  const bound: AgentRunner = async (_received, report) => {
+    calls += 1;
+    if (calls === 1) {
+      report?.({ type: "identity", harness: "successful-harness", model: "successful-model" });
+      report?.({ type: "tool", id: "successful-tool", title: "Successful tool title" });
+      report?.({ type: "output", text: "Successful report to discard." });
+      return { type: "completed" };
+    }
+    report?.({ type: "output", text: `Interrupted report number ${calls}.` });
+    throw new AgentLimitError("quota exhausted", { harness: "claude", resetsAt: start + hour });
+  };
+  const time = clock();
+  const spare = scripted("codex");
+  const runner = limitAwareRunner("worker", [
+    { name: "primary", runner: bound }, { name: "fallback", runner: spare.runner },
+  ], createLimitMemory(), policy(time));
+
+  await runner(request);
+  await runner(request);
+  time.advance(hour);
+  await runner(request);
+
+  assert.equal(quotedReport(spare.requests[0]!.prompt, "Interrupted report"), "Interrupted report number 2.");
+  assert.equal(quotedReport(spare.requests[1]!.prompt, "Interrupted report"), "Interrupted report number 3.");
+  for (const { prompt } of spare.requests) {
+    assert.doesNotMatch(prompt, /successful-harness|successful-model|Successful tool title|Successful report/u);
+  }
+  assert.doesNotMatch(spare.requests[1]!.prompt, /Interrupted report number 2/u);
+});
 
 test("a run under its limits calls the bound preset exactly as an unwrapped runner", async () => {
   const time = clock();

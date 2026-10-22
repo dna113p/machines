@@ -34,10 +34,11 @@ export const defaultProbeMs = 15 * 60_000;
 const resetMarginMs = 60_000;
 // Short sleeps measured against the clock notice a reset that passed while the computer was suspended.
 const tickMs = 60_000;
+const continuation = "Inspect the current state and continue the same assignment rather than starting over.";
 const handoffNote = [
-  "Note: a previous Agent working on this assignment was interrupted by a usage limit and may have",
-  "left partial work in the workspace. Inspect the current state and continue the same assignment",
-  "rather than starting over.",
+  "a previous Agent working on this assignment was interrupted by a usage limit and may have",
+  "left partial work in the workspace.",
+  continuation,
 ].join(" ");
 
 export function createLimitMemory(): LimitMemory {
@@ -95,6 +96,8 @@ export function limitAwareRunner(
       report?.(update);
     };
     let interrupted = false;
+    const handoffs: string[] = [];
+    let interruptedToolCount = 0;
     let lastFailure: unknown;
     let deadline: number | undefined;
     // A wait is reported once, and lasts until a candidate gets past its limit.
@@ -124,16 +127,18 @@ export function limitAwareRunner(
             agent: bound.name,
             ...(candidate === bound ? {} : { to: candidate.name }),
             text: `${named(bound.name)} waited for a usage limit to reset; continuing${
-              candidate === bound ? "" : ` with ${candidate.name}`}`,
+              candidate === bound ? "" : ` with ${candidate.name}`}${handoffSuffix(interruptedToolCount)}`,
           });
         };
         const tried = memory.get(candidate.name);
+        const trace = attemptTrace();
         let limit: AgentLimit | undefined;
         try {
           const event = await candidate.runner(
-            interrupted ? withHandoffNote(request) : request,
-            // A limited turn can still report its identity and the provider's message; a tool call is work.
-            !waiting ? report : (update) => {
+            interrupted ? withHandoffNote(request, handoffs) : request,
+            (update) => {
+              trace.record(update);
+              // A limited turn can still report its identity and the provider's message; a tool call is work.
               if (update.type === "tool") resume();
               report?.(update);
             },
@@ -148,10 +153,13 @@ export function limitAwareRunner(
           lastFailure = cause;
         }
         interrupted = true;
+        handoffs.push(trace.note(limit));
+        if (handoffs.length > 3) handoffs.shift();
+        interruptedToolCount = trace.toolCount();
         const remembered = remember(candidate, limit);
         const next = candidates.slice(index + 1).find((later) => !limited(later.name, retrying));
         // Also while a wait is reported: each probe that moves on to another preset is a swap.
-        if (next !== undefined) await tell(swapped(named(candidate.name), "reached", remembered, candidate, next));
+        if (next !== undefined) await tell(swapped(named(candidate.name), "reached", remembered, candidate, next, interruptedToolCount));
       }
 
       const limits = candidates.flatMap((candidate) => {
@@ -210,8 +218,58 @@ export function limitAwareRunner(
   }
 }
 
-function withHandoffNote(request: AgentRequest): AgentRequest {
-  return { ...request, prompt: `${request.prompt}\n\n${handoffNote}` };
+/** Only reporter observations belong in the trace; each candidate starts with an empty one. */
+function attemptTrace() {
+  let seen = false;
+  let identity: Extract<AgentUpdate, { type: "identity" }> | undefined;
+  const toolIds = new Set<string>();
+  const lastTools: Array<{ id: string; title: string | undefined }> = [];
+  let output: string | undefined;
+  return {
+    record(update: AgentUpdate) {
+      seen = true;
+      if (update.type === "identity") identity = update;
+      if (update.type === "output") output = boundedReport(update.text);
+      if (update.type === "tool") {
+        if (!toolIds.has(update.id)) {
+          toolIds.add(update.id);
+          lastTools.push({ id: update.id, title: update.title });
+          if (lastTools.length > 5) lastTools.shift();
+        } else if (update.title !== undefined) {
+          const tool = lastTools.find((tool) => tool.id === update.id);
+          if (tool !== undefined) tool.title = update.title;
+        }
+      }
+    },
+    toolCount: () => toolIds.size,
+    note(limit: AgentLimit): string {
+      if (!seen) return handoffNote;
+      const who = identity === undefined ? "" : ` (${[identity.harness, identity.model].filter(Boolean).join(", ")})`;
+      const kind = limit.kind === undefined ? "" : ` (${limit.kind})`;
+      const titles = lastTools.flatMap(({ title }) => title === undefined ? [] : [title]);
+      const activity = titles.length === 0 ? "" : ` Last tools: ${titles.join("; ")}.`;
+      const report = output === undefined ? "" : `\n\nLast report:\n${output.split("\n").map((line) => `> ${line}`).join("\n")}\n\n`;
+      return `a previous Agent${who} working on this assignment was interrupted by a usage limit${kind}`
+        + ` after ${toolIds.size} tool calls and may have left partial work in the workspace.${activity}`
+        + `${report || " "}${continuation}`;
+    },
+  };
+}
+
+function boundedReport(text: string): string {
+  if (text.length <= 2000) return text;
+  const marker = "\n[truncated]";
+  const budget = 2000 - marker.length;
+  const newline = text.lastIndexOf("\n", budget);
+  return text.slice(0, newline < 0 ? budget : newline) + marker;
+}
+
+function withHandoffNote(request: AgentRequest, handoffs: readonly string[]): AgentRequest {
+  return { ...request, prompt: `${request.prompt}\n\nNote: ${handoffs.join("\n\n")}` };
+}
+
+function handoffSuffix(toolCount: number): string {
+  return toolCount === 0 ? "" : `; handing over ${toolCount} tool calls`;
 }
 
 function swapped(
@@ -220,13 +278,14 @@ function swapped(
   remembered: RememberedLimit | undefined,
   from: LimitCandidate,
   to: LimitCandidate,
+  toolCount = 0,
 ): Extract<AgentUpdate, { type: "limit" }> {
   return {
     type: "limit",
     status: "swapped",
     agent: from.name,
     to: to.name,
-    text: `${subject} ${verb} its usage limit (${resetText(remembered)}); continuing with ${to.name}`,
+    text: `${subject} ${verb} its usage limit (${resetText(remembered)}); continuing with ${to.name}${handoffSuffix(toolCount)}`,
   };
 }
 
