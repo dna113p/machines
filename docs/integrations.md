@@ -72,6 +72,24 @@ of scaffolding a generic suite or repeating setup on every task. Already-assigne
 workers complete their state directly. Missing harnesses remain visible blockers,
 and fixture validation is not evidence of live-agent performance or adoption.
 
+Setup can also establish one reusable project agent and audit the same binding
+later. Discover supported interfaces from the installed provider; reuse a matching
+manager and record its identity, ownership, capabilities, cost, limits and
+verification in the map. A stable project-agent identity is separate from each
+request or run. A Machine-backed route need not provide a durable session.
+
+Overlord, when selected, owns its managers and delegation. Discover its optional
+`overlord-context` and `overlord-tools` skills: persistent guidance and authorized
+tool grants are separate. Drip, when used, owns the shared project binding,
+feedback delivery and presentation. Feedback uses that binding with a stable
+request key, the person's note and response evidence. Neither integration is
+required or implemented by these instructions. Missing integration or authorization
+remains a gap; do not silently switch a configured provider. Availability audits
+use unpaid checks and preserve service, access, publishing and spending limits.
+Private ticket destinations are valid, and ticket creation does not authorize
+execution. See the skill's [workflow map reference](../skills/machine-project-setup/references/project-workflows.md)
+for the binding record and repair boundaries.
+
 ## Codex through direct MCP
 
 From an arbitrary checkout, build and register the server:
