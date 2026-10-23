@@ -277,6 +277,13 @@ Status-line hosts such as Claude Code can show running Machines too: see
 Every flag, sleeping runs, and how continuation works are in
 [Running, watching and continuing runs](docs/running.md).
 
+In Pi, `machine_start` registers its parent session for model continuation on
+completion, failure, or a new Human request. Explicitly attach an external run
+with `machine_attach({ target: "<ticket-or-run-id>" })`; `machine_detach` removes
+wake registration, while `machine_watch` stays passive. Yield when no independent
+work remains, then retrieve `machine_status` after the wake. Human decisions
+still require the Human's answer. See [Pi wake registration](docs/integrations.md#wake-the-coordinating-pi-session).
+
 ## Good to know
 
 - **Machine files are trusted code.** Discovery imports them, and their

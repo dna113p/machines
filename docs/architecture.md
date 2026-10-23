@@ -68,6 +68,7 @@ MCP server ────┘       ↑
 | `src/run-viewer.ts` | Which published runs one viewer shows; exported with the readers as `@dna113p/machines/run-status` |
 | `src/cli.ts` | Command parsing, terminal progress, source inspection |
 | `pi-extension/index.ts` | Pi tools, widgets, notifications, native input presentation |
+| `pi-extension/wake.ts` | Session-scoped wake registrations, actionable snapshot events, cancellable busy delivery, persisted delivery identities |
 | `mcp/server.ts` | MCP schemas, tool results, and the optional HTML resource |
 | `codex/machines/ui/machines.html` | Status rendering and submission of the current Human request |
 
@@ -130,6 +131,32 @@ only way to answer it, its record says so, and `machine respond` refuses it. See
 
 A session's watch list changes only which published runs its status line shows.
 It gives no ownership of a run and no way to answer one.
+
+Pi wake registration is separate from watch lists and execution ownership.
+The extension registers each spawned run on the session's first synchronous
+snapshot, before child Human or terminal callbacks. Explicit `machine_attach`
+registrations observe published external runs with the same target matching as
+watches, without admitting them to `MachineSession`. `machine_status` reads
+attached records independently of widget retention; response and termination
+remain with the original owner.
+
+The wake adapter selects completion, failure, and unanswered Human requests,
+and deduplicates by execution/continuation and request identity. It retains busy
+events locally until Pi's `agent_settled`. A manual compaction outcome permits
+idle recovery without that event. Tree navigation permits recovery when Pi clears
+its branch-summary busy state, including failure and cancellation without an
+outcome event. Neither path clears an agent barrier; automatic compaction and new
+agent activity still require settlement. The adapter retains registered spawned terminal snapshots
+through delivery until detach or shutdown, independently of the session's five-run
+terminal cache. It reconciles current snapshots to discard answered or obsolete
+Human requests, then rechecks the bound session before handing
+off `sendMessage` with `triggerTurn` and `followUp`. Pi starts continuation;
+Machines neither polls through its model nor starts another agent process.
+Session entries persist delivery receipts, not active registrations. Detach
+cancels uncovered queued events; shutdown/replacement closes the registration
+generation and polling resources. A new runtime requires renewed attachment.
+No wake event supplies a Human answer or changes Machine policy. See
+[wake registration and its limits](integrations.md#wake-the-coordinating-pi-session).
 
 Which runs a viewer shows is one rule, `runsForViewer` in `src/run-viewer.ts`:
 `machine runs --for` prints its answer, and `@dna113p/machines/run-status`

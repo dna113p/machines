@@ -12,6 +12,8 @@ import type { MachineSession, RunSnapshot } from "../src/session.ts";
 import { machineCoordinatorGuidelines, machineDiscoveryDescription } from "../src/coordinator-guidance.ts";
 import { readRunStatuses, runStatusDirectory, runsForViewer, type ViewerRun } from "../src/run-viewer.ts";
 import { readRunWatches, runWatch, sameRunWatch, writeRunWatches } from "../src/run-watch.ts";
+import type { RunStatusRecord } from "../src/run-status.ts";
+import { PiWake, type WakeApi, type WakeContext } from "./wake.ts";
 
 const sourceFile = realpathSync(fileURLToPath(import.meta.url));
 const sourceRoot = resolve(dirname(sourceFile), "..");
@@ -55,10 +57,9 @@ interface UiLike {
   ): void;
 }
 
-interface ToolContextLike {
+interface ToolContextLike extends WakeContext {
   readonly cwd: string;
   readonly ui: UiLike;
-  readonly sessionManager?: { getSessionId(): string };
 }
 
 interface ThemeLike {
@@ -101,14 +102,15 @@ interface ToolDefinitionLike {
   ): ComponentLike;
 }
 
-interface PiLike {
+interface PiLike extends WakeApi {
   registerTool(tool: ToolDefinitionLike): void;
   registerCommand(name: string, command: {
     readonly description: string;
     handler(args: string, context: ToolContextLike): Promise<void>;
   }): void;
   on(
-    event: "session_start" | "session_shutdown",
+    event: "session_start" | "session_shutdown" | "agent_settled" | "before_agent_start" | "agent_start"
+      | "session_compact" | "session_compact_failed" | "session_before_tree",
     handler: (event: unknown, context: ToolContextLike) => void | Promise<void>,
   ): void;
 }
@@ -123,14 +125,36 @@ export default function machinesExtension(pi: PiLike): void {
   let viewerId: string | undefined;
   let elapsedTimer: NodeJS.Timeout | undefined;
   let shuttingDown = false;
+  let boundSessionId: string | undefined;
+  let boundContext: ToolContextLike | undefined;
+  let wake: PiWake | undefined;
+  const spawned = new Set<string>();
   const dialogAbort = new AbortController();
   let dialogQueue = Promise.resolve();
 
-  const useContext = (context: ToolContextLike) => {
-    if (shuttingDown) return;
+  const useContext = (context: ToolContextLike, render = true) => {
+    if (shuttingDown) throw new Error("Machine session is closed");
+    const identity = context.sessionManager?.getSessionId();
+    if (boundSessionId !== undefined && identity !== undefined && identity !== boundSessionId) {
+      close();
+      throw new Error("Machine session context is stale after a session switch");
+    }
+    boundSessionId ??= identity;
+    if (identity !== undefined) boundContext ??= context;
     ui = context.ui;
     viewerId = context.sessionManager?.getSessionId();
-    renderWidget();
+    if (render) renderWidget();
+  };
+
+  const registerContext = (context: ToolContextLike): PiWake => {
+    if (!context.sessionManager?.getSessionId()) throw new Error("Pi did not provide a session id for wake registration");
+    wake ??= new PiWake(pi, context);
+    return wake;
+  };
+
+  const refreshWake = (settled = false, observed?: RunSnapshot) => {
+    const snapshots = session?.status() ?? [];
+    wake?.refresh(observed === undefined ? snapshots : [observed, ...snapshots.filter(run => run.id !== observed.id)], settled);
   };
 
   const watchedRuns = (): ViewerRun[] => {
@@ -144,18 +168,29 @@ export default function machinesExtension(pi: PiLike): void {
 
   const renderWidget = () => {
     if (ui === undefined || shuttingDown) return;
+    if (boundContext !== undefined && boundContext.sessionManager?.getSessionId() !== boundSessionId) {
+      close();
+      return;
+    }
+    refreshWake();
     const now = Date.now();
     const owned = session?.status() ?? [];
     const visible: WidgetRun[] = owned.filter(
       (run) => isActive(run.status) || now - Date.parse(run.updatedAt) < terminalWidgetDurationMs,
     );
     const ownedIds = new Set(owned.map((run) => run.id));
-    visible.push(...watchedRuns().filter((run) => !ownedIds.has(run.id)));
+    const published = new Map(watchedRuns().map(run => [run.id, run]));
+    if (viewerId !== undefined && wake !== undefined) {
+      for (const run of runsForViewer(wake.records(), {
+        sessionId: viewerId, watches: wake.registrations().map(entry => entry.watch),
+      })) published.set(run.id, run);
+    }
+    visible.push(...[...published.values()].filter((run) => !ownedIds.has(run.id)));
     // Keep polling even before a watched ticket starts, or a CLI watch is added.
     const watching = viewerId !== undefined && runStatusDirectory() !== undefined;
     if (visible.length === 0) {
       ui.setWidget(widgetKey, undefined);
-      if (watching) startTimer();
+      if (watching || wake?.hasPending) startTimer();
       else stopTimer();
       return;
     }
@@ -184,6 +219,15 @@ export default function machinesExtension(pi: PiLike): void {
       session = new MachineSession();
       if (shuttingDown) session.close();
       session.subscribe(({ type, run }) => {
+        if (shuttingDown) return;
+        // MachineSession emits its initial snapshot synchronously before any
+        // child Human/terminal callbacks. Bind it to the initiating runtime now.
+        if (!spawned.has(run.id)) {
+          spawned.add(run.id);
+          wake?.registerSpawned(run.id);
+        }
+        // Retain the event itself even if the session has already evicted it.
+        refreshWake(false, run);
         renderWidget();
         if (shuttingDown) return;
         if (type === "human" && run.human !== undefined) {
@@ -285,6 +329,7 @@ export default function machinesExtension(pi: PiLike): void {
     description: "Start one Machine asynchronously. Returns a run id immediately after preflight.",
     promptGuidelines: [
       "machine_start is asynchronous: after it returns, continue the conversation and use machine_status only when status is relevant.",
+      "Spawned runs wake this Pi session on completion, failure, or a new Human request. Yield when no independent work remains; do not poll for completion.",
       "Turn the Human's goal into clear Machine input without adding requirements or changing its intended scope.",
       "Pass Agent overrides only as Machine role-to-preset names previously discovered with machine_agents.",
     ],
@@ -299,15 +344,20 @@ export default function machinesExtension(pi: PiLike): void {
     }, { additionalProperties: false }),
     async execute(_id, rawParams, _signal, _onUpdate, context) {
       useContext(context);
+      // Older embedding clients may only implement presentation. Actual Pi's
+      // wake APIs are required for explicit attachments and automatic in Pi 1.4+.
+      if (pi.sendMessage !== undefined) registerContext(context);
+      const owner = context.sessionManager?.getSessionId();
       const machine = requiredString(rawParams.machine, "machine");
       const input = rawParams.input;
       if (input !== undefined) assertJsonValue(input, "Machine input");
       const agents = optionalStringRecord(rawParams.agents, "agents");
       const runs = await getSession();
+      if (shuttingDown || context.sessionManager?.getSessionId() !== owner) throw new Error("Machine session is closed or stale");
       const run = await runs.start({
         machine,
         cwd: context.cwd,
-        ...(viewerId === undefined ? {} : { owner: viewerId }),
+        ...(owner === undefined ? {} : { owner }),
         ...(input === undefined ? {} : { input }),
         ...(agents === undefined ? {} : { agents }),
       });
@@ -325,15 +375,22 @@ export default function machinesExtension(pi: PiLike): void {
   pi.registerTool({
     name: "machine_status",
     label: "Machine Status",
-    description: "Inspect one exact Machine run id, or all active and recently finished runs.",
+    description: "Inspect an owned or explicitly attached Machine run by exact id, or list their snapshots.",
     parameters: Type.Object({
-      runId: Type.Optional(Type.String({ description: "Exact run id returned by machine_start" })),
+      runId: Type.Optional(Type.String({ description: "Exact run id from machine_start, a wake message, or an attached published run" })),
     }, { additionalProperties: false }),
     executionMode: "parallel",
     async execute(_id, rawParams, _signal, _onUpdate, context) {
       useContext(context);
       const runId = optionalString(rawParams.runId, "runId");
-      const snapshots = (await getSession()).status(runId);
+      const runs = await getSession();
+      const all: Array<RunSnapshot | RunStatusRecord> = runs.status();
+      const recentIds = new Set(all.map(run => run.id));
+      all.push(...(wake?.retained() ?? []).filter(run => !recentIds.has(run.id)));
+      const ownedIds = new Set(all.map(run => run.id));
+      all.push(...(wake?.records() ?? []).filter(run => !ownedIds.has(run.id)));
+      const snapshots = runId === undefined ? all : all.filter(run => run.id === runId);
+      if (runId !== undefined && snapshots.length === 0) throw new Error(`Machine run "${runId}" not found in this session or its attachments`);
       const text = snapshots.length === 0
         ? "No Machine runs in this Pi session."
         : snapshots.map(formatSnapshot).join("\n\n");
@@ -402,6 +459,52 @@ export default function machinesExtension(pi: PiLike): void {
     });
   };
 
+  const changeAttachment = (target: string, remove: boolean, context: ToolContextLike) => {
+    // Apply unregistration before an idle refresh can hand off queued events.
+    useContext(context, false);
+    const registration = registerContext(context);
+    if (remove) registration.detach(target);
+    else {
+      const directory = runStatusDirectory();
+      if (directory === undefined) throw new Error("Run status publication is off; use the same run-status directory for external attachment");
+      registration.attach(target, directory);
+    }
+    renderWidget();
+    const summary = `${remove ? "Detached" : "Attached"} ${target}`;
+    return result(`${summary}. ${remove ? "Pending wake delivery cancelled where no registration remains." : "This Pi session will wake for completion, failure, and new Human requests."} External ownership and Human decisions stay with their owner.`, {
+      summary, sessionId: context.sessionManager?.getSessionId(), attachments: registration.registrations(),
+    });
+  };
+
+  for (const remove of [false, true]) {
+    const name = remove ? "machine_detach" : "machine_attach";
+    const command = remove ? "machine-detach" : "machine-attach";
+    const description = remove
+      ? "Unregister wake notifications for a target in this Pi session, cancelling pending delivery without stopping any run."
+      : "Explicitly register this Pi session to wake for a published ticket or run, including future attempts. Observation only; does not grant ownership or Human decision authority.";
+    pi.registerTool({
+      name, label: remove ? "Detach Machine" : "Attach Machine", description,
+      promptGuidelines: ["Use machine_watch for a passive widget. Use machine_attach for external model continuation; yield when no independent work remains. Retrieve machine_status after a wake and obtain the Human's answer before responding."],
+      parameters: Type.Object({ target: Type.String({ description: "Ticket label prefix or run id prefix; detach the same target to unregister" }) }, { additionalProperties: false }),
+      async execute(_id, params, _signal, _onUpdate, context) {
+        return changeAttachment(requiredString(params.target, "target"), remove, context);
+      },
+      renderCall: (params, theme) => line(`${theme.fg("toolTitle", theme.bold(name))} ${String(params.target ?? "")}`),
+      renderResult: compactResult,
+    });
+    pi.registerCommand(command, {
+      description,
+      async handler(args, context) {
+        try {
+          if (args.trim() === "") throw new Error(`Usage: /${command} <ticket-or-run-id>`);
+          context.ui.notify(changeAttachment(args, remove, context).content[0].text, "info");
+        } catch (cause) {
+          context.ui.notify(errorMessage(cause), "error");
+        }
+      },
+    });
+  }
+
   for (const remove of [false, true]) {
     const name = remove ? "machine_unwatch" : "machine_watch";
     const description = remove
@@ -435,27 +538,72 @@ export default function machinesExtension(pi: PiLike): void {
 
   pi.on("session_start", (_event, context) => useContext(context));
 
-  pi.on("session_shutdown", (_event, context) => {
+  for (const event of ["before_agent_start", "agent_start"] as const) {
+    pi.on(event, () => wake?.agentStarting());
+  }
+
+  pi.on("session_before_tree", (_event, context) => {
+    if (shuttingDown || pi.sendMessage === undefined) return;
+    useContext(context, false);
+    // Capture navigation even before the first run registration. Creating the
+    // policy alone registers no runs and starts no observer or model turn.
+    registerContext(context).treeNavigationStarting();
+  });
+
+  for (const event of ["session_compact", "session_compact_failed"] as const) {
+    pi.on(event, (value) => {
+      const compact = value as { reason?: string; willRetry?: boolean };
+      if (compact.reason !== "manual" || compact.willRetry !== false) return;
+      wake?.manualCompactionFinished();
+      renderWidget();
+    });
+  }
+
+  pi.on("agent_settled", (_event, context) => {
+    if (shuttingDown) return;
+    if (context.sessionManager?.getSessionId() !== boundSessionId) {
+      close();
+      return;
+    }
+    refreshWake(true);
+  });
+
+  const close = () => {
+    if (shuttingDown) return;
     shuttingDown = true;
+    wake?.close();
     dialogAbort.abort();
     stopTimer();
     session?.close();
-    context.ui.setWidget(widgetKey, undefined);
+    spawned.clear();
+    ui?.setWidget(widgetKey, undefined);
     ui = undefined;
+  };
+
+  pi.on("session_shutdown", (_event, context) => {
+    close();
+    context.ui.setWidget(widgetKey, undefined);
   });
 }
 
-function formatSnapshot(run: RunSnapshot): string {
+function formatSnapshot(run: RunSnapshot | RunStatusRecord): string {
   const lines = [
     `${run.machine} (${run.status})`,
     `Run id: ${run.id}`,
     `State: ${formatState(run.state) ?? "starting"}`,
-    `Elapsed: ${run.elapsedSeconds}s`,
+    `Elapsed: ${"elapsedSeconds" in run ? run.elapsedSeconds : Math.max(0, Math.floor((Date.parse(run.updatedAt) - Date.parse(run.startedAt)) / 1_000))}s`,
   ];
   if (run.agent !== undefined) lines.push(`Agent: ${formatAgent(run.agent)}`);
   if (run.limit !== undefined) lines.push(`Limit: ${run.limit.text}`);
+  if ("schemaVersion" in run) {
+    lines.push(`External owner: ${run.owner ?? "not named"}`);
+    if (run.answeredBy === "host") lines.push("Human responses go through the program hosting this run.");
+    if (run.humanEventId !== undefined) lines.push(`Human event id: ${run.humanEventId}`);
+  }
   if (run.human !== undefined) {
-    lines.push(`Human: ${run.human.prompt}`, `Request id: ${run.human.requestId}`);
+    lines.push(`Human: ${run.human.prompt}`);
+    if (run.human.requestId !== undefined) lines.push(`Request id: ${run.human.requestId}`);
+    if ("answer" in run.human && run.human.answer !== undefined) lines.push("Human answer recorded; awaiting continuation by its owner.");
     if (run.human.choices !== undefined) lines.push(`Choices: ${run.human.choices.join(", ")}`);
     if (run.human.suggestions !== undefined) {
       lines.push(`Suggestions: ${run.human.suggestions.join(", ")}`);
