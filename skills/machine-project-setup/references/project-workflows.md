@@ -52,19 +52,19 @@ runtime registry.
 
 | Field | What to record |
 | --- | --- |
-| Provider and ownership | Supported provider and binding reference; system that owns its configuration. Overlord owns managers and delegation; Drip owns the shared project binding, feedback delivery and presentation. Neither is required. |
+| Provider and ownership | Supported provider and binding reference; system that owns its configuration. The provider owns managers and delegation; the consuming application owns its binding and presentation. External services are optional. |
 | Agent identity | Stable project-agent or manager identity/reference, separate from request/run identity. A Machine route does not imply a durable session. |
 | Owning computer | Portable computer reference and how to verify availability there. |
 | Supported request types | Observed capabilities, such as review, edits, or feedback; unsupported types and prerequisites. |
 | Checkout | Intended repository/checkout reference, launch directory and isolation requirements; keep private absolute paths outside Git. |
 | Edit/review limits | Allowed scope and effects, read-only versus edit access, service and publishing limits, approval requirements. |
 | Model/account cost | Model/harness, account reference without credentials, subscription or metered cost, spending limits and unknowns. |
-| Delegation route | Supported entry point and contract reference; Overlord delegation stays with Overlord, Machine assignments use the mapped Machine. |
+| Delegation route | Supported entry point and contract reference; provider delegation stays with its owning system; Machine assignments use the mapped Machine. |
 | Ticket-escalation destination | Authorized private or public destination reference, access/readiness gates, and who may authorize execution. |
 | Verification | Date, installed version, supported interface and unpaid checks used, observed binding/configuration, unresolved gaps and repair decisions. |
 
-For Overlord, record references to persistent guidance separately from authorized
-tool grants. Discover `overlord-context` and `overlord-tools` when available;
+For a discovered provider, record references to persistent guidance separately
+from authorized tool grants. Use its installed configuration guidance when available;
 missing provisioning, credentials, integration, or authorization remains a gap.
 Do not infer capabilities from guidance or policy from a tool grant.
 

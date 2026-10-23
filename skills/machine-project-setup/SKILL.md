@@ -123,9 +123,14 @@ Inspect the binding through its owning system's supported interface. Discover
 exact commands/tools and capabilities from the installed version's help, tool
 schemas, documentation, and available skills; do not invent an API or inspect
 private databases. Discover supported providers rather than assuming one exists.
+Search available tool descriptions, installed skills, CLI help, project workflow
+maps, and local documentation for reusable project managers, durable agent
+services, or workflow-backed agents. Search by capability rather than a product
+name. Verify an existing manager's project identity and the consumer's adapter
+support; an installed service alone is not a compatible integration.
 Choose on project needs, supported request types, available accounts, model/account
-cost, and authorized effects. A Machine-backed agent or an Overlord durable project
-manager can fit; neither Overlord nor Drip is required for ordinary Machine setup.
+cost, and authorized effects. A workflow-backed agent or a durable project
+manager can fit; no external manager service is required for ordinary Machine setup.
 If no project-agent provider is needed, record that decision and keep direct and
 Machine delegation usable.
 
@@ -139,10 +144,10 @@ Record the binding, ownership, limits, and verification using the
 [workflow map reference](references/project-workflows.md); store references, not
 secrets or a second runtime registry.
 
-For Overlord, discover and use `overlord-context` and `overlord-tools` skills when
-available. Persistent guidance teaches the manager how to work; tool grants give
-it capabilities and require their own authorization. Guidance does not grant tools,
-and a tool grant does not establish project policy. Overlord owns its managers and
+For a discovered provider, use its installed context and tool-configuration
+guidance when available; do not require a named external skill. Persistent
+guidance teaches the manager how to work; tool grants give it capabilities and require their own authorization. Guidance does not grant tools,
+and a tool grant does not establish project policy. The provider owns its managers and
 delegation; keep their lifecycle and configuration there. Missing provisioning,
 credentials, integration, skills, or authorization is an explicit gap. Do not
 silently replace an unavailable configured provider; identify the repair needed.

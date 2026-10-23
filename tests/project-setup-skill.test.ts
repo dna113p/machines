@@ -41,7 +41,7 @@ test("project-agent setup discovers supported providers and preserves reusable i
   assert.match(source, /project needs, supported request types, available accounts, model\/account\s+cost, and authorized effects/u);
   assert.match(source, /Reuse a matching project manager.*configuring or provisioning.*\n.*provider's supported route/u);
   assert.match(source, /stable\s+project-agent identity separate from each request\/run identity/u);
-  assert.match(source, /neither Overlord nor Drip is required/u);
+  assert.match(source, /no external manager service is required/u);
   assert.match(source, /Repeated setup reuses the\s+binding and manager/u);
 });
 
@@ -63,9 +63,9 @@ test("workflow map records binding references, limits and verification without b
 
 test("optional providers retain ownership and share the feedback binding", () => {
   const source = read(skill);
-  assert.match(source, /`overlord-context` and `overlord-tools` skills when\s+available/u);
+  assert.match(source, /use its installed context and tool-configuration\s+guidance when available/u);
   assert.match(source, /Guidance does not grant tools,\s+and a tool grant does not establish project policy/u);
-  assert.match(source, /Overlord owns its managers and\s+delegation/u);
+  assert.match(source, /The provider owns its managers and\s+delegation/u);
   assert.match(source, /Preserve existing managers/u);
   assert.match(source, /Missing provisioning,\s+credentials, integration, skills, or authorization is an explicit gap/u);
   assert.match(source, /Do not\s+silently replace an unavailable configured provider/u);
