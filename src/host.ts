@@ -424,8 +424,9 @@ function launchMachineHost(
           requestId: message.requestId,
           request: message.request,
         };
-        // Published without its request id, which only this host can use.
-        published?.update({ status: "waiting", human: message.request });
+        // Preserve the host-only response contract. A separate identity lets
+        // observers distinguish even identical successive prompts after reconnect.
+        published?.update({ status: "waiting", human: message.request, humanEventId: randomUUID() });
         observe(() => options.onHumanRequest?.({ ...message.request, requestId: message.requestId }));
       } else if (message.type === "completed") {
         if (phase !== "running") {

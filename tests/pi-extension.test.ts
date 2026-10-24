@@ -1,116 +1,17 @@
 import "./environment.ts";
-import { randomUUID } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import assert from "node:assert/strict";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 
-import machinesExtension from "../pi-extension/index.ts";
+import { setup, type Result, type Theme } from "./helpers/pi-extension.ts";
 import { readRunWatches, writeRunWatches } from "../src/run-watch.ts";
 import { writeRunStatusRecord, type RunStatusRecord } from "../src/run-status.ts";
 
-interface Result {
-  readonly content: readonly [{ readonly type: "text"; readonly text: string }];
-  readonly details: unknown;
-}
-
-interface RegisteredTool {
-  readonly name: string;
-  readonly promptSnippet?: string;
-  readonly promptGuidelines?: readonly string[];
-  execute(
-    id: string,
-    params: Record<string, unknown>,
-    signal: AbortSignal | undefined,
-    update: unknown,
-    context: Context,
-  ): Promise<Result>;
-  renderResult?(
-    result: Result,
-    options: { readonly expanded: boolean },
-    theme: Theme,
-  ): { render(width: number): string[] };
-}
-
-interface Context {
-  readonly cwd: string;
-  readonly ui: FakeUi;
-  readonly sessionManager?: { getSessionId(): string };
-}
-
-interface Theme {
-  fg(color: string, text: string): string;
-  bold(text: string): string;
-}
-
-class FakeUi {
-  widget: string[] | undefined;
-  widgetPlacement: "aboveEditor" | "belowEditor" | undefined;
-  readonly notifications: Array<{ message: string; type?: string }> = [];
-  readonly selections: Array<{ title: string; options: string[] }> = [];
-  readonly inputs: Array<{ title: string; placeholder?: string }> = [];
-  readonly selectionResponses: Array<string | undefined> = [];
-  readonly inputResponses: Array<string | undefined> = [];
-
-  async select(title: string, options: string[]) {
-    this.selections.push({ title, options });
-    return this.selectionResponses.shift();
-  }
-
-  async input(title: string, placeholder?: string) {
-    this.inputs.push({ title, ...(placeholder === undefined ? {} : { placeholder }) });
-    return this.inputResponses.shift();
-  }
-
-  notify(message: string, type?: "info" | "warning" | "error") {
-    this.notifications.push({ message, ...(type === undefined ? {} : { type }) });
-  }
-
-  setWidget(
-    _key: string,
-    content: string[] | ((tui: unknown, theme: Theme) => { render(width: number): string[] }) | undefined,
-    options?: { readonly placement?: "aboveEditor" | "belowEditor" },
-  ) {
-    this.widgetPlacement = options?.placement;
-    const theme: Theme = { fg: (_color, text) => text, bold: (text) => text };
-    this.widget = typeof content === "function" ? content(undefined, theme).render(120) : content;
-  }
-}
-
-function setup(cwd = resolve("tests/fixtures/pi-project"), sessionId = randomUUID()) {
-  const tools = new Map<string, RegisteredTool>();
-  const handlers = new Map<string, (event: unknown, context: Context) => void | Promise<void>>();
-  const commands = new Map<string, { handler(args: string, context: Context): Promise<void> }>();
-  machinesExtension({
-    registerTool(tool) {
-      tools.set(tool.name, tool as RegisteredTool);
-    },
-    registerCommand(name, command) { commands.set(name, command); },
-    on(event, handler) { handlers.set(event, handler); },
-  });
-  const ui = new FakeUi();
-  const context: Context = { cwd, ui, sessionManager: { getSessionId: () => sessionId } };
-  const execute = (name: string, params: Record<string, unknown> = {}) => {
-    const tool = tools.get(name);
-    if (tool === undefined) throw new Error(`Tool ${name} was not registered`);
-    return tool.execute("test-call", params, undefined, undefined, context);
-  };
-  return {
-    tools,
-    commands,
-    sessionId,
-    ui,
-    context,
-    execute,
-    start: () => handlers.get("session_start")?.({}, context),
-    shutdown: () => handlers.get("session_shutdown")?.({}, context),
-  };
-}
-
-test("registers Machine tools and read-only subscriptions with discovery guidance", () => {
+test("registers Machine tools, passive watches, and explicit wake attachments with discovery guidance", () => {
   const extension = setup();
-  assert.deepEqual([...extension.tools.keys()], [
+  assert.deepEqual([...extension.tools.keys()].sort(), [
     "machine_list",
     "machine_agents",
     "machine_start",
@@ -118,8 +19,10 @@ test("registers Machine tools and read-only subscriptions with discovery guidanc
     "machine_respond",
     "machine_watch",
     "machine_unwatch",
-  ]);
-  assert.deepEqual([...extension.commands.keys()], ["machine-watch", "machine-unwatch"]);
+    "machine_attach",
+    "machine_detach",
+  ].sort());
+  assert.deepEqual([...extension.commands.keys()].sort(), ["machine-watch", "machine-unwatch", "machine-attach", "machine-detach"].sort());
   assert.match(extension.tools.get("machine_list")?.promptSnippet ?? "", /Discover/u);
   assert.match(
     extension.tools.get("machine_start")?.promptGuidelines?.join(" ") ?? "",

@@ -100,8 +100,26 @@ reason to launch a duplicate. If the launch response is lost, inspect this sessi
 statuses before deciding whether another run is needed.
 
 Continue independent work while the run executes. Read `machine_status` with its
-exact `runId` when progress or a result is needed, spacing checks rather than
-polling continuously. Interpret the current snapshot:
+exact `runId` when a result is needed; avoid continuous polling.
+
+In Pi 1.4+, `machine_start` registers the initiating session for wake delivery on
+completion, failure, and each new unanswered Human request. Continue independent
+work, then yield the turn when none remains. Avoid blocking wait tools and
+model-driven status polling: Pi delivers busy events after full settlement.
+On a wake, retrieve `machine_status` with the message's exact run id before
+reporting or relaying the current Human question. A wake never authorizes an
+agent to answer a Human decision itself.
+
+For an external run, call `machine_attach({ target: "<ticket-or-run-id>" })`
+in the Pi session that should continue. `machine_watch` stays passive. Attachment
+observes without owning, answering, or stopping the run; obtain the Human's answer
+through the owner's response interface. Pi and the publisher must share a private run-status
+directory with publication enabled. `machine_detach` with the same target cancels
+its registration and pending delivery where no overlapping registration remains.
+Reload, session switch, and shutdown clear active registrations; reattach in the
+replacement runtime. A closed Pi session cannot wake. See the
+[Pi integration](../../docs/integrations.md#wake-the-coordinating-pi-session) for
+polling, receipt persistence, and retrieval limits.
 
 | Status | Coordinator action |
 | --- | --- |
@@ -122,10 +140,9 @@ kept work and note when resolved, or let a person continue from them.
 Tell an editing Agent that checks it cannot run in its environment are the
 workflow's to run, so a sandboxed Agent returns its work instead of `blocked`.
 
-To follow a run this session did not start, such as a ticket a daemon runs, use
-`machine watch <ticket-or-run-id>` where run status is published (`machine runs`
-lists what can be watched; `--all` adds runs that already ended). Watching only
-shows the run on this session's status line: it neither owns nor answers it.
+To display an external run, use `machine watch <ticket-or-run-id>` where status
+is published. `machine runs` lists available runs; `--all` includes ended runs.
+Watching only displays status; it neither owns nor answers the run.
 
 The CLI fallback is `machine run <name> [--agent role=preset] -- <input>` in the
 target workspace. It waits for completion and uses terminal Human input; retain

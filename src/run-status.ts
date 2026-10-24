@@ -39,6 +39,8 @@ export interface RunStatusRecord {
   readonly attempt?: RunStatusAttempt;
   readonly retry?: RunStatusRetry;
   readonly human?: RunStatusHuman;
+  /** Observation-only identity for a hosted Human wait; never a response request id. */
+  readonly humanEventId?: string;
   /**
    * `host` when the program hosting the run answers its Human requests itself:
    * the run has no inbox, and `machine respond` refuses it. Absent otherwise.
@@ -129,6 +131,8 @@ export interface RunStatusChange {
   readonly attempt?: RunStatusAttempt;
   readonly retry?: RunStatusRetry;
   readonly human?: RunStatusHuman;
+  /** Supplied with `human` for hosted observations; cleared when the request is cleared. */
+  readonly humanEventId?: string;
   /** Names an inbox response the run took, in addition to those its record already names. */
   readonly delivery?: string;
 }
@@ -239,6 +243,7 @@ export function createRunStatusPublisher(
   let attempt: RunStatusAttempt | undefined;
   let retry: RunStatusRetry | undefined;
   let human: RunStatusHuman | undefined;
+  let humanEventId: string | undefined;
   let deliveries: ReadonlyArray<{ readonly id: string; readonly takenAt: number }> = [];
   let error: string | undefined;
   let note = previous?.note;
@@ -273,6 +278,7 @@ export function createRunStatusPublisher(
       ...(attempt === undefined ? {} : { attempt }),
       ...(retry === undefined ? {} : { retry }),
       ...(human === undefined ? {} : { human }),
+      ...(humanEventId === undefined ? {} : { humanEventId }),
       ...(run.answeredBy === undefined ? {} : { answeredBy: run.answeredBy }),
       ...(continuedBy === undefined ? {} : { continuedBy }),
       ...(deliveries.length === 0 ? {} : { deliveries: deliveries.map((delivery) => delivery.id) }),
@@ -324,6 +330,7 @@ export function createRunStatusPublisher(
         attempt: "attempt" in change ? pickAttempt(change.attempt) : nextState === state ? attempt : undefined,
         retry: "retry" in change ? change.retry : nextState === state ? retry : undefined,
         human: "human" in change ? pickHuman(change.human) : human,
+        humanEventId: "human" in change ? change.human === undefined ? undefined : change.humanEventId : humanEventId,
         // A later response must not hide an earlier one from a sender that has yet to look.
         deliveries: change.delivery === undefined ? deliveries : [
           ...deliveries.filter((delivery) => Date.now() - delivery.takenAt < deliveryRetentionMilliseconds),
@@ -331,12 +338,12 @@ export function createRunStatusPublisher(
         ],
       };
       // Repeated notifications for an unchanged run do not need another write.
-      if (JSON.stringify(next) === JSON.stringify({ graph, status, state, now, note, page, agent, limit, attempt, retry, human, deliveries })) return;
+      if (JSON.stringify(next) === JSON.stringify({ graph, status, state, now, note, page, agent, limit, attempt, retry, human, humanEventId, deliveries })) return;
       if (next.state !== state) {
         stateSince = new Date().toISOString();
         enter(next.state, stateSince);
       }
-      ({ graph, status, state, now, note, page, agent, limit, attempt, retry, human, deliveries } = next);
+      ({ graph, status, state, now, note, page, agent, limit, attempt, retry, human, humanEventId, deliveries } = next);
       publish();
     },
     sleep(until) {
@@ -347,6 +354,7 @@ export function createRunStatusPublisher(
       limit = undefined;
       attempt = undefined;
       human = undefined;
+      humanEventId = undefined;
       publish();
     },
     sleepForAnswer(request) {
@@ -357,6 +365,7 @@ export function createRunStatusPublisher(
       limit = undefined;
       attempt = undefined;
       human = pickHuman(request);
+      humanEventId = undefined;
       publish();
     },
     finish(outcome) {
@@ -377,6 +386,7 @@ export function createRunStatusPublisher(
       limit = undefined;
       attempt = undefined;
       human = undefined;
+      humanEventId = undefined;
       publish();
       try {
         // Nothing reads the inbox from here on, and only the run empties it.
@@ -574,6 +584,7 @@ function isRunStatusRecord(value: unknown): value is RunStatusRecord {
     && Number.isSafeInteger(record.pid) && (record.pid as number) > 0
     && isOptionalString(record.owner)
     && isOptionalString(record.parent)
+    && isOptionalString(record.humanEventId)
     && isOptionalString(record.label)
     && (record.stateSince === undefined || isTimestamp(record.stateSince))
     && (record.due === undefined || isTimestamp(record.due))

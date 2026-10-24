@@ -209,7 +209,7 @@ use `/reload` after a source update. Keep the checkout available while using the
 symlink. A locally installed npm package also includes the built extension at
 `node_modules/@dna113p/machines/dist/pi-extension/index.js`.
 
-Pi exposes the same five tools using the conversation's current directory, with
+Pi exposes the same five launcher tools using the conversation's current directory, with
 a status widget and native Human dialogs. Canceling a dialog leaves its Machine
 waiting; answer later through `machine_respond` with the current request ID.
 Pi exit, session replacement, and reload terminate its session-owned runs.
@@ -237,12 +237,90 @@ It shows the ticket label, state, Agent, and pending question, alongside Pi-owne
 runs without duplicate rows. Sleeping tickets stay visible; finished or lost
 published runs disappear after 30 seconds from their last update.
 
-Watching is read-only. External questions do not open Pi's native input dialog;
-answer a ticket through Dispatch. `machine_status` and `machine_respond` still
-refer only to Pi-owned runs. Unwatching or closing Pi never stops a watched run.
+Watching is passive and read-only: `machine_watch` never wakes the model.
+External questions do not open Pi's native input dialog; answer them through
+their owning application. `machine_respond` refers only to Pi-owned runs.
+Unwatching or closing Pi never stops a watched run.
 Both Pi and Dispatch must read the same run-status directory (below); subscribing
 reports that directory, and refuses when publication is off. The adapter also
 picks up changes made by `machine watch` when that CLI uses the same session id.
+
+### Wake the coordinating Pi session
+
+Machines has its own wake mechanism; no Drip installation or process is required.
+In Pi 1.4 or later, a run spawned through `machine_start` automatically registers
+the initiating Pi session before Human or terminal events arrive. Completion,
+failure, and each new unanswered Human request send a model-facing message with
+`triggerTurn: true` and `deliverAs: "followUp"`. Progress does not wake the model.
+An unanswered sleeping Human request also wakes it; timed sleeps and recorded
+answers do not.
+
+For an externally started run, explicitly register in the Pi session that should
+continue:
+
+```text
+/machine-attach fix-login
+/machine-detach fix-login
+```
+
+The agent tools are `machine_attach({ target: "fix-login" })` and
+`machine_detach({ target: "fix-login" })`. Targets use the same ticket-label or
+run-id prefix matching as passive watches, including future ticket attempts.
+Attachment immediately considers current matching records, even old terminal
+ones; use an exact run id to limit it to one attempt. Attachment also shows
+matching runs in the widget. It neither launches a process nor acquires ownership.
+An `owner` field or a passive watch alone never registers wake delivery.
+
+After starting or attaching, continue independent work, then **yield the turn**
+when none remains. Do not keep the model busy with status polling or a blocking
+wait tool. Busy events remain in a local cancellable queue until `agent_settled`,
+after retries and automatic follow-ups finish. Manual compaction does not emit
+that event: after success, failure, or cancellation, the observer releases queued
+events when Pi becomes idle with no pending messages. Branch summarization uses
+the same idle recovery after success, failure, or cancellation, even when no
+tree-navigation outcome event is emitted. Automatic compaction and new agent
+activity still require full agent settlement. Delivery rechecks the registered
+session identity and registration before calling Pi. It never targets whichever
+session happens to be displayed instead.
+
+On a wake, call `machine_status({ runId: "<exact-id-from-message>" })` to retrieve
+the authoritative owned snapshot or attached published record. Registered spawned
+terminal snapshots remain retrievable for the registration's lifetime, beyond the
+session's five-terminal-run cache, including after their wake is delivered. Detach
+or runtime shutdown releases these retained snapshots. Attached records
+remain retrievable after the widget's 30-second expiry, for as long as the record
+and attachment remain. Published snapshots contain a summary rather than arbitrary
+Agent transcripts or full workflow output; plan result artifacts before launch.
+Report results or relay the current question. A wake **does not authorize a Human
+decision**: obtain the Human's clear answer before responding. Owned runs retain
+their native Pi dialogs and `machine_respond`; external runs must be answered
+through their owner (or `machine respond` when that owner supports it).
+
+Detach the same target to remove its registration and cancel pending events
+unless another overlapping registration still covers the run. Detaching an
+automatically registered spawned run by its id unregisters wakes without stopping
+its host or disabling its native Human dialog. `machine_unwatch` removes only a
+passive watch; it does not detach. Shutdown, session switch, and reload invalidate
+all active registrations and queued callbacks, and stop polling. They still
+terminate spawned hosts under existing ownership rules; external hosts keep
+running. Reattach external runs explicitly in the replacement runtime. Passive
+watch lists may survive reload; active wake registrations do not.
+
+Delivered event identities persist in Pi session entries, keyed by run id,
+start/continuation identity, event, and Human request id. Repeated snapshots,
+overlapping registrations, and reattachment do not replay the same event. New
+attempts, continuations, and Human requests can wake separately. Delivery receipts
+are session-wide, including across tree navigation; a fork has a new session id.
+
+Both the external publisher and Pi must use the same run-status directory;
+`MACHINES_RUN_STATUS_DIR=off` disables external attachment. Publication is a local
+snapshot mechanism polled once per second, so a transient Human wait answered
+between polls may not be observed. A missing/pruned record cannot be retrieved.
+Wake delivery requires a running Pi session with these APIs: it cannot resume a
+closed session, restart Pi, or start a replacement agent. Pi's message API gives
+no durable acknowledgment of model execution; a crash or provider failure after
+handoff may require manual status retrieval. Deterministic recording-API tests
+verify delivery policy, not live provider continuation.
 
 ## Run status for host status lines
 
@@ -360,6 +438,14 @@ from every other record and did not exist in earlier version 2 records. A caller
 that publishes its own record for the run, as the MCP server does so that its
 runs keep their inbox, passes `publishRunStatus: "caller"`: the host then writes
 nothing, and the run still hands its id down to the runs it starts.
+
+A hosted active Human wait also publishes `humanEventId`, a separate random
+observation identity used to deduplicate wake events. It remains stable for that
+request, changes for the next request even if the prompt is identical, and is
+cleared when the request ends. It is not a response request id and does not
+enable `machine respond`. Older hosted publishers without either request or
+observation identity cannot provide distinct Human wake events; terminal events
+still work.
 
 Use `startMachineHost({ machine, sleep: true, publishRunStatus: true })` to end
 the child process at a Human request or a future timed wait. Sleep requires
