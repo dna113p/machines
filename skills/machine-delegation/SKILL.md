@@ -27,6 +27,13 @@ for bounded nested work by the owning assignment.
 
 ## Choose or create the Machine
 
+Restrict by reversibility, not by judgment. Preserve explicit assignment constraints.
+
+| Reported: the Agent decides | Enforced: the Machine stops, or a person decides |
+| --- | --- |
+| Scope additions and assumptions | Forbidden paths and irreversible effects: publishing, deleting or migrating data, contract changes, force pushes, credentials |
+| Edge cases, review notes, test/plan ordering, authorized worktree commits | Unmet acceptance criteria, regressions, safety defects, weakening or deleting existing tests |
+
 Inspect `machine_list` and `machine_agents` in the target workspace. MCP requires
 an absolute `cwd`; Pi uses the conversation's working directory. With only a shell,
 run `machine list` and `machine agents` there (`./machine` in a source checkout).
@@ -45,7 +52,7 @@ task-specific Machine is part of the delegated work and needs no separate
 permission. Keep global installation and unrelated workflow changes outside that
 scope. Use the [delegation starter](references/delegation-machine.md) when there is no existing
 result contract to follow. Add review or bounded revision states when the work
-needs them, and Human states for decisions that belong to the user.
+needs them, and Human states only for enforced-column decisions.
 
 List again after edits. Resolve required roles using exact preset names from
 `machine_agents`, passing role-to-preset overrides at launch. A listing's readiness
@@ -71,6 +78,13 @@ State these five fields for each assignment:
 5. What is forbidden.
 
 A field that cannot be filled means the unit is not scoped yet.
+
+Require a non-empty `summary` with evidence, plus optional string-list result fields:
+
+- `assumptions`: answers the Agent assumed.
+- `scopeAdditions`: paths or work added beyond the initial scope, within authorization.
+- `openQuestions`: irreversible questions only; report other uncertainty as findings.
+- `needs`: what a person must supply or decide on `blocked`.
 
 Follow the selected Machine's input contract. MCP/Pi accept JSON-serializable
 input; CLI positional input is text, while `--input-file <file|->` accepts JSON.
@@ -132,10 +146,10 @@ Preserve existing user authorization when answering Human requests, and surface 
 new decision when the request requires one. A desire to finish is not an answer.
 
 A `blocked` or parked run is a completed run to read, not a failure to retry blindly.
-Design stuck unattended runs to end with work kept and a written note of what a
-person must decide, instead of waiting in a Human state; every stop keeps both.
-Read the note, answer it or take it to the user, then start a fresh run from the
-kept work and note when resolved, or let a person continue from them.
+A run with green checks delivers a draft with open findings; only an enforced stop
+parks it, with work kept and a written note of what remains. Resolve mechanical
+failures within the workflow; take irreversible decisions or login needs to a person.
+Read the note before continuing from the kept work through the owning interface.
 
 Tell an editing Agent that checks it cannot run in its environment are the
 workflow's to run, so a sandboxed Agent returns its work instead of `blocked`.
