@@ -91,28 +91,45 @@ and any branch that still requires a configured harness or human interaction.
 
 ## Checks the Machine owns
 
-Design the workflow so these checks control progress and leave evidence for the
-next repair round or person taking over:
+Restrict by reversibility, not by judgment. Preserve explicit assignment constraints.
 
-- Run every gate, not only up to the first failure, so one repair round sees
-  all failures.
-- Keep the project's gate list in one place that every route reads.
-- For new behaviour, write tests first; have an Operation see them fail before
-  implementation, then pass after implementation.
-- After each editing Agent, run an Operation that compares the changed paths
-  against the paths the assignment allows.
-- Ask for a structured review: each acceptance criterion met or not, findings
-  tagged by severity. Let an Operation, not the reviewer's verdict word, decide
-  what happens next.
+| Reported: the Agent decides | Enforced: the Machine stops, or a person decides |
+| --- | --- |
+| Scope additions and assumptions | Forbidden paths and irreversible effects: publishing, deleting or migrating data, contract changes, force pushes, credentials |
+| Edge cases, review notes, test/plan ordering, authorized worktree commits | Unmet acceptance criteria, regressions, safety defects, weakening or deleting existing tests |
+
+### Always
+
+- Keep the project's gate list in one place that every route reads. Enforced.
+- Run layered checks: shape and focused always, area suites when changed paths
+  match their `when` globs, independent groups concurrent. Report all failures;
+  a repair reruns only the failed check. Enforced.
+- Deterministic Operations judge checks, never an Agent's claim. Enforced.
+- Forbidden paths and irreversible effects are hard stops; require authorization
+  before an irreversible effect. Enforced.
+- A run with green checks delivers a draft with its open findings instead of
+  sleeping; delivery does not authorize irreversible effects. Reported.
+- Ask for one advisory review with structured acceptance, regression and safety
+  findings. Let an Operation, not the reviewer's verdict word, decide the next
+  state; only those findings cause one revision. Enforced; other notes are reported.
 - Match a reviewer's findings across rounds by their place in the conversation,
-  never by their wording.
-- Let a stuck unattended run sleep on one Human question, with its
-  work kept and a written note of what a person must decide.
-- Before implementation, have a read-only Agent try to show the assignment is
-  wrong, already done, or underspecified; require options and a recommended answer
-  for each question it raises.
+  never by their wording. Reported.
+- A stuck run ends with its work kept and a written note of unresolved findings
+  and any enforced stop; do not silently discard partial work. Reported.
 - Tell editing Agents that checks they cannot run in their environment are the
-  workflow's to run, so a sandboxed Agent returns its work instead of `blocked`.
+  workflow's to run, so a sandboxed Agent returns its work instead of `blocked`. Enforced.
+
+### On request
+
+- Write tests first with an Operation observing a red check before implementation,
+  then green after it. Enforced when requested; otherwise test ordering is reported.
+- Add a read-only falsify step: is the assignment wrong, already done, or underspecified?
+  Require options and a recommendation for questions. Reported unless an enforced issue.
+- Add a hard scope check: an Operation compares the changed paths against allowed
+  paths after each editing Agent. Enforced when requested; otherwise additions are reported.
+- Add a second review round. Reported findings; enforced issues still gate delivery.
+- Add a Human state for a budget decision. Enforced when requested; otherwise
+  a used-up budget with green checks delivers with reported findings.
 
 ## Recovering from failures
 
@@ -130,7 +147,8 @@ error only to end the run hides it.
 - A check may be flaky: use Machine Shop's optional
   [single rerun](https://github.com/dna113p/machine-shop/blob/main/docs/catalog.md#recovery).
 - A stop that needs explanation: add an optional Human `present` role; it fills presentation fields without changing the question or blocking it.
-- A decision, scope change, used-up budget, or login: ask a person by
+- An irreversible decision or a login: ask a person by
   [sleeping on a Human question](../../docs/integrations.md#continuing-a-run).
+  A scope change is reported. A used-up budget with green checks delivers.
 - "This task cannot be done": use a
   [declared failed ending](../../docs/authoring.md#declared-endings).

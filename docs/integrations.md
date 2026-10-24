@@ -64,6 +64,8 @@ prevent useful delegation. The orchestrator inspects actual project needs, creat
 or adapts useful definitions and tests, and writes a compact `.machines/README.md`
 (or updates the project's existing workflow map). Link that map from its existing
 orchestrator instructions or a role-specific section of `AGENTS.md`.
+Use layered gates from the project's own scripts and one advisory review; green
+checks deliver a draft with open findings.
 
 The setup skill chooses project coverage; `machine-builder` implements individual
 workflows; `machine-delegation` launches and supervises assignments. No new
@@ -555,6 +557,8 @@ run starts. A record whose process id now belongs to another process counts as
 running until that process ends.
 
 ### Continuing a run
+
+Reserve Human sleep for enforced-column decisions; [deliver green drafts with open findings](authoring.md#agents).
 
 ```sh
 machine continue <run-id>

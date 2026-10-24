@@ -27,12 +27,24 @@ export default function delegateTask(
     throw new Error("Expected task and absolute resultPath in JSON input");
   }
 
-  let result: { outcome: string; summary: string } | undefined;
+  const fields = ["assumptions", "scopeAdditions", "openQuestions", "needs"] as const;
+  type Result = { outcome: string; summary: string } &
+    Partial<Record<typeof fields[number], string[]>>;
+  let result: Result | undefined;
   const capture = ({ event }: { event: Event }) => {
     if (typeof event.summary !== "string" || event.summary.trim() === "") {
       throw new Error("Worker must return a non-empty summary with evidence or blockers");
     }
-    result = { outcome: event.type, summary: event.summary };
+    const captured: Result = { outcome: event.type, summary: event.summary };
+    for (const field of fields) {
+      const value = event[field];
+      if (value === undefined) continue;
+      if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) {
+        throw new Error(`Worker must return ${field} as a list of strings`);
+      }
+      if (field !== "needs" || event.type === "blocked") captured[field] = value;
+    }
+    result = captured;
   };
 
   return machine({
@@ -41,9 +53,14 @@ export default function delegateTask(
       work: agent(
         `${assignment.task}\n\nComplete this bounded assignment yourself. ` +
         "Return completed when its acceptance criteria are met, or blocked when " +
-        "you cannot proceed within scope. Include a summary string in the final " +
-        "Machines event with findings or changes, verification evidence, and blockers. " +
-        "The Machine saves that summary; you do not need to write a separate report.",
+        "a person must decide an irreversible question or supply a login. Include a " +
+        "non-empty summary string in the final Machines event with findings or changes, " +
+        "verification evidence, and blockers. Include optional string lists: assumptions " +
+        "for assumed answers, scopeAdditions for added work within authorization, " +
+        "openQuestions for irreversible questions only, and needs on blocked for what " +
+        "a person must supply or decide. Report other open findings with the draft. " +
+        "Checks you cannot run are the workflow's to run. " +
+        "The Machine saves these fields; you do not need to write a separate report.",
         {
           completed: { target: "save", actions: capture },
           blocked: { target: "save", actions: capture },
@@ -78,11 +95,13 @@ MCP with these arguments (replace the example paths and task):
 }
 ```
 
-The saved JSON has `outcome` and `summary`. Read it after the run finishes; `done`
-means the worker reported completion and its summary was saved. `blocked` is a
-terminal outcome requiring the coordinator's attention. This starter validates
-the result contract, not the truth of the worker's claims: inspect its evidence,
-and add verification Operations for conditions the Machine can check directly.
+The saved JSON has `outcome` and `summary`, plus optional string lists `assumptions`,
+`scopeAdditions`, `openQuestions` (irreversible questions only), and `needs` on
+`blocked`. Read it after the run finishes; `done` means the worker reported
+completion and its result was saved. `blocked` is a terminal outcome requiring
+the coordinator's attention. This starter validates the result contract, not the
+truth of the worker's claims: inspect its evidence, and add verification Operations
+for conditions the Machine can check directly.
 
 Before real work, exercise both outcomes with fake runners through the public
 runtime or launcher. Also check that a missing summary fails and that an existing

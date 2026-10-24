@@ -122,3 +122,50 @@ test("builder and delegation guide project-level gaps to the setup skill", () =>
     assert.match(read(`skills/${name}/SKILL.md`), /\[machine-project-setup\]\(\.\.\/machine-project-setup\/SKILL\.md\)/u);
   }
 });
+
+// Paragraphs and list items, with inline markup and wrapping removed.
+const blocks = (source: string) =>
+  source.split(/\n{2,}|\n(?=- )/u).map((block) => block.replace(/[`*]/gu, "").replace(/’/gu, "'").replace(/\s+/gu, " ").trim());
+const sectionOf = (source: string, heading: string) => {
+  const start = source.indexOf(`\n${heading}\n`);
+  assert.ok(start >= 0, `${skill} keeps "${heading}"`);
+  const end = source.indexOf("\n## ", start + heading.length + 2);
+  return source.slice(start + heading.length + 2, end < 0 ? undefined : end);
+};
+
+test("project setup builds a layered gate list from the project's own scripts instead of every gate", () => {
+  const source = read(skill);
+  assert.doesNotMatch(source, /prefer running every gate/u);
+  const understood = blocks(sectionOf(source, "## Understand the project before choosing workflows"));
+  const gates = understood.filter((block) => /\blayered\b/iu.test(block));
+  assert.equal(gates.length, 1, "one paragraph describes the layered gate list");
+  assert.match(gates[0]!, /project's own scripts/u);
+  assert.match(gates[0]!, /\bwhen\b.*\bglobs?\b|\bglobs?\b.*\bwhen\b/iu);
+  assert.match(gates[0]!, /\bgroups?\b/iu);
+});
+
+test("project setup's audit names a suite over two minutes without when globs as a finding", () => {
+  // The fixture-backed check, a six-minute suite with no when producing a finding,
+  // belongs to Machine Shop's audit-project; this pins the guidance an orchestrator follows.
+  const audits = blocks(read(skill)).filter((block) => /more than two minutes/iu.test(block));
+  assert.equal(audits.length, 1, "one paragraph states the two-minute audit rule");
+  assert.match(audits[0]!, /\bwhen\b/u);
+  assert.match(audits[0]!, /\bglobs?\b/iu);
+  assert.match(audits[0]!, /\bfindings?\b/iu);
+  assert.match(audits[0]!, /\bnames?\b|\bnaming\b/iu);
+});
+
+test("project setup proposes one implementer with layered gates, an advisory review, verify and investigate", () => {
+  const source = read(skill);
+  const built = blocks(sectionOf(source, "## Build the smallest useful set"));
+  const suites = built.filter((block) => /\blayered gates\b/iu.test(block) && /\badvisory review\b/iu.test(block));
+  assert.equal(suites.length, 1, "one paragraph proposes the suite");
+  assert.match(suites[0]!, /\bone implementer\b/iu);
+  assert.match(suites[0]!, /\bverify\b/u);
+  assert.match(suites[0]!, /\binvestigate\b/u);
+  assert.match(suites[0]!, /model-free/iu);
+  // Falsify and tests first are proposed only where the project's instructions ask for them.
+  const careful = blocks(source).filter((block) => /\bfalsify\b|\btests first\b/iu.test(block));
+  assert.ok(careful.length > 0, "the skill says when falsify and tests first belong in the suite");
+  for (const block of careful) assert.match(block, /instructions ask/iu, `careful patterns proposed by default: ${block}`);
+});

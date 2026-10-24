@@ -204,6 +204,9 @@ See [project orchestrator setup](docs/integrations.md#project-orchestrator-setup
 
 A few rules of thumb:
 
+- Restrict by reversibility, not by judgment: use layered gates and deliver a draft
+  with open findings when checks are green. Enforce forbidden paths and require
+  authorization for irreversible effects.
 - Run setup when onboarding a project or when coverage has a real gap, not for
   every assignment. It builds working workflows, not just recommendations, and
   doesn't impose a fixed suite.

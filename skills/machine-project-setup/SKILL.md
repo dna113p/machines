@@ -21,6 +21,13 @@ local definition. Do not stop after listing opportunities when safe implementati
 is possible. A good result is a small working set and a clear route into it, not
 the largest catalog. Keep simple tasks direct.
 
+Restrict by reversibility, not by judgment. Preserve explicit assignment constraints.
+
+| Reported: the Agent decides | Enforced: the Machine stops, or a person decides |
+| --- | --- |
+| Scope additions and assumptions | Forbidden paths and irreversible effects: publishing, deleting or migrating data, contract changes, force pushes, credentials |
+| Edge cases, review notes, test/plan ordering, authorized worktree commits | Unmet acceptance criteria, regressions, safety defects, weakening or deleting existing tests |
+
 ## Understand the project before choosing workflows
 
 Read its instruction files, architecture and entry points, package/build scripts,
@@ -29,18 +36,19 @@ types, quality gates, recurring failure modes, and decisions needing a Human.
 Include domain-specific work, not just generic coding stages. Use only relevant,
 available project context; distinguish observed needs from speculative ones.
 
-Inventory the project's deterministic checks before designing any workflow, by
-class: lint, types, tests, build, and a live check that drives the real artifact
-(a packaging smoke, an install test, a CLI or service run against a scratch
-directory). Take them from the project's own scripts and CI, not from a fixed
-list, and run each once to learn its duration and that it leaves the checkout
-clean. Record the inventory in the map, naming the classes the project has no
-command for; a missing class is a finding for the owner, not something to
-invent. Put the resulting gate list in one project-owned place that every
-route reads (a configuration file the launchers load, not a copy in each
-launcher), so an Agent is held to the same gates a person runs. Where the
-project's checks stop at the first failure, prefer running every gate and
-reporting all failures at once: one repair round then sees them all.
+Build a layered gate list from the project's own scripts and CI: shape checks
+(lint, types, build) and focused tests always, area suites selected by changed
+paths matching their `when` globs, and independent concurrent groups with explicit
+dependencies. Include live artifact checks such as packaging or install smokes
+where the project has them. Run each check once to record its duration and confirm
+it leaves the checkout clean. Keep the list in one project-owned configuration
+that every route reads, not a copy per launcher; record missing check classes as
+findings rather than inventing commands. Report all selected failures together;
+a repair reruns only the failed check.
+
+Audit the gate list: suites that take more than two minutes need `when` globs.
+Name each suite without those globs as a finding, including its observed duration;
+for example, a six-minute suite without `when` is a finding.
 
 When Machine Shop is at hand, inspect its installed audit contract: from the umbrella,
 `npm run audit -- <project-dir>` runs Machine Shop's `audit-project`, which
@@ -194,6 +202,13 @@ Read its `docs/catalog.md` and the candidate `defaults/` sources, then run one
 from source or copy selected entries with its project-local installer; do not
 install the entire catalog by default. Its check commands, Agent bindings, and
 task inputs remain project-specific.
+
+Propose one implementer with layered gates read from the project's own scripts,
+one advisory review, `verify` for model-free checks, and `investigate` for open
+questions. Add falsify and tests first only when the project's instructions ask
+for them. Green checks deliver a draft with open findings; only enforced issues
+block delivery, and an advisory review causes at most one revision for acceptance,
+regression or safety findings.
 
 Map the major work to existing or missing workflows. Favor frequent delegation,
 important quality gates, and costly recurring mistakes. Reuse good definitions;

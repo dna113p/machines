@@ -512,7 +512,7 @@ Re-asks and role handoffs emit `{ type: "attempt", role, text }` Agent updates.
 The CLI prints them, and run status publishes the latest attempt for the current
 state, so a person can see which role is answering.
 
-Here is a complete Agent/Human feedback loop. Save as `.machines/review-task.ts`:
+Here is an opt-in Agent/Human feedback loop. Save as `.machines/review-task.ts`:
 
 ```ts
 import type { Event, MachinePrimitives } from "@dna113p/machines";
@@ -555,6 +555,17 @@ has a concrete condition to check.
 When designing verification and repair routes, follow
 [Checks the Machine owns](../skills/machine-builder/SKILL.md#checks-the-machine-owns)
 for the checks and evidence the workflow must own.
+
+Use layered checks from one project-owned gate list: shape and focused checks
+always, area suites when changed paths match their `when` globs, and independent
+concurrent groups that respect dependencies. These are workflow conventions,
+not runtime options. Deterministic Operations judge the results and report all
+selected failures; a repair reruns only the failed check. With green checks,
+deliver a draft with open findings, assumptions and scope additions, even when
+the budget is used up. Only enforced issues (forbidden paths, unmet acceptance,
+regressions, safety defects or weakened tests) block delivery; sleeping on a Human
+question is for enforced-column decisions such as irreversible effects or login
+needs. A draft does not authorize those effects.
 
 ### Handling a usage limit in the Machine
 
