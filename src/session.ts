@@ -5,6 +5,7 @@ import type { RunEnding } from "./endings.ts";
 import { startMachineHost, type HostedHumanRequest, type MachineHostOptions, type MachineHostRun } from "./host.ts";
 import type { AgentUpdate } from "./index.ts";
 import type { PrepareMachineRunOptions } from "./launcher.ts";
+import type { RunStatusSession } from "./run-status.ts";
 
 export type RunStatus = "running" | "waiting" | "completed" | "failed";
 
@@ -26,6 +27,8 @@ export interface RunSnapshot {
   readonly attempt?: Pick<Extract<AgentUpdate, { type: "attempt" }>, "role" | "text">;
   /** Present while the current Agent state waits for a usage limit to reset; `status` stays `running`. */
   readonly limit?: { readonly text: string; readonly until?: string };
+  /** Whether the current Agent state's latest call continued its named session, or why it started fresh. */
+  readonly session?: RunStatusSession;
   readonly human?: HostedHumanRequest;
   readonly error?: string;
 }
@@ -44,6 +47,7 @@ interface RunRecord {
   agent?: Extract<AgentUpdate, { type: "identity" }>;
   limit?: RunSnapshot["limit"];
   attempt?: RunSnapshot["attempt"];
+  session?: RunSnapshot["session"];
   error?: string;
 }
 
@@ -90,6 +94,7 @@ export class MachineSession {
             run.agent = undefined;
             run.limit = undefined;
             run.attempt = undefined;
+            run.session = undefined;
           }
           run.state = state;
         }),
@@ -99,7 +104,12 @@ export class MachineSession {
             run.attempt = { role: agent.role, text: agent.text };
             run.agent = undefined;
             run.limit = undefined;
+            run.session = undefined;
           });
+          else if (agent.type === "session" && agent.name !== undefined && agent.text !== undefined) {
+            const { name, status, reason, text } = agent;
+            update("updated", (run) => { run.session = { name, status, text, ...(reason === undefined ? {} : { reason }) }; });
+          }
           // A swap while every preset is being tried again leaves the wait as it is shown.
           else if (agent.type === "limit" && agent.status !== "swapped") {
             update("updated", (run) => {
@@ -227,6 +237,7 @@ export class MachineSession {
     run.agent = undefined;
     run.limit = undefined;
     run.attempt = undefined;
+    run.session = undefined;
     run.updatedAt = Date.now();
     const terminal = [...this.#runs.values()]
       .filter((item) => !isActive(item.status))
@@ -267,6 +278,7 @@ function snapshot(run: RunRecord): RunSnapshot {
     elapsedSeconds: Math.floor(((isActive(run.status) ? Date.now() : run.updatedAt) - run.startedAt) / 1_000),
     ...(run.agent === undefined ? {} : { agent: { ...run.agent } }),
     ...(run.attempt === undefined ? {} : { attempt: { ...run.attempt } }),
+    ...(run.session === undefined ? {} : { session: { ...run.session } }),
     ...(run.limit === undefined ? {} : { limit: { ...run.limit } }),
     ...(run.human === undefined ? {} : { human: structuredClone(run.human) }),
     ...(run.error === undefined ? {} : { error: run.error }),

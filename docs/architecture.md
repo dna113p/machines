@@ -54,8 +54,9 @@ MCP server ────┘       ↑
 | `src/system-one-http.ts` | Shared bounded HTTP transport for the self-hosted providers |
 | `services/laya/server.py` | Opt-in, externally managed single-checkpoint Python Choice bridge |
 | `src/agent-protocol.ts` | Shared Agent prompt instructions and Machines event decoding |
+| `src/agent-session.ts` | Named Agent session records, the continue-or-fresh decision for one call, and its evidence |
 | `src/agent-limit.ts` | Typed provider usage-limit error and its recognition across module copies |
-| `src/agent-limits.ts` | Limit-aware runner: fallback order, handoff note, reset waiting, per-run memory of limited presets, report-only requests |
+| `src/agent-limits.ts` | Limit-aware runner: fallback order, handoff note, reset waiting, per-run memory of limited presets, report-only requests, sessions kept by another preset |
 | `src/discovery.ts` | Project/global definition locations and precedence |
 | `src/agent-profiles.ts` | Named JSON profiles, atomic activation snapshots, strict provider filtering and scoped tuning |
 | `src/agent-tuning.ts` | Public runner capability contract; adapters validate and construct tuned runners |

@@ -37,6 +37,8 @@ export interface RunStatusRecord {
   readonly limit?: RunStatusLimit;
   /** Latest further Agent attempt in this state. */
   readonly attempt?: RunStatusAttempt;
+  /** Whether the current Agent state's latest call continued its named session, or why it started fresh. */
+  readonly session?: RunStatusSession;
   readonly retry?: RunStatusRetry;
   readonly human?: RunStatusHuman;
   /** Observation-only identity for a hosted Human wait; never a response request id. */
@@ -86,6 +88,14 @@ export interface RunStatusAgent {
 
 export type RunStatusAttempt = Pick<Extract<AgentUpdate, { type: "attempt" }>, "role" | "text">;
 
+/** The session evidence `run()` reports for an Agent call of a state that names a session. */
+export interface RunStatusSession {
+  readonly name: string;
+  readonly status: "continued" | "fresh";
+  readonly reason?: string;
+  readonly text: string;
+}
+
 /** The next Operation attempt and the deadline before it starts. */
 export interface RunStatusRetry {
   readonly attempt: number;
@@ -129,6 +139,8 @@ export interface RunStatusChange {
   readonly limit?: RunStatusLimit;
   /** Latest further Agent attempt in this state. */
   readonly attempt?: RunStatusAttempt;
+  /** Leaving the state clears it as well. */
+  readonly session?: RunStatusSession;
   readonly retry?: RunStatusRetry;
   readonly human?: RunStatusHuman;
   /** Supplied with `human` for hosted observations; cleared when the request is cleared. */
@@ -241,6 +253,7 @@ export function createRunStatusPublisher(
   let agent: RunStatusAgent | undefined;
   let limit: RunStatusLimit | undefined;
   let attempt: RunStatusAttempt | undefined;
+  let session: RunStatusSession | undefined;
   let retry: RunStatusRetry | undefined;
   let human: RunStatusHuman | undefined;
   let humanEventId: string | undefined;
@@ -276,6 +289,7 @@ export function createRunStatusPublisher(
       ...(agent === undefined ? {} : { agent }),
       ...(limit === undefined ? {} : { limit }),
       ...(attempt === undefined ? {} : { attempt }),
+      ...(session === undefined ? {} : { session }),
       ...(retry === undefined ? {} : { retry }),
       ...(human === undefined ? {} : { human }),
       ...(humanEventId === undefined ? {} : { humanEventId }),
@@ -328,6 +342,7 @@ export function createRunStatusPublisher(
         // A wait belongs to the state whose Agent is waiting.
         limit: "limit" in change ? pickLimit(change.limit) : nextState === state ? limit : undefined,
         attempt: "attempt" in change ? pickAttempt(change.attempt) : nextState === state ? attempt : undefined,
+        session: "session" in change ? pickSession(change.session) : nextState === state ? session : undefined,
         retry: "retry" in change ? change.retry : nextState === state ? retry : undefined,
         human: "human" in change ? pickHuman(change.human) : human,
         humanEventId: "human" in change ? change.human === undefined ? undefined : change.humanEventId : humanEventId,
@@ -338,12 +353,12 @@ export function createRunStatusPublisher(
         ],
       };
       // Repeated notifications for an unchanged run do not need another write.
-      if (JSON.stringify(next) === JSON.stringify({ graph, status, state, now, note, page, agent, limit, attempt, retry, human, humanEventId, deliveries })) return;
+      if (JSON.stringify(next) === JSON.stringify({ graph, status, state, now, note, page, agent, limit, attempt, session, retry, human, humanEventId, deliveries })) return;
       if (next.state !== state) {
         stateSince = new Date().toISOString();
         enter(next.state, stateSince);
       }
-      ({ graph, status, state, now, note, page, agent, limit, attempt, retry, human, humanEventId, deliveries } = next);
+      ({ graph, status, state, now, note, page, agent, limit, attempt, session, retry, human, humanEventId, deliveries } = next);
       publish();
     },
     sleep(until) {
@@ -353,6 +368,7 @@ export function createRunStatusPublisher(
       agent = undefined;
       limit = undefined;
       attempt = undefined;
+      session = undefined;
       human = undefined;
       humanEventId = undefined;
       publish();
@@ -364,6 +380,7 @@ export function createRunStatusPublisher(
       agent = undefined;
       limit = undefined;
       attempt = undefined;
+      session = undefined;
       human = pickHuman(request);
       humanEventId = undefined;
       publish();
@@ -385,6 +402,7 @@ export function createRunStatusPublisher(
       agent = undefined;
       limit = undefined;
       attempt = undefined;
+      session = undefined;
       human = undefined;
       humanEventId = undefined;
       publish();
@@ -442,7 +460,10 @@ export function runStatusObserver(
         });
       } else if (agent.type === "attempt") {
         arriving = undefined;
-        update({ attempt: { role: agent.role, text: agent.text }, agent: undefined, limit: undefined });
+        update({ attempt: { role: agent.role, text: agent.text }, agent: undefined, limit: undefined, session: undefined });
+      } else if (agent.type === "session" && agent.name !== undefined && agent.text !== undefined) {
+        update({ session: { name: agent.name, status: agent.status, text: agent.text,
+          ...(agent.reason === undefined ? {} : { reason: agent.reason }) } });
       } else if (agent.type === "limit" && agent.status !== "swapped") {
         // A swap while every preset is being tried again leaves the wait as it is published.
         update({
@@ -576,6 +597,7 @@ function isRunStatusRecord(value: unknown): value is RunStatusRecord {
   const agent = record.agent as Record<string, unknown> | null | undefined;
   const human = record.human as Record<string, unknown> | null | undefined;
   const attempt = record.attempt as Record<string, unknown> | null | undefined;
+  const session = record.session as Record<string, unknown> | null | undefined;
   const limit = record.limit as Record<string, unknown> | null | undefined;
   const continued = record.continued as Record<string, unknown> | null | undefined;
   return (continued === undefined || (continued !== null && typeof continued === "object" && isTimestamp(continued.at) && typeof continued.machineChanged === "boolean"))
@@ -609,6 +631,9 @@ function isRunStatusRecord(value: unknown): value is RunStatusRecord {
       && (human.discussion === undefined || typeof human.discussion === "boolean")))
     && (attempt === undefined || (attempt !== null && typeof attempt === "object"
       && typeof attempt.role === "string" && typeof attempt.text === "string"))
+    && (session === undefined || (session !== null && typeof session === "object" && typeof session.name === "string"
+      && (session.status === "continued" || session.status === "fresh")
+      && typeof session.text === "string" && isOptionalString(session.reason)))
     && (limit === undefined || (limit !== null && typeof limit === "object" && typeof limit.text === "string"
       && isOptionalString(limit.until)))
     && (record.answeredBy === undefined || record.answeredBy === "host")
@@ -706,6 +731,11 @@ function pickAgent(agent: RunStatusAgent | undefined): RunStatusAgent | undefine
 
 function pickAttempt(attempt: RunStatusAttempt | undefined): RunStatusAttempt | undefined {
   return attempt === undefined ? undefined : { role: attempt.role, text: attempt.text };
+}
+
+function pickSession(session: RunStatusSession | undefined): RunStatusSession | undefined {
+  return session === undefined ? undefined : { name: session.name, status: session.status, text: session.text,
+    ...(session.reason === undefined ? {} : { reason: session.reason }) };
 }
 
 function pickLimit(limit: RunStatusLimit | undefined): RunStatusLimit | undefined {

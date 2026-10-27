@@ -100,6 +100,9 @@ const agentIdentity = {
 
 const agentAttempt = { role: v.string(), text: v.string() };
 
+const sessionStatus = v.picklist(["continued", "fresh"]);
+const runSession = { name: v.string(), status: sessionStatus, reason: v.optional(v.string()), text: v.string() };
+
 const agentUpdateSchema = v.variant("type", [
   v.strictObject({ type: v.literal("identity"), ...agentIdentity }),
   v.strictObject({ type: v.literal("attempt"), ...agentAttempt }),
@@ -120,6 +123,15 @@ const agentUpdateSchema = v.variant("type", [
     to: v.optional(v.string()),
     until: v.optional(v.string()),
     text: v.string(),
+  }),
+  v.strictObject({
+    type: v.literal("session"),
+    status: sessionStatus,
+    id: v.optional(v.string()),
+    reason: v.optional(v.string()),
+    agent: v.optional(v.string()),
+    name: v.optional(v.string()),
+    text: v.optional(v.string()),
   }),
 ]);
 
@@ -182,6 +194,7 @@ const childMessageSchema = v.variant("type", [
       state: v.optional(stateValueSchema),
       agent: v.optional(v.nullable(v.object(agentIdentity))),
       attempt: v.optional(v.nullable(v.strictObject(agentAttempt))),
+      session: v.optional(v.nullable(v.strictObject(runSession))),
       limit: v.optional(v.nullable(v.strictObject({ text: v.string(), until: v.optional(v.string()) }))),
       retry: v.optional(v.nullable(v.strictObject({ attempt: v.number(), of: v.number(), due: v.string() }))),
     }),
@@ -398,13 +411,14 @@ function launchMachineHost(
       } else if (message.type === "agentUpdate") {
         observe(() => options.onAgentUpdate?.(message.update as AgentUpdate));
       } else if (message.type === "status") {
-        const { state, now, note, page, agent, limit, attempt, retry } = message.change;
+        const { state, now, note, page, agent, limit, attempt, session, retry } = message.change;
         published?.update({
           ...(state === undefined ? {} : { state: state as StateValue }),
           ...(now === undefined ? {} : { now: now ?? undefined }),
           ...(note === undefined ? {} : { note, page }),
           ...(agent === undefined ? {} : { agent: agent ?? undefined }),
           ...(attempt === undefined ? {} : { attempt: attempt ?? undefined }),
+          ...(session === undefined ? {} : { session: session ?? undefined }),
           ...(limit === undefined ? {} : { limit: limit ?? undefined }),
           ...(retry === undefined ? {} : { retry: retry ?? undefined }),
         });
@@ -577,6 +591,7 @@ function runChildHost(): void {
           ...(change.state === undefined ? {} : { state: change.state }),
           ...("agent" in change ? { agent: change.agent ?? null } : {}),
           ...("attempt" in change ? { attempt: change.attempt ?? null } : {}),
+          ...("session" in change ? { session: change.session ?? null } : {}),
           ...("limit" in change ? { limit: change.limit ?? null } : {}),
           ...("retry" in change ? { retry: change.retry ?? null } : {}),
         },

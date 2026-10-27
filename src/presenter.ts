@@ -1,4 +1,5 @@
 import type { AgentReporter, AgentRunner, HumanRequest } from "./index.ts";
+import type { AgentSessionRecord } from "./agent-session.ts";
 import { mergePresentation } from "./human-request.ts";
 import { machineMermaid, type RunGraph } from "./run-graph.ts";
 
@@ -7,6 +8,8 @@ export const presenterTimeoutMs = 120_000;
 export interface RunHistory {
   readonly trail: readonly string[];
   readonly summaries: readonly { readonly state: string; readonly role: string; readonly summary: string }[];
+  /** Native Agent sessions kept under the workflow's session names; absent when no state names one. */
+  readonly sessions?: readonly AgentSessionRecord[];
 }
 
 export interface PresenterInput {

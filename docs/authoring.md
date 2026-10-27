@@ -612,6 +612,62 @@ failure uses the re-ask and role fallback described above. The event is plain
 JSON, so a transition action can keep it for a later prompt or the Machine's output. Direct `run()` callers get the same event from
 their own runners.
 
+### Continuing an Agent session
+
+Each Agent call normally starts a fresh native session, so a state that loops
+back to the same role, after a failed check or a review finding, rebuilds its
+picture from the prompt alone. Name a session to send the follow-up into the
+conversation the earlier call had:
+
+```ts
+implement: agent(() => assignment(), { completed: "check" },
+  { using: "implementer", session: "implementer" }),
+check: operation(runChecks, { passed: "done", failed: "repair" }),
+repair: agent(() => `${assignment()}\n\nThe checks failed:\n${failures}`, { completed: "check" }, {
+  using: "implementer",
+  session: "implementer",
+  followUp: () => `The checks failed:\n${failures}`,
+}),
+```
+
+`session` names a conversation within this run; any states may share it. Each
+call that names it keeps its native session, and the run records the latest one
+under that name. A later call continues it and sends `followUp`, or the full
+prompt when `followUp` is omitted. The prompt itself stays complete, because a
+call that cannot continue runs fresh with it instead, and nothing fails. A call
+starts fresh when:
+
+- no earlier call kept a session under that name, including a run continued
+  from a checkpoint that holds none, or the latest call that answered under it
+  kept none, as when a fallback role or preset without sessions answered;
+- another role answers, such as the state's `fallback` role, or, under the
+  launcher, another preset, such as a usage-limit fallback preset;
+- the state's `cwd` differs from the earlier call's;
+- the runner cannot find the session any more; or
+- the runner keeps no sessions. The Claude Code and Codex runners keep them;
+  the others ignore `session` and run the full prompt.
+
+A re-ask continues the session its failed attempt kept, adding the usual
+"last attempt returned no outcome" line to the follow-up. Session records travel
+in the run's checkpoint, so a run that sleeps and continues in another process
+can still continue them.
+
+Every call of a state that names a session reports a `session` Agent update:
+`{ type: "session", name, status: "continued" | "fresh", id, agent, reason, text }`,
+where `reason` says why a call started fresh and `agent` names the preset under
+the launcher. The CLI prints its `text`, such as
+`Agent session "implementer" continued 5f0c… with claude-opus`, and run status
+publishes the current state's latest one as `session`. When a usage limit hands
+a call to another preset, that preset reports its own update, so a call whose
+limited preset continued and whose fallback started fresh reports both. A state without `session`
+behaves as before: its runner keeps no session and reports none.
+
+Runners see the request's `session` field. With `session: {}` a runner that can
+keep its session does so and reports `{ type: "session", status: "fresh", id }`.
+With `session.resume`, it continues `resume.id` with `resume.prompt` instead of
+`prompt` and reports `status: "continued"`; when that session cannot be resumed
+before any work starts, it runs `prompt` fresh and reports why in `reason`.
+
 ## Agent presets
 
 Named Agent states select a semantic role with `using`. Declare each named role in
@@ -935,7 +991,7 @@ machine run review-task --agent reviewer=claude-opus -- "Review the change"
 
 The runner starts the official CLI in its documented non-interactive mode
 (`claude --print --output-format stream-json`) with a fresh turn for each Agent
-invocation. It never reads, copies, or forwards credentials: authentication is
+invocation, unless the state [continues a session](#continuing-an-agent-session). It never reads, copies, or forwards credentials: authentication is
 whatever that CLI already uses on this computer, a Claude subscription login or
 an API key. A set `ANTHROPIC_API_KEY` makes Claude Code bill the API instead of
 a subscription; remove it from the preset's environment when that is not intended.
@@ -990,8 +1046,12 @@ Options:
 - `allowedTools` / `disallowedTools`: permission rules added for this runner, such
   as `["Bash(npm test)"]`. Deny rules win over allow rules in settings. Blocking
   the edit tools does not stop an allowed `Bash` from writing files.
-- `sessionPersistence`: defaults to `false`, so no resumable session is saved. This
-  runner does not resume sessions.
+- `sessionPersistence`: unset, a turn saves a resumable session only when its
+  state names a [session](#continuing-an-agent-session): a new one is started
+  with `--session-id`, and a later call continues it with `--resume <id>`. A
+  session Claude Code cannot find is refused before the turn starts, and the
+  call runs fresh. `false` saves none, so such states always start fresh; `true`
+  saves every turn's session.
 - `extraUsage`: `limit` (default) or `allow`. See below.
 - `output`: `stream` (default) or `capture`, as for the Codex runner.
 
@@ -1039,7 +1099,10 @@ export default ({ codexAgent }: { codexAgent: typeof import("@dna113p/machines/c
 ```
 
 Direct callers can import `codexAgent` from `@dna113p/machines/codex`. The runner
-uses `codex exec --json` with a fresh turn for each Agent invocation. It sends the
+uses `codex exec --json` with a fresh turn for each Agent invocation, unless the
+state [continues a session](#continuing-an-agent-session): then it runs
+`codex exec … resume <thread id> -`, reading the id from Codex's `thread.started`
+record, and runs fresh when Codex cannot find the thread. It sends the
 prompt through stdin and reads the Machines event from Codex's final-response
 file; earlier progress messages do not determine the outcome. It reports agent
 messages and tool activity without forwarding raw protocol JSON or reasoning.
@@ -1051,8 +1114,9 @@ Options:
   The last choice disables the sandbox. The runner uses approval policy `never`;
   it cannot forward permission prompts through Machines.
 - `skipGitRepoCheck: true`: explicitly permits a workspace outside a Git repository.
-- `ephemeral`: defaults to `true`, avoiding saved session rollout files. Set it to
-  `false` to let Codex persist the session; this runner does not resume sessions.
+- `ephemeral`: unset, a turn saves its session rollout file only when its state
+  names a [session](#continuing-an-agent-session). `true` saves none, so such
+  states always start fresh; `false` saves every turn's session.
 - `model` and `effort`: override `CODEX_MODEL` / `CODEX_EFFORT`, then
   `MACHINES_AGENT_MODEL` / `MACHINES_AGENT_EFFORT`. The `env` option overrides
   matching parent variables. With no setting, Codex selects its configured values;

@@ -908,7 +908,9 @@ function createRunStatus(machinePath: string): RunStatus {
         console.error(`● ${name} · ${formatState(state)}`);
       },
       onAgentUpdate(update) {
-        if (update.type === "limit" || update.type === "attempt") console.error(update.text.replace(/\s+/gu, " "));
+        if (update.type === "limit" || update.type === "attempt" || (update.type === "session" && update.text !== undefined)) {
+          console.error(update.text!.replace(/\s+/gu, " "));
+        }
       },
       onHumanInput() {},
       succeed() {},
@@ -925,6 +927,7 @@ function createRunStatus(machinePath: string): RunStatus {
   let agentIdentity: Partial<Extract<AgentUpdate, { type: "identity" }>> = {};
   let agentLimit = "";
   let agentAttempt = "";
+  let agentSession = "";
   let agentWaiting = false;
   let refresh: NodeJS.Timeout | undefined;
   const tools = new Map<string, { title: string; status?: Extract<AgentUpdate, { type: "tool" }>["status"] }>();
@@ -953,9 +956,10 @@ function createRunStatus(machinePath: string): RunStatus {
       : `\n  ${yellow(truncate(stripVTControlCharacters(agentLimit).replace(/\s+/gu, " "), width))}`;
 
     const attemptLine = agentAttempt === "" ? "" : `\n  ${dim(truncate(stripVTControlCharacters(agentAttempt).replace(/\s+/gu, " "), width))}`;
+    const sessionLine = agentSession === "" ? "" : `\n  ${dim(truncate(stripVTControlCharacters(agentSession).replace(/\s+/gu, " "), width))}`;
     return activityExpanded
-      ? `${status}${identityLine}${attemptLine}${limitLine}\n${activityText()}`
-      : `${status}${identityLine}${attemptLine}${limitLine}`;
+      ? `${status}${identityLine}${attemptLine}${sessionLine}${limitLine}\n${activityText()}`
+      : `${status}${identityLine}${attemptLine}${sessionLine}${limitLine}`;
   }
 
   function completedText() {
@@ -1062,6 +1066,7 @@ function createRunStatus(machinePath: string): RunStatus {
         agentOutput = (agentOutput + update.text).slice(-32_768);
       } else if (update.type === "attempt") {
         agentAttempt = update.text;
+        agentSession = "";
         agentIdentity = {};
         agentOutput = "";
         agentLimit = "";
@@ -1071,6 +1076,8 @@ function createRunStatus(machinePath: string): RunStatus {
         // A wait stays on screen while its presets are tried again, until one of them resumes.
         if (update.status !== "swapped") agentWaiting = update.status === "waiting";
         if (update.status !== "swapped" || !agentWaiting) agentLimit = update.text;
+      } else if (update.type === "session") {
+        if (update.text !== undefined) agentSession = update.text;
       } else {
         const previous = tools.get(update.id);
         tools.set(update.id, {
@@ -1100,6 +1107,7 @@ function createRunStatus(machinePath: string): RunStatus {
       agentIdentity = {};
       agentLimit = "";
       agentAttempt = "";
+      agentSession = "";
       agentWaiting = false;
       tools.clear();
 
