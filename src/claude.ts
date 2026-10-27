@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
 import * as v from "valibot";
 
@@ -25,7 +26,11 @@ export interface ClaudeAgentOptions {
   readonly allowedTools?: readonly string[];
   /** Tools or permission rules to deny regardless of Claude Code's settings. */
   readonly disallowedTools?: readonly string[];
-  /** Defaults to false, so each invocation does not save a resumable Claude Code session. */
+  /**
+   * Unset, an invocation saves a resumable Claude Code session only when its
+   * Agent state names a session. `false` never saves one, so such a state
+   * always starts fresh; `true` always saves one.
+   */
   readonly sessionPersistence?: boolean;
   /**
    * Defaults to "limit": once the plan limit is used up and Claude Code starts
@@ -37,8 +42,8 @@ export interface ClaudeAgentOptions {
 }
 
 /**
- * Runs one fresh, non-interactive Claude Code turn using the installed CLI and
- * its existing login. Authentication, settings, and permission rules stay in
+ * Runs one non-interactive Claude Code turn using the installed CLI and its
+ * existing login: fresh, or continuing a session an earlier call kept. Authentication, settings, and permission rules stay in
  * Claude Code; this runner never reads or forwards credentials.
  */
 export function claudeAgent(
@@ -73,152 +78,183 @@ function createClaudeAgent(command: string, args: readonly string[], options: Cl
       ...(effort === undefined ? {} : { thinking: effort }),
     });
 
-    let stderr = "";
-    try {
-      const child = spawn(command, [
-        ...args,
-        "--print", "--output-format", "stream-json", "--verbose",
-        "--permission-mode", options.permissionMode ?? "dontAsk",
-        ...(options.sessionPersistence === true ? [] : ["--no-session-persistence"]),
-        ...(model === undefined ? [] : ["--model", model]),
-        ...(effort === undefined ? [] : ["--effort", effort]),
-        ...(options.tools === undefined ? [] : ["--tools", options.tools.join(",")]),
-        ...(options.allowedTools === undefined ? [] : ["--allowed-tools", options.allowedTools.join(",")]),
-        ...(options.disallowedTools === undefined ? [] : ["--disallowed-tools", options.disallowedTools.join(",")]),
-      ], { cwd: request.cwd, env, stdio: ["pipe", "pipe", "pipe"] });
-
-      const exited = new Promise<void>((resolve, reject) => {
-        child.once("error", reject);
-        child.stdin.once("error", reject);
-        child.once("close", (code, signal) => {
-          if (code === 0) resolve();
-          else reject(new Error(signal === null
-            ? `Process exited with code ${code}`
-            : `Process terminated by ${signal}`));
-        });
-      });
-      // Attach handlers before reading stdout: errors can arrive while it drains.
-      void exited.catch(() => {});
-      child.stderr.setEncoding("utf8");
-      child.stderr.on("data", (chunk: string) => {
-        stderr += chunk;
-        if (outputMode === "stream") process.stderr.write(chunk);
-      });
-      const lines = createInterface({ input: child.stdout });
-      const toolTitles = new Map<string, string>();
-      let result: { readonly failed: boolean; readonly text: string; readonly apiError?: ApiError } | undefined;
-      // The CLI reports a limit beside its messages: on the last top-level
-      // assistant record and in the latest rate-limit information.
-      let assistantError: ApiError = {};
-      let rateLimit: RateLimitInfo | undefined;
-      // The CLI streams one record per content block, and its final result
-      // joins the text blocks of the closing message.
-      let closingMessage: string | undefined;
-      let closingText = "";
-      const emitMessage = (text: string) => {
-        if (text === "") return;
-        report?.({ type: "output", text: `${text}${text.endsWith("\n") ? "" : "\n"}` });
-        if (outputMode === "stream") process.stdout.write(`${text}${text.endsWith("\n") ? "" : "\n"}`);
-      };
-
+    const keep = request.session !== undefined && options.sessionPersistence !== false;
+    const resume = keep ? request.session?.resume : undefined;
+    if (resume !== undefined) {
       try {
-        child.stdin.end(agentPrompt(request));
-        for await (const line of lines) {
-          const record = decodeRecord(line);
-          if (record === undefined) continue;
-          if (record.type === "malformed-result") {
-            // An unreadable final result must not leave an earlier one in effect.
-            result = { failed: true, text: "Claude returned a malformed final result" };
-          } else if (record.type === "system") {
-            // The CLI resolves aliases and defaults; report what actually runs.
-            report?.({
-              type: "identity",
-              harness,
-              model: record.model,
-              ...(effort === undefined ? {} : { thinking: effort }),
-            });
-          } else if (record.type === "rate_limit_event") {
-            const info = record.rate_limit_info;
-            if (info?.isUsingOverage === true && options.extraUsage !== "allow") {
-              // The plan limit is already used up; continuing would spend paid credits.
-              throw new AgentLimitError(
-                "Claude plan limit reached; extra usage is not used",
-                agentLimit(harness, info),
-              );
-            }
-            // Information without a recognised status does not replace what is known.
-            if (info?.status !== undefined) rateLimit = info;
-          } else if (record.type === "result") {
-            result = {
-              failed: record.is_error === true || record.subtype !== "success",
-              text: record.result ?? record.errors?.join("\n") ?? record.subtype,
-              ...(record.is_error === true
-                ? { apiError: { name: record.api_error, rateLimited: record.api_error_status === 429 } }
-                : {}),
-            };
-          } else if (record.parent_tool_use_id !== undefined && record.parent_tool_use_id !== null) {
-            // Subagent activity belongs to the parent's tool call, not the final answer.
-          } else if (record.type === "assistant") {
-            assistantError = { name: record.api_error, rateLimited: record.error === "rate_limit" };
-            const info = record.api_error_params?.rate_limit_info;
-            if (info?.status !== undefined) rateLimit = info;
-            const message = record.message.id ?? undefined;
-            if (message === undefined || message !== closingMessage) closingText = "";
-            closingMessage = message;
-            for (const block of record.message.content) {
-              if (block.type === "text") {
-                closingText += block.text;
-                emitMessage(block.text);
-              } else if (block.type === "tool_use") {
-                toolTitles.set(block.id, block.name);
-                report?.({ type: "tool", id: block.id, title: block.name, status: "in_progress" });
+        return await turn({ resume: resume.id, prompt: resume.prompt });
+      } catch (cause) {
+        if (!(cause instanceof SessionUnavailable)) throw cause;
+        // Nothing ran: the full prompt starts a new session.
+        return turn({ prompt: request.prompt, reason: `session ${resume.id} could not be resumed: ${cause.message}` });
+      }
+    }
+    return turn({ prompt: request.prompt });
+
+    async function turn(session: { readonly resume?: string; readonly prompt: string; readonly reason?: string }) {
+      const fresh = keep && session.resume === undefined ? randomUUID() : undefined;
+      let started = false;
+      let stderr = "";
+      try {
+        const child = spawn(command, [
+          ...args,
+          "--print", "--output-format", "stream-json", "--verbose",
+          "--permission-mode", options.permissionMode ?? "dontAsk",
+          ...(session.resume !== undefined ? ["--resume", session.resume]
+            : fresh !== undefined ? ["--session-id", fresh]
+            : options.sessionPersistence === true ? [] : ["--no-session-persistence"]),
+          ...(model === undefined ? [] : ["--model", model]),
+          ...(effort === undefined ? [] : ["--effort", effort]),
+          ...(options.tools === undefined ? [] : ["--tools", options.tools.join(",")]),
+          ...(options.allowedTools === undefined ? [] : ["--allowed-tools", options.allowedTools.join(",")]),
+          ...(options.disallowedTools === undefined ? [] : ["--disallowed-tools", options.disallowedTools.join(",")]),
+        ], { cwd: request.cwd, env, stdio: ["pipe", "pipe", "pipe"] });
+
+        const exited = new Promise<void>((resolve, reject) => {
+          child.once("error", reject);
+          child.stdin.once("error", reject);
+          child.once("close", (code, signal) => {
+            if (code === 0) resolve();
+            else reject(new Error(signal === null
+              ? `Process exited with code ${code}`
+              : `Process terminated by ${signal}`));
+          });
+        });
+        // Attach handlers before reading stdout: errors can arrive while it drains.
+        void exited.catch(() => {});
+        child.stderr.setEncoding("utf8");
+        child.stderr.on("data", (chunk: string) => {
+          stderr += chunk;
+          if (outputMode === "stream") process.stderr.write(chunk);
+        });
+        const lines = createInterface({ input: child.stdout });
+        const toolTitles = new Map<string, string>();
+        let result: { readonly failed: boolean; readonly text: string; readonly apiError?: ApiError } | undefined;
+        // The CLI reports a limit beside its messages: on the last top-level
+        // assistant record and in the latest rate-limit information.
+        let assistantError: ApiError = {};
+        let rateLimit: RateLimitInfo | undefined;
+        // The CLI streams one record per content block, and its final result
+        // joins the text blocks of the closing message.
+        let closingMessage: string | undefined;
+        let closingText = "";
+        const emitMessage = (text: string) => {
+          if (text === "") return;
+          report?.({ type: "output", text: `${text}${text.endsWith("\n") ? "" : "\n"}` });
+          if (outputMode === "stream") process.stdout.write(`${text}${text.endsWith("\n") ? "" : "\n"}`);
+        };
+
+        try {
+          child.stdin.end(agentPrompt({ ...request, prompt: session.prompt }));
+          for await (const line of lines) {
+            const record = decodeRecord(line);
+            if (record === undefined) continue;
+            if (record.type === "malformed-result") {
+              // An unreadable final result must not leave an earlier one in effect.
+              result = { failed: true, text: "Claude returned a malformed final result" };
+            } else if (record.type === "system") {
+              // The CLI resolves aliases and defaults; report what actually runs.
+              report?.({
+                type: "identity",
+                harness,
+                model: record.model,
+                ...(effort === undefined ? {} : { thinking: effort }),
+              });
+              if (keep && !started) {
+                const id = record.session_id ?? session.resume ?? fresh;
+                report?.({ type: "session", status: session.resume === undefined ? "fresh" : "continued",
+                  ...(id === undefined ? {} : { id }), ...(session.reason === undefined ? {} : { reason: session.reason }) });
+              }
+              started = true;
+            } else if (record.type === "rate_limit_event") {
+              const info = record.rate_limit_info;
+              if (info?.isUsingOverage === true && options.extraUsage !== "allow") {
+                // The plan limit is already used up; continuing would spend paid credits.
+                throw new AgentLimitError(
+                  "Claude plan limit reached; extra usage is not used",
+                  agentLimit(harness, info),
+                );
+              }
+              // Information without a recognised status does not replace what is known.
+              if (info?.status !== undefined) rateLimit = info;
+            } else if (record.type === "result") {
+              result = {
+                failed: record.is_error === true || record.subtype !== "success",
+                text: record.result ?? record.errors?.join("\n") ?? record.subtype,
+                ...(record.is_error === true
+                  ? { apiError: { name: record.api_error, rateLimited: record.api_error_status === 429 } }
+                  : {}),
+              };
+            } else if (record.parent_tool_use_id !== undefined && record.parent_tool_use_id !== null) {
+              // Subagent activity belongs to the parent's tool call, not the final answer.
+            } else if (record.type === "assistant") {
+              assistantError = { name: record.api_error, rateLimited: record.error === "rate_limit" };
+              const info = record.api_error_params?.rate_limit_info;
+              if (info?.status !== undefined) rateLimit = info;
+              const message = record.message.id ?? undefined;
+              if (message === undefined || message !== closingMessage) closingText = "";
+              closingMessage = message;
+              for (const block of record.message.content) {
+                if (block.type === "text") {
+                  closingText += block.text;
+                  emitMessage(block.text);
+                } else if (block.type === "tool_use") {
+                  toolTitles.set(block.id, block.name);
+                  report?.({ type: "tool", id: block.id, title: block.name, status: "in_progress" });
+                }
+              }
+            } else if (typeof record.message.content !== "string") {
+              for (const block of record.message.content) {
+                if (block.type !== "tool_result") continue;
+                const title = toolTitles.get(block.tool_use_id);
+                report?.({
+                  type: "tool",
+                  id: block.tool_use_id,
+                  ...(title === undefined ? {} : { title }),
+                  status: block.is_error === true ? "failed" : "completed",
+                });
               }
             }
-          } else if (typeof record.message.content !== "string") {
-            for (const block of record.message.content) {
-              if (block.type !== "tool_result") continue;
-              const title = toolTitles.get(block.tool_use_id);
-              report?.({
-                type: "tool",
-                id: block.tool_use_id,
-                ...(title === undefined ? {} : { title }),
-                status: block.is_error === true ? "failed" : "completed",
-              });
-            }
           }
-        }
-        // Only a final result that ended on an API error can be a limit. The latest
-        // rate-limit information names it and its reset, whatever its own status.
-        const limit = result?.apiError !== undefined
-          && reachedLimit(result.apiError, assistantError, rateLimit, result.text)
-          ? agentLimit(harness, rateLimit)
-          : undefined;
-        try {
-          await exited;
-        } catch (cause) {
-          // An empty result adds nothing to the exit, but a limit it carries is still reported.
-          if (result === undefined || (result.text === "" && limit === undefined)) throw cause;
-          const message = cause instanceof Error ? cause.message : String(cause);
-          throw turnFailure(result.text === "" ? message : `${message}: ${result.text}`, limit, { cause });
-        }
-        if (result === undefined) throw new Error("Claude exited without a final result");
-        if (result.failed) throw turnFailure(result.text, limit);
+          // Only a final result that ended on an API error can be a limit. The latest
+          // rate-limit information names it and its reset, whatever its own status.
+          const limit = result?.apiError !== undefined
+            && reachedLimit(result.apiError, assistantError, rateLimit, result.text)
+            ? agentLimit(harness, rateLimit)
+            : undefined;
+          if (session.resume !== undefined && !started && limit === undefined) {
+            // The CLI refuses a session it cannot find before it starts the turn.
+            const failed = await exited.then(() => result?.failed ?? true, () => true);
+            if (failed) throw new SessionUnavailable(result?.text || stderr.trim().split("\n").at(-1) || "Claude did not start the turn");
+          }
+          try {
+            await exited;
+          } catch (cause) {
+            // An empty result adds nothing to the exit, but a limit it carries is still reported.
+            if (result === undefined || (result.text === "" && limit === undefined)) throw cause;
+            const message = cause instanceof Error ? cause.message : String(cause);
+            throw turnFailure(result.text === "" ? message : `${message}: ${result.text}`, limit, { cause });
+          }
+          if (result === undefined) throw new Error("Claude exited without a final result");
+          if (result.failed) throw turnFailure(result.text, limit);
 
-        // Earlier messages may contain progress or a preliminary event. Only the
-        // CLI's final result determines the outcome, never accumulated activity.
-        if (withoutSpace(result.text) !== withoutSpace(closingText)) emitMessage(result.text);
-        return readAgentEvent(result.text, { adapter: "Claude", includeMessage: outputMode === "capture" });
-      } finally {
-        lines.close();
-        child.kill();
+          // Earlier messages may contain progress or a preliminary event. Only the
+          // CLI's final result determines the outcome, never accumulated activity.
+          if (withoutSpace(result.text) !== withoutSpace(closingText)) emitMessage(result.text);
+          return readAgentEvent(result.text, { adapter: "Claude", includeMessage: outputMode === "capture" });
+        } finally {
+          lines.close();
+          child.kill();
+        }
+      } catch (cause) {
+        if (cause instanceof SessionUnavailable) throw cause;
+        const message = cause instanceof Error ? cause.message : String(cause);
+        const detail = stderr.trim();
+        const text = `Claude Agent "${command}" failed in "${request.cwd}": ${message}${detail === "" ? "" : `\n${detail}`}`;
+        throw cause instanceof AgentLimitError
+          ? new AgentLimitError(text, cause.limit, { cause })
+          : new Error(text, { cause });
       }
-    } catch (cause) {
-      const message = cause instanceof Error ? cause.message : String(cause);
-      const detail = stderr.trim();
-      const text = `Claude Agent "${command}" failed in "${request.cwd}": ${message}${detail === "" ? "" : `\n${detail}`}`;
-      throw cause instanceof AgentLimitError
-        ? new AgentLimitError(text, cause.limit, { cause })
-        : new Error(text, { cause });
     }
   };
   return withAgentTuning(runner, { configure(tuning) {
@@ -236,6 +272,9 @@ function createClaudeAgent(command: string, args: readonly string[], options: Cl
     };
   } });
 }
+
+/** A resumed session that never started its turn, so the call can run fresh. */
+class SessionUnavailable extends Error {}
 
 interface ApiError {
   /** Claude Code's `api_error`, which names a plan limit. */
@@ -307,7 +346,7 @@ const rateLimitInfoSchema = v.object({
   isUsingOverage: tolerant(v.boolean()),
 });
 const recordSchema = v.variant("type", [
-  v.object({ type: v.literal("system"), subtype: v.literal("init"), model: v.string() }),
+  v.object({ type: v.literal("system"), subtype: v.literal("init"), model: v.string(), session_id: tolerant(v.string()) }),
   v.object({ type: v.literal("rate_limit_event"), rate_limit_info: tolerant(rateLimitInfoSchema) }),
   v.object({
     type: v.literal("assistant"),

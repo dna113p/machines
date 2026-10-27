@@ -21,12 +21,19 @@ export interface CodexAgentOptions {
   /** Defaults to read-only; writes and unrestricted access require an explicit choice. */
   readonly sandbox?: "read-only" | "workspace-write" | "danger-full-access";
   readonly skipGitRepoCheck?: boolean;
-  /** Defaults to true, so each invocation does not persist a Codex session. */
+  /**
+   * Unset, an invocation persists its Codex session only when its Agent state
+   * names a session. `true` never persists one, so such a state always starts
+   * fresh; `false` always persists one.
+   */
   readonly ephemeral?: boolean;
   readonly output?: "capture" | "stream";
 }
 
-/** Runs one fresh, non-interactive Codex turn using the installed CLI and its authentication. */
+/**
+ * Runs one non-interactive Codex turn using the installed CLI and its
+ * authentication: fresh, or continuing a session an earlier call kept.
+ */
 export function codexAgent(
   command = "codex",
   args: readonly string[] = [],
@@ -53,110 +60,141 @@ function createCodexAgent(command: string, args: readonly string[], options: Cod
       ...(effort === undefined ? {} : { thinking: effort }),
     });
 
-    const temporary = await mkdtemp(join(tmpdir(), "machines-codex-result-"));
-    const finalPath = join(temporary, "response.txt");
-    let stderr = "";
-    try {
-      const child = spawn(command, [
-        ...args,
-        "exec", "--json", "--color", "never",
-        "--sandbox", options.sandbox ?? "read-only",
-        "--config", 'approval_policy="never"',
-        ...(options.skipGitRepoCheck === true ? ["--skip-git-repo-check"] : []),
-        ...(options.ephemeral === false ? [] : ["--ephemeral"]),
-        ...(model === undefined ? [] : ["--model", model]),
-        ...(effort === undefined ? [] : ["--config", `model_reasoning_effort=${JSON.stringify(effort)}`]),
-        ...(serviceTier === undefined ? [] : ["--config", `service_tier=${JSON.stringify(serviceTier)}`]),
-        "--output-last-message", finalPath, "-",
-      ], { cwd: request.cwd, env, stdio: ["pipe", "pipe", "pipe"] });
-
-      const exited = new Promise<void>((resolve, reject) => {
-        child.once("error", reject);
-        child.stdin.once("error", reject);
-        child.once("close", (code, signal) => {
-          if (code === 0) resolve();
-          else reject(new Error(signal === null
-            ? `Process exited with code ${code}`
-            : `Process terminated by ${signal}`));
-        });
-      });
-      // Attach handlers before reading stdout: errors can arrive while it drains.
-      void exited.catch(() => {});
-      child.stderr.setEncoding("utf8");
-      child.stderr.on("data", (chunk: string) => {
-        stderr += chunk;
-        if (outputMode === "stream") process.stderr.write(chunk);
-      });
-      const lines = createInterface({ input: child.stdout });
-      let completed = false;
-      let failure: string | undefined;
-      let lastError: string | undefined;
-      let lastMessage: string | undefined;
-      const emitMessage = (text: string) => {
-        if (text === "") return;
-        report?.({ type: "output", text: `${text}${text.endsWith("\n") ? "" : "\n"}` });
-        if (outputMode === "stream") process.stdout.write(`${text}${text.endsWith("\n") ? "" : "\n"}`);
-      };
-
+    const keep = request.session !== undefined && options.ephemeral !== true;
+    const resume = keep ? request.session?.resume : undefined;
+    if (resume !== undefined) {
       try {
-        child.stdin.end(agentPrompt(request));
-        for await (const line of lines) {
-          const record = decodeRecord(line);
-          if (record === undefined) continue;
-          if (record.type === "turn.completed") completed = true;
-          else if (record.type === "turn.failed") failure = record.error.message;
-          else if (record.type === "error") lastError = record.message;
-          else {
-            const item = record.item;
-            if (item.type === "agent_message") {
-              if (record.type === "item.completed") {
-                lastMessage = item.text;
-                emitMessage(item.text);
+        return await turn({ resume: resume.id, prompt: resume.prompt });
+      } catch (cause) {
+        if (!(cause instanceof SessionUnavailable)) throw cause;
+        // Nothing ran: the full prompt starts a new session.
+        return turn({ prompt: request.prompt, reason: `session ${resume.id} could not be resumed: ${cause.message}` });
+      }
+    }
+    return turn({ prompt: request.prompt });
+
+    async function turn(session: { readonly resume?: string; readonly prompt: string; readonly reason?: string }) {
+      const temporary = await mkdtemp(join(tmpdir(), "machines-codex-result-"));
+      const finalPath = join(temporary, "response.txt");
+      let started = false;
+      let stderr = "";
+      try {
+        // Execution options belong to `exec`; `resume` only names the session.
+        const child = spawn(command, [
+          ...args,
+          "exec", "--json", "--color", "never",
+          "--sandbox", options.sandbox ?? "read-only",
+          "--config", 'approval_policy="never"',
+          ...(options.skipGitRepoCheck === true ? ["--skip-git-repo-check"] : []),
+          ...(keep || options.ephemeral === false ? [] : ["--ephemeral"]),
+          ...(model === undefined ? [] : ["--model", model]),
+          ...(effort === undefined ? [] : ["--config", `model_reasoning_effort=${JSON.stringify(effort)}`]),
+          ...(serviceTier === undefined ? [] : ["--config", `service_tier=${JSON.stringify(serviceTier)}`]),
+          "--output-last-message", finalPath,
+          ...(session.resume === undefined ? [] : ["resume", session.resume]),
+          "-",
+        ], { cwd: request.cwd, env, stdio: ["pipe", "pipe", "pipe"] });
+
+        const exited = new Promise<void>((resolve, reject) => {
+          child.once("error", reject);
+          child.stdin.once("error", reject);
+          child.once("close", (code, signal) => {
+            if (code === 0) resolve();
+            else reject(new Error(signal === null
+              ? `Process exited with code ${code}`
+              : `Process terminated by ${signal}`));
+          });
+        });
+        // Attach handlers before reading stdout: errors can arrive while it drains.
+        void exited.catch(() => {});
+        child.stderr.setEncoding("utf8");
+        child.stderr.on("data", (chunk: string) => {
+          stderr += chunk;
+          if (outputMode === "stream") process.stderr.write(chunk);
+        });
+        const lines = createInterface({ input: child.stdout });
+        let completed = false;
+        let failure: string | undefined;
+        let lastError: string | undefined;
+        let lastMessage: string | undefined;
+        const emitMessage = (text: string) => {
+          if (text === "") return;
+          report?.({ type: "output", text: `${text}${text.endsWith("\n") ? "" : "\n"}` });
+          if (outputMode === "stream") process.stdout.write(`${text}${text.endsWith("\n") ? "" : "\n"}`);
+        };
+
+        try {
+          child.stdin.end(agentPrompt({ ...request, prompt: session.prompt }));
+          for await (const line of lines) {
+            const record = decodeRecord(line);
+            if (record === undefined) continue;
+            if (record.type === "thread.started") {
+              if (keep && !started) {
+                report?.({ type: "session", status: session.resume === undefined ? "fresh" : "continued", id: record.thread_id,
+                  ...(session.reason === undefined ? {} : { reason: session.reason }) });
               }
-            } else {
-              const title = item.type === "command_execution" ? item.command
-                : item.type === "mcp_tool_call" ? `${item.server}/${item.tool}`
-                : item.type === "web_search" ? item.query : "File changes";
-              const status = item.status === "failed" || item.status === "declined" ? "failed"
-                : record.type === "item.completed" ? "completed" : "in_progress";
-              report?.({ type: "tool", id: item.id, title, status });
+              started = true;
+            } else if (record.type === "turn.completed") completed = true;
+            else if (record.type === "turn.failed") failure = record.error.message;
+            else if (record.type === "error") lastError = record.message;
+            else {
+              const item = record.item;
+              if (item.type === "agent_message") {
+                if (record.type === "item.completed") {
+                  lastMessage = item.text;
+                  emitMessage(item.text);
+                }
+              } else {
+                const title = item.type === "command_execution" ? item.command
+                  : item.type === "mcp_tool_call" ? `${item.server}/${item.tool}`
+                  : item.type === "web_search" ? item.query : "File changes";
+                const status = item.status === "failed" || item.status === "declined" ? "failed"
+                  : record.type === "item.completed" ? "completed" : "in_progress";
+                report?.({ type: "tool", id: item.id, title, status });
+              }
             }
           }
-        }
-        // Codex states a usage limit only in the text of a failed turn.
-        const detail = failure ?? lastError;
-        const turnFailure = (message: string, cause?: ErrorOptions) =>
-          detail !== undefined && usageLimitText.test(detail)
-            ? new AgentLimitError(message, { harness, kind: "usage" }, cause)
-            : new Error(message, cause);
-        try {
-          await exited;
-        } catch (cause) {
-          if (detail === undefined) throw cause;
-          const message = cause instanceof Error ? cause.message : String(cause);
-          throw turnFailure(`${message}: ${detail}`, { cause });
-        }
-        if (failure !== undefined) throw turnFailure(failure);
-        if (!completed) throw turnFailure(lastError ?? "Codex exited without completing its turn");
+          // Codex states a usage limit only in the text of a failed turn.
+          const detail = failure ?? lastError;
+          if (session.resume !== undefined && !started && !(detail !== undefined && usageLimitText.test(detail))
+            && await exited.then(() => !completed, () => true)) {
+            // Codex refuses a session it cannot find before it starts a thread.
+            throw new SessionUnavailable(detail ?? (stderr.trim().split("\n").at(-1) || "Codex did not start the turn"));
+          }
+          const turnFailure = (message: string, cause?: ErrorOptions) =>
+            detail !== undefined && usageLimitText.test(detail)
+              ? new AgentLimitError(message, { harness, kind: "usage" }, cause)
+              : new Error(message, cause);
+          try {
+            await exited;
+          } catch (cause) {
+            if (detail === undefined) throw cause;
+            const message = cause instanceof Error ? cause.message : String(cause);
+            throw turnFailure(`${message}: ${detail}`, { cause });
+          }
+          if (failure !== undefined) throw turnFailure(failure);
+          if (!completed) throw turnFailure(lastError ?? "Codex exited without completing its turn");
 
-        // A progress message may contain a preliminary event. Only the CLI's
-        // final-response file determines the outcome, never accumulated activity.
-        const response = await readFile(finalPath, "utf8");
-        if (response.trimEnd() !== lastMessage?.trimEnd()) emitMessage(response);
-        return readAgentEvent(response, { adapter: "Codex", includeMessage: outputMode === "capture" });
+          // A progress message may contain a preliminary event. Only the CLI's
+          // final-response file determines the outcome, never accumulated activity.
+          const response = await readFile(finalPath, "utf8");
+          if (response.trimEnd() !== lastMessage?.trimEnd()) emitMessage(response);
+          return readAgentEvent(response, { adapter: "Codex", includeMessage: outputMode === "capture" });
+        } finally {
+          lines.close();
+          child.kill();
+        }
+      } catch (cause) {
+        if (cause instanceof SessionUnavailable) throw cause;
+        const message = cause instanceof Error ? cause.message : String(cause);
+        const detail = stderr.trim();
+        const text = `Codex Agent "${command}" failed in "${request.cwd}": ${message}${detail === "" ? "" : `\n${detail}`}`;
+        throw cause instanceof AgentLimitError
+          ? new AgentLimitError(text, cause.limit, { cause })
+          : new Error(text, { cause });
       } finally {
-        lines.close();
-        child.kill();
+        await rm(temporary, { recursive: true, force: true });
       }
-    } catch (cause) {
-      const message = cause instanceof Error ? cause.message : String(cause);
-      const detail = stderr.trim();
-      const text = `Codex Agent "${command}" failed in "${request.cwd}": ${message}${detail === "" ? "" : `\n${detail}`}`;
-      throw cause instanceof AgentLimitError
-        ? new AgentLimitError(text, cause.limit, { cause })
-        : new Error(text, { cause });
-    } finally {
-      await rm(temporary, { recursive: true, force: true });
     }
   };
   return withAgentTuning(runner, { configure(tuning) {
@@ -180,6 +218,9 @@ function createCodexAgent(command: string, args: readonly string[], options: Cod
   } });
 }
 
+/** A resumed session that never started its thread, so the call can run fresh. */
+class SessionUnavailable extends Error {}
+
 // Codex 0.162.1 writes the first of these with a typographic apostrophe (U+2019).
 const usageLimitText = /^(?:You['’]ve hit your usage limit|Your workspace is out of credits|You hit your spend cap)/u;
 
@@ -192,6 +233,7 @@ const itemSchema = v.variant("type", [
   v.object({ type: v.literal("web_search"), id: v.string(), query: v.string(), status: statusSchema }),
 ]);
 const recordSchema = v.variant("type", [
+  v.object({ type: v.literal("thread.started"), thread_id: v.string() }),
   v.object({ type: v.literal("item.started"), item: itemSchema }),
   v.object({ type: v.literal("item.updated"), item: itemSchema }),
   v.object({ type: v.literal("item.completed"), item: itemSchema }),

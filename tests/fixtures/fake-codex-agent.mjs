@@ -8,6 +8,13 @@ for await (const chunk of process.stdin) prompt += chunk;
 const emit = (value) => console.log(JSON.stringify(value));
 const message = (text, id = "message") => emit({ type: "item.completed", item: { type: "agent_message", id, text } });
 if (process.env.MACHINES_CODEX_PATH_RECORD) await writeFile(process.env.MACHINES_CODEX_PATH_RECORD, finalPath);
+const resumed = args.includes("resume") ? args[args.indexOf("resume") + 1] : null;
+if (resumed?.startsWith("missing")) {
+  // Codex 0.164 refuses an unknown session before it starts a thread.
+  process.stderr.write(`Error: thread/resume: thread/resume failed: no rollout found for thread id ${resumed} (code -32600)\n`);
+  process.exit(1);
+}
+if (mode !== "exit-error") emit({ type: "thread.started", thread_id: resumed ?? "thread-new" });
 if (mode === "exit-error") {
   process.stderr.write("codex diagnostic\n");
   process.exit(3);
@@ -39,7 +46,9 @@ if (mode === "usage-limit") {
   emit({ type: "turn.failed", error: { message: limit } });
   process.exit(1);
 }
-const event = mode === "arguments"
+const event = mode === "session"
+  ? { type: "completed", resumed, ephemeral: args.includes("--ephemeral"), prompt: prompt.split("\n")[0] }
+  : mode === "arguments"
   ? { type: "completed", args, prompt, cwd: process.cwd(), envModel: process.env.CODEX_MODEL, finalPath }
   : { type: "completed", source: "fake" };
 const response = mode === "empty-final" ? ""

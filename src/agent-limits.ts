@@ -4,6 +4,7 @@ import { dirname } from "node:path";
 import { agentLimitsFile } from "./discovery.ts";
 import { AgentLimitError, agentLimitOf, readAgentQuota, type AgentQuota, type AgentLimit } from "./agent-limit.ts";
 import type { AgentReporter, AgentRequest, AgentRunner, AgentUpdate, Event } from "./index.ts";
+import { withSessionNote } from "./agent-session.ts";
 
 export interface LimitPolicy {
   /** Longest one invocation waits for a reset, from its first wait. `0` never waits. */
@@ -333,7 +334,7 @@ export function limitAwareRunner(
       throw new AgentLimitError(`${named(bound.name)} is at its usage limit (${resetText(reserved)})`, reserved.limit);
     }
     try {
-      const event = await bound.runner(request, report);
+      const event = await bound.runner(...forCandidate(request, bound, report));
       await succeeded(observed);
       return event;
     } catch (cause) {
@@ -411,15 +412,16 @@ export function limitAwareRunner(
         const trace = attemptTrace();
         let limit: AgentLimit | undefined;
         try {
-          const event = await candidate.runner(
+          const event = await candidate.runner(...forCandidate(
             interrupted ? withHandoffNote(request, handoffs) : request,
+            candidate,
             (update) => {
               trace.record(update);
               // A limited turn can still report its identity and the provider's message; a tool call is work.
               if (update.type === "tool") resume();
               report?.(update);
             },
-          );
+          ));
           resume();
           // What was remembered for a preset that answers is out of date, also for the run's other roles.
           await succeeded(observed);
@@ -572,7 +574,30 @@ function boundedReport(text: string): string {
 }
 
 function withHandoffNote(request: AgentRequest, handoffs: readonly string[]): AgentRequest {
-  return { ...request, prompt: `${request.prompt}\n\nNote: ${handoffs.join("\n\n")}` };
+  const note = `\n\nNote: ${handoffs.join("\n\n")}`;
+  const session = withSessionNote(request.session, note);
+  return { ...request, prompt: `${request.prompt}${note}`, ...(session === undefined ? {} : { session }) };
+}
+
+/**
+ * A session belongs to the preset that kept it: another candidate starts fresh
+ * with the full prompt. Session reports name the preset that made them.
+ */
+function forCandidate(
+  request: AgentRequest,
+  candidate: LimitCandidate,
+  report: AgentReporter | undefined,
+): [AgentRequest, AgentReporter | undefined] {
+  if (request.session === undefined) return [request, report];
+  const kept = request.session.resume?.agent;
+  const other = kept !== undefined && kept !== candidate.name;
+  const { resume: _resume, ...session } = request.session;
+  return [other ? { ...request, session } : request, report && ((update) => {
+    if (update.type !== "session") return report(update);
+    report({ ...update, agent: candidate.name,
+      ...(other && update.status === "fresh" && update.reason === undefined
+        ? { reason: `preset ${kept} answered the earlier call, and ${candidate.name} answers this one` } : {}) });
+  })];
 }
 
 function handoffSuffix(toolCount: number): string {

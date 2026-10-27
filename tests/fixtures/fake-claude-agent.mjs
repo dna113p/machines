@@ -15,9 +15,25 @@ if (mode === "error-exit") {
   process.exit(1);
 }
 
+const resumed = args.includes("--resume") ? args[args.indexOf("--resume") + 1] : null;
+const chosen = args.includes("--session-id") ? args[args.indexOf("--session-id") + 1] : null;
+if (resumed?.startsWith("missing")) {
+  // Claude Code 2.1 refuses an unknown session before it starts the turn.
+  process.stderr.write(`No conversation found with session ID: ${resumed}\n`);
+  emit({ type: "result", subtype: "error_during_execution", is_error: true, num_turns: 0, session_id: resumed,
+    errors: [`No conversation found with session ID: ${resumed}`] });
+  process.exit(1);
+}
+
 if (mode !== "no-init") {
   emit({ type: "system", subtype: "hook_started", hook_name: "SessionStart:startup" });
-  emit({ type: "system", subtype: "init", model: "claude-fake-1", permissionMode: "dontAsk", tools: ["Read"] });
+  emit({ type: "system", subtype: "init", model: "claude-fake-1", permissionMode: "dontAsk", tools: ["Read"],
+    session_id: resumed ?? chosen ?? "unsaved-session" });
+}
+if (mode === "session-limit") {
+  emit({ type: "result", subtype: "success", is_error: true, result: "You've hit your session limit · resets 3pm",
+    api_error: "usage_limit_reached", api_error_status: 429 });
+  process.exit(1);
 }
 
 if (mode === "activity") {
@@ -128,6 +144,8 @@ const event = mode === "arguments"
     envEffort: process.env.MACHINES_CLAUDE_EFFORT,
     promptOnStdin: prompt.includes("Do the work") && prompt.includes("MACHINES_EVENT"),
   }
+  : mode === "session"
+  ? { type: "completed", resumed, chosen, persisted: !args.includes("--no-session-persistence"), prompt: prompt.split("\n")[0] }
   : mode === "environment"
   ? { type: "completed", profile: process.env.MACHINES_TEST_PROFILE }
   : { type: "completed", source: "fake" };

@@ -8,6 +8,8 @@ export { defineEndings, type MachineEnding, type MachineEndings, type EndingKind
 export { Type } from "typebox";
 import { terminalHuman } from "./terminal-human.ts";
 import { jsonProblem } from "./json.ts";
+import { keepSession, planSession, readSessionRecords, sessionEvidence, type AgentSessionPlan, type AgentSessionRecord } from "./agent-session.ts";
+export type { AgentSessionRecord } from "./agent-session.ts";
 import { setTimeout as delay } from "node:timers/promises";
 
 import {
@@ -77,6 +79,15 @@ export interface AgentOptions {
    * that names it decides what a limit means: no fallback preset, no waiting.
    */
   readonly onLimit?: string;
+  /**
+   * Names a conversation within this run. A call continues the native session
+   * that the latest call naming it kept, when the same role and preset answer in
+   * the same directory and the runner can resume it; otherwise it starts fresh
+   * with the full prompt. Without it, runners keep no session.
+   */
+  readonly session?: string;
+  /** Sent in place of the full prompt when the call continues its session. Requires `session`. */
+  readonly followUp?: AgentPrompt;
 }
 
 export type AgentPrompt = string | (() => string);
@@ -91,13 +102,33 @@ export interface AgentRequest {
    * neither ignore it.
    */
   readonly limits?: "report";
+  /**
+   * Set for a state that names a session. A runner that can keep its native
+   * session does so and reports it with a `session` update; with `resume` it
+   * continues that session with `resume.prompt` instead of `prompt`. A runner
+   * that cannot resume runs `prompt` fresh, which is always complete.
+   */
+  readonly session?: AgentSessionRequest;
 }
 
-interface AgentInvocation extends AgentRequest {
+export interface AgentSessionRequest {
+  readonly resume?: {
+    /** The runner's session id, as an earlier call reported it. */
+    readonly id: string;
+    /** What to send into the resumed session. */
+    readonly prompt: string;
+    /** The preset that kept the session, when the launcher selected one. */
+    readonly agent?: string;
+  };
+}
+
+interface AgentInvocation extends Omit<AgentRequest, "session"> {
   readonly using: string;
   readonly reask: 0 | 1;
   readonly fallback?: string;
   readonly onLimit?: string;
+  readonly session?: string;
+  readonly followUp?: string;
 }
 
 export type AgentUpdate =
@@ -134,6 +165,21 @@ export type AgentUpdate =
     /** ISO time the wait is expected to end. */
     readonly until?: string;
     readonly text: string;
+  }
+  | {
+    /**
+     * The native session an Agent call runs in. A runner reports `status` and
+     * `id` once its session has started; a launcher adds the preset as `agent`.
+     * `run()` reports one per call of a state that names a session, adding the
+     * session's `name`, the `reason` a call started fresh, and a one-line `text`.
+     */
+    readonly type: "session";
+    readonly status: "continued" | "fresh";
+    readonly id?: string;
+    readonly reason?: string;
+    readonly agent?: string;
+    readonly name?: string;
+    readonly text?: string;
   };
 
 export type AgentReporter = (update: AgentUpdate) => void;
@@ -402,6 +448,14 @@ export function agent<const TTransitions extends Readonly<Record<string, unknown
     }
     if (fallback === using) throw new Error("Agent fallback must name a different role from using");
   }
+  const session = options.session;
+  if (session !== undefined && (typeof session !== "string" || session.trim() === "" || session !== session.trim())) {
+    throw new Error("Agent session must be a non-empty trimmed name");
+  }
+  const followUp = options.followUp;
+  if (followUp !== undefined && (session === undefined || (typeof followUp !== "string" && typeof followUp !== "function"))) {
+    throw new Error("Agent followUp must be a string or function and requires session");
+  }
   const onLimit = options.onLimit;
   if (onLimit !== undefined) {
     if (typeof onLimit !== "string" || onLimit.trim() === "" || onLimit !== onLimit.trim()) {
@@ -431,6 +485,8 @@ export function agent<const TTransitions extends Readonly<Record<string, unknown
         ...(fallback === undefined ? {} : { fallback }),
         prompt: typeof prompt === "function" ? prompt() : prompt,
         outcomes,
+        ...(session === undefined ? {} : { session }),
+        ...(followUp === undefined ? {} : { followUp: typeof followUp === "function" ? followUp() : followUp }),
         ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
         ...(onLimit === undefined ? {} : { limits: "report" as const, onLimit }),
       }),
@@ -568,7 +624,11 @@ export function run<TMachine extends AnyStateMachine>(
     let currentEntry: StateEntry;
     const trail = [...(options.continueAt?.history?.trail ?? [])];
     const summaries = [...(options.continueAt?.history?.summaries ?? [])];
-    const history = (): RunHistory => ({ trail: [...trail], summaries: summaries.map((summary) => ({ ...summary })) });
+    const sessions = new Map(readSessionRecords(options.continueAt?.history?.sessions).map((record) => [record.name, record]));
+    const cleared = new Map<string, string>();
+    const history = (): RunHistory => ({ trail: [...trail], summaries: summaries.map((summary) => ({ ...summary })),
+      // Runs that name no session keep the history they always had.
+      ...(sessions.size === 0 ? {} : { sessions: [...sessions.values()].map((record) => ({ ...record })) }) });
     const graph = machineGraph(definition);
     const waitUntil = async (due: string, signal: AbortSignal): Promise<void> => {
       if (options.onSleep && Date.parse(due) > Date.now()) {
@@ -667,6 +727,7 @@ export function run<TMachine extends AnyStateMachine>(
                   summaries.push({ state: statePaths(actor.getSnapshot().value).join(", "), role, summary: event.summary.slice(0, 4000) });
                   if (summaries.length > 5) summaries.shift();
                 },
+                { records: sessions, cleared, restored: options.continueAt !== undefined },
               ),
             ),
           }),
@@ -796,6 +857,13 @@ function continuationSnapshot(definition: AnyStateMachine, saved: NonNullable<Ru
   return persisted as unknown as AnyMachineSnapshot;
 }
 
+/** The sessions one Machine level of a run kept, and who last answered a name without keeping one. */
+interface AgentSessions {
+  readonly records: Map<string, AgentSessionRecord>;
+  readonly cleared: Map<string, string>;
+  readonly restored: boolean;
+}
+
 async function runAgentAttempts(
   input: AgentInvocation,
   runners: Readonly<Record<string, AgentRunner>>,
@@ -803,8 +871,9 @@ async function runAgentAttempts(
   signal: AbortSignal,
   state: () => StateValue,
   onOutcome: (event: Event, role: string) => void,
+  sessions: AgentSessions,
 ): Promise<Event> {
-  const { using, reask, fallback, onLimit, ...request } = input;
+  const { using, reask, fallback, onLimit, session, followUp, ...request } = input;
   const roles = [using, ...(reask === 1 ? [using] : []), ...(fallback === undefined ? [] : [fallback])];
   const transitions = Object.fromEntries(request.outcomes.map((outcome) => [outcome, true]));
   let failure: unknown;
@@ -814,7 +883,12 @@ async function runAgentAttempts(
     // A remaining usage limit skips the same-role re-ask entirely.
     if (index > 0 && role === using && agentLimitOf(failure) !== undefined) continue;
     const reason = failure instanceof Error ? failure.message : String(failure);
-    const prompt = index === 0 ? request.prompt : `${request.prompt}\n\nThe last attempt returned no outcome: ${reason}. Inspect any partial work and continue the same assignment.`;
+    const note = index === 0 ? "" : `\n\nThe last attempt returned no outcome: ${reason}. Inspect any partial work and continue the same assignment.`;
+    const prompt = `${request.prompt}${note}`;
+    // Each attempt looks again: a failed attempt may have kept a session this one continues.
+    const plan = session === undefined ? undefined
+      : planSession(session, role, request.cwd, sessions.records.get(session), sessions.restored,
+        `${followUp ?? request.prompt}${note}`, sessions.cleared.get(session));
     if (index > 0) {
       // Synchronous runner failures can precede the state's entry announcement.
       // Publish recovery only after observers know which state it belongs to.
@@ -826,23 +900,80 @@ async function runAgentAttempts(
         text: `${role === using ? "Asking again" : "Using fallback role"}: ${role}; last attempt returned no outcome: ${reason}`,
       });
     }
+    const evidence = plan === undefined ? undefined : sessionReporter(plan, role, request.cwd, sessions, report);
+    let succeeded: Event | undefined;
     try {
-      const event = await runners[role]!({ ...request, prompt }, report);
+      const event = await runners[role]!({ ...request, prompt, ...(plan === undefined ? {} : { session: plan.request }) },
+        evidence?.report ?? report);
       // Only the runtime may say that the Agent is at a limit.
       if (onLimit !== undefined && event !== null && typeof event === "object" && event.type === onLimit) {
         throw new Error(`the runner returned "${onLimit}", which this state reserves for its usage-limit event`);
       }
       assertHandledEvent("Agent", event, transitions, state());
       onOutcome(event, role);
+      succeeded = event;
       return event;
     } catch (cause) {
       signal.throwIfAborted();
       const limit = agentLimitOf(cause);
       if (limit !== undefined && onLimit !== undefined) return limitEvent(onLimit, role, limit, cause);
       failure = cause;
+    } finally {
+      await evidence?.finish(succeeded === undefined);
     }
   }
   throw failure;
+}
+
+/**
+ * Records the session a call's runner reports, and says once per answering
+ * preset whether it continued one. A call that answers without keeping a
+ * session leaves nothing under the name to continue: its conversation is not in
+ * the earlier session. A failed call keeps what it reported for a re-ask.
+ */
+function sessionReporter(
+  plan: AgentSessionPlan,
+  role: string,
+  cwd: string | undefined,
+  { records, cleared }: AgentSessions,
+  report: AgentReporter | undefined,
+): { readonly report: AgentReporter; finish(failed: boolean): Promise<void> } {
+  let reported = false;
+  let kept = false;
+  let answering: string | undefined;
+  return {
+    report(update) {
+      if (update.type === "limit" && update.status === "swapped") {
+        // The next preset answers on its own; what the limited one reported does not describe it.
+        reported = false;
+        kept = false;
+        answering = update.to;
+      }
+      if (update.type !== "session") {
+        report?.(update);
+        return;
+      }
+      reported = true;
+      if (update.id !== undefined) {
+        kept = true;
+        cleared.delete(plan.name);
+        keepSession(records, { name: plan.name, id: update.id, role,
+          ...(update.agent === undefined ? {} : { agent: update.agent }), ...(cwd === undefined ? {} : { cwd }) });
+      }
+      report?.(sessionEvidence(plan, update, role));
+    },
+    async finish(failed: boolean) {
+      if (!failed && !kept) {
+        records.delete(plan.name);
+        cleared.set(plan.name, answering === undefined ? `role "${role}"` : `preset ${answering}`);
+      }
+      if (reported) return;
+      reported = true;
+      // A runner that fails synchronously can precede the state's entry announcement.
+      await Promise.resolve();
+      report?.(sessionEvidence(plan, undefined, role, failed, answering));
+    },
+  };
 }
 
 /** The event a state that names `onLimit` receives. It is plain JSON, so a Machine can keep or publish it. */
