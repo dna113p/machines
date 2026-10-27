@@ -400,3 +400,32 @@ test("the README's rules of thumb state the rule, layered gates and delivering w
   assert.match(text, /\blayered\b/u);
   assert.match(text, /\bopen findings\b/u);
 });
+
+// The conversation that understands the work does it; Machines add checks, fresh review and delivery.
+const contextRule = [
+  "the conversation that understands",
+  "a separate feature that can run in parallel",
+  "a review that needs clean eyes",
+  "work for later as a ticket",
+  "split work by context, not by kind",
+];
+const ticketRule = ["the problem and its fences, not the design", "goal", "acceptance as observable results", "forbidden", "where the context lives"];
+
+test("builder and delegation keep work with the conversation that has its context and still prefer Machines to sub-agents", () => {
+  const problems: string[] = [];
+  for (const path of [builder, delegation]) {
+    const text = flat(read(path));
+    for (const phrase of contextRule) if (!text.includes(phrase)) problems.push(`${path} does not say "${phrase}"`);
+    if (!/machine run[^.]*(?:to|instead of) a native sub-agent/u.test(text)) problems.push(`${path} does not prefer a Machine run to a native sub-agent`);
+  }
+  assert.deepEqual(problems, []);
+  // The umbrella's entry-point tests read this phrase from every installed skill.
+  for (const path of [builder, delegation, setup]) assert.match(read(path), /^description: Use proactively/mu, `${path} lost "Use proactively"`);
+});
+
+test("delegation writes a ticket as the problem and its fences", () => {
+  const supplied = flat(section(read(delegation), "## Supply a complete assignment").join("\n"));
+  const missing = ticketRule.filter((phrase) => !supplied.includes(phrase));
+  assert.deepEqual(missing, []);
+  assert.match(supplied, /leave implementation choices[^.]*to the agent/u);
+});

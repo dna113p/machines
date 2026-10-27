@@ -183,7 +183,7 @@ and the portable plugin.
 | Skill | What it does |
 | --- | --- |
 | [machine-project-setup](skills/machine-project-setup/SKILL.md) | The project orchestrator's entry point. Inspects the project's major work, reuses or builds the Machines it needs, verifies them, and records delegation routes in `.machines/README.md` (or the project's equivalent). |
-| [machine-delegation](skills/machine-delegation/SKILL.md) | Has a coordinating agent run Machines instead of native sub-agents: find or create a workflow, launch it, supervise it, collect its result. |
+| [machine-delegation](skills/machine-delegation/SKILL.md) | Keeps work with the conversation that understands it, and delegates the rest to Machines instead of native sub-agents: find or create a workflow, launch it, supervise it, collect its result. |
 | [machine-builder](skills/machine-builder/SKILL.md) | Creates a task-specific Machine when no existing one fits. |
 
 Example prompts:
@@ -210,6 +210,9 @@ A few rules of thumb:
 - Run setup when onboarding a project or when coverage has a real gap, not for
   every assignment. It builds working workflows, not just recommendations, and
   doesn't impose a fixed suite.
+- The conversation that understands a piece of work does it, using Machines for
+  checks, fresh review and delivery. Delegate what doesn't need its context, and
+  split work by context, not by kind.
 - The orchestrator owns the map. Workers carry out the Machine state they were
   given.
 - Existing budgets, permissions and Human approvals stay in force.

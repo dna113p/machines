@@ -9,6 +9,13 @@ should actually launch a suitable workflow, not stop at discovery. Tiny edits,
 simple answers, and single read-only commands remain direct. When no safe workflow
 or working integration fits, the agent should explain the concrete fallback.
 
+The conversation that understands a piece of work does it, using Machines for
+checks, fresh review, and delivery. It delegates when that context is not needed:
+a separate feature that can run in parallel, a review that needs clean eyes, or
+work for later as a ticket. It splits work by context, not by kind, and writes a
+ticket as the problem and its fences, not the design: Goal, observable Acceptance,
+Forbidden, and where the context lives.
+
 This is agent guidance, not a runtime enforcement hook or automatic model-spending
 policy. Operations are preferred for mechanical checks. Existing permissions,
 budgets, and Human decisions still apply. Worker prompts identify an already

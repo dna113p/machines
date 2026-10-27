@@ -1,6 +1,6 @@
 ---
 name: machine-delegation
-description: Use proactively before delegating implementation, debugging, review, research, or other bounded multi-step work. Prefer Machine runs to native sub-agents, reusing or creating a scoped workflow with explicit outcomes. The user need not name Machines; keep trivial work direct.
+description: Use proactively before delegating implementation, debugging, review, research, or other bounded multi-step work. Keep work this conversation understands; delegate what does not need its context, preferring Machine runs to native sub-agents, reusing or creating a scoped workflow with explicit outcomes. The user need not name Machines; keep trivial work direct.
 ---
 
 # Machine delegation
@@ -11,15 +11,21 @@ missing/stale coverage, use [machine-project-setup](../machine-project-setup/SKI
 to build the useful project workflows before repeated delegation. Reuse established
 coverage for normal tasks; workers do not repeat project setup.
 
-Use a Machine run as the unit of delegated work. The coordinating agent owns the
-user's goal, task boundaries, and integration of results; the Machine owns its
-states, verification, retries, and escalation. Complete small local steps directly.
-Launch a suitable Machine instead of native sub-agents without requiring the user
-to name this skill. Discovery is a decision step, not the completed work: start the
-selected workflow and inspect its result. Use deterministic Operations for checks
-rather than paying another model to run commands. Never broaden permissions or
-model spending merely to satisfy the preference. If the tools or a safe workflow
-are unavailable, state the concrete reason for proceeding directly.
+The conversation that understands a piece of work should do it; handing it to a
+fresh Agent loses that context. Delegate when the context is not needed: a separate
+feature that can run in parallel, a review that needs clean eyes, or work for later
+as a ticket. Split work by context, not by kind: changes whose decisions depend on
+each other stay in one conversation or ticket; unrelated changes get their own.
+Keep using Machines for what they add: deterministic Operations for checks, a
+fresh Agent for review, and a route that delivers the finished work.
+
+When you do delegate, use a Machine run as the unit of work instead of a native
+sub-agent, without requiring the user to name this skill. The coordinating agent
+owns the user's goal, task boundaries, and integration of results; the Machine owns
+its states, verification, retries, and escalation. Discovery is a decision step,
+not the completed work: start the selected workflow and inspect its result. Never
+broaden permissions or model spending merely to satisfy the preference. If the
+tools or a safe workflow are unavailable, state the concrete reason for proceeding directly.
 
 If already running as a Machine's Agent state, execute that bounded assignment
 and return its evidence/outcome. Do not delegate it again unless explicitly asked
@@ -55,10 +61,9 @@ result contract to follow. Add review or bounded revision states when the work
 needs them, and Human states only for enforced-column decisions.
 
 List again after edits. Resolve required roles using exact preset names from
-`machine_agents`, passing role-to-preset overrides at launch. A listing's readiness
-only checks metadata and bindings; the harness still needs to be installed and
-configured. The built-in `codex` preset is read-only. Choose or configure a preset
-that can perform the authorized task, following the builder's authoring guide.
+`machine_agents`, passing role-to-preset overrides at launch. Listed readiness checks
+only metadata and bindings, not an installed harness. The built-in `codex` preset is
+read-only; choose or configure one that can perform the authorized task.
 
 ## Supply a complete assignment
 
@@ -79,6 +84,12 @@ State these five fields for each assignment:
 
 A field that cannot be filled means the unit is not scoped yet.
 
+Write a ticket or assignment as the problem and its fences, not the design: the
+Goal (who needs what, and why), Acceptance as observable results, what is Forbidden,
+and where the context lives, such as the originating conversation or thread. Paths
+are a hint. Leave implementation choices, exact wording, and test lists to the
+Agent; it reports them as assumptions.
+
 Require a non-empty `summary` with evidence, plus optional string-list result fields:
 
 - `assumptions`: answers the Agent assumed.
@@ -92,12 +103,10 @@ Keep task details in input rather than hardcoding each assignment into a new
 workflow. Give each run a distinct artifact destination.
 
 **Plan result retrieval before launch.** `machine_status` exposes state, Human
-requests, errors, and optional JSON Machine output, not arbitrary Agent transcripts
-or event payloads. Have the Machine return useful JSON output, have the worker
-write a report, or capture its returned event and save it in an Operation. The
-Machine-owned options also support read-only Agent presets. Include findings or
-changes, verification evidence, and blockers. An Operation's writes must stay
-within the task's scope even when the Agent itself is read-only.
+requests, errors, and optional JSON Machine output, not Agent transcripts or event
+payloads. Have the Machine return JSON output, have the worker write a report, or
+save its returned event in an Operation, whose writes stay within the task's scope
+even when the Agent is read-only. Include findings or changes, evidence, and blockers.
 
 Delegate independent tasks concurrently only when their workspaces and writes are
 compatible. Use isolated worktrees for overlapping code changes; runs do not create
@@ -113,27 +122,20 @@ expected success state, and result path. Start once; a slow response is not a
 reason to launch a duplicate. If the launch response is lost, inspect this session's
 statuses before deciding whether another run is needed.
 
-Continue independent work while the run executes. Read `machine_status` with its
-exact `runId` when a result is needed; avoid continuous polling.
+Continue independent work while the run executes; read `machine_status` with its
+exact `runId` when a result is needed. In Pi 1.4+, `machine_start` registers the
+initiating session for wake delivery on completion, failure, and each new
+unanswered Human request: yield the turn when no independent work remains, and
+avoid blocking wait tools and status polling. On a wake, retrieve `machine_status`
+with the message's exact run id before reporting or relaying the current Human
+question. A wake never authorizes an agent to answer a Human decision itself.
 
-In Pi 1.4+, `machine_start` registers the initiating session for wake delivery on
-completion, failure, and each new unanswered Human request. Continue independent
-work, then yield the turn when none remains. Avoid blocking wait tools and
-model-driven status polling: Pi delivers busy events after full settlement.
-On a wake, retrieve `machine_status` with the message's exact run id before
-reporting or relaying the current Human question. A wake never authorizes an
-agent to answer a Human decision itself.
-
-For an external run, call `machine_attach({ target: "<ticket-or-run-id>" })`
-in the Pi session that should continue. `machine_watch` stays passive. Attachment
-observes without owning, answering, or stopping the run; obtain the Human's answer
-through the owner's response interface. Pi and the publisher must share a private run-status
-directory with publication enabled. `machine_detach` with the same target cancels
-its registration and pending delivery where no overlapping registration remains.
-Reload, session switch, and shutdown clear active registrations; reattach in the
-replacement runtime. A closed Pi session cannot wake. See the
+For an external run, call `machine_attach({ target: "<ticket-or-run-id>" })` in the
+Pi session that should continue; `machine_detach` with the same target cancels it.
+Attachment observes without owning, answering, or stopping the run, and
+`machine_watch` stays passive. See the
 [Pi integration](../../docs/integrations.md#wake-the-coordinating-pi-session) for
-polling, receipt persistence, and retrieval limits.
+the shared run-status directory, reloads, closed sessions, and retrieval limits.
 
 | Status | Coordinator action |
 | --- | --- |

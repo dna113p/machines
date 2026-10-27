@@ -12,7 +12,11 @@ Do not repeat project setup for each assignment.
 
 Before starting multi-step work, discover suitable Machines instead of waiting for
 the user to ask for one. Use an existing workflow when it fits; writing a new
-Machine is not the goal. For delegated work, follow
+Machine is not the goal. The conversation that understands the work should do it,
+using Machines for checks, fresh review, and delivery. Delegate only when that
+context is not needed: a separate feature that can run in parallel, a review that
+needs clean eyes, or work for later as a ticket. Split work by context, not by kind.
+When delegating, prefer a Machine run to a native sub-agent and follow
 [machine-delegation](../machine-delegation/SKILL.md). If already executing an Agent
 state inside a Machine, do that assigned work directly rather than recursively
 wrapping it in another Machine. Preserve the authorized effects and model budget.

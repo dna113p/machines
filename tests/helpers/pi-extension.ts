@@ -10,6 +10,7 @@ export interface Result {
 
 interface RegisteredTool {
   readonly name: string;
+  readonly description?: string;
   readonly promptSnippet?: string;
   readonly promptGuidelines?: readonly string[];
   execute(id: string, params: Record<string, unknown>, signal: AbortSignal | undefined,
