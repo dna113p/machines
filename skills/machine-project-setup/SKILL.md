@@ -261,8 +261,9 @@ reachable through the project's established skill-installation route; resolve
 symlinked source directories before following relative documentation links. Do not
 edit global agent settings or install duplicate extensions as incidental setup.
 
-For normal assignments, the orchestrator consults the map, validates the selected
-Machine's current contract, and uses
+The orchestrator does the work it holds the context for, using the map's checks,
+review, and delivery routes. For work it delegates, it consults the map, validates
+the selected Machine's current contract, and uses
 [machine-delegation](../machine-delegation/SKILL.md) to launch and supervise it.
 Workers execute their bounded state; they do not bootstrap the project again.
 If no route fits, the orchestrator may build a task-specific Machine and promote

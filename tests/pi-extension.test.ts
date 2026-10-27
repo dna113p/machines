@@ -238,6 +238,18 @@ test("coordinators discover Machines before multi-step work without requiring an
 });
 
 
+test("Pi keeps work with the conversation that has its context and delegates the rest to Machines", () => {
+  const tool = setup().tools.get("machine_list");
+  assert.match(tool?.description ?? "", /Before delegating/u);
+  const guidance = tool?.promptGuidelines?.join(" ") ?? "";
+  assert.match(guidance, /The conversation that understands a piece of work should do it/u);
+  assert.match(guidance, /separate feature that can run in parallel, a review that needs clean eyes, or work for later as a ticket/u);
+  assert.match(guidance, /Split work by context, not by kind/u);
+  assert.match(guidance, /When delegating,[^.]*rather than[^.]*native sub-agents/u);
+  assert.match(guidance, /problem and its fences, not the design: Goal[^.]*observable[^.]*Forbidden[^.]*where the context lives/u);
+});
+
+
 test("Pi gives project orchestrators the same project setup entry point", () => {
   const tool = setup().tools.get("machine_list");
   const guidance = tool?.promptGuidelines?.join(" ") ?? "";
